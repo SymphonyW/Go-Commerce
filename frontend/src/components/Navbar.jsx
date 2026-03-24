@@ -23,8 +23,14 @@ const Navbar = () => {
           <Link to="/products" className="navbar-link">
             商品
           </Link>
+          <Link to="/merchants" className="navbar-link">
+            商户管理
+          </Link>
           {token ? (
             <>
+              <Link to="/cart" className="navbar-link">
+                购物车
+              </Link>
               <Link to="/orders" className="navbar-link">
                 订单
               </Link>

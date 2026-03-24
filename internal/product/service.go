@@ -23,6 +23,9 @@ func NewService(db *gorm.DB) *Service {
 }
 
 // CreateProduct 创建产品：创建新的产品记录
+// 功能：创建新产品，设置商品归属商家
+// 参数：req (*pb.CreateProductRequest) - 产品创建请求
+// 返回：(*pb.CreateProductResponse, error) - 产品创建响应和错误
 func (s *Service) CreateProduct(ctx context.Context, req *pb.CreateProductRequest) (*pb.CreateProductResponse, error) {
 	// 构建产品对象
 	product := Product{
@@ -32,6 +35,7 @@ func (s *Service) CreateProduct(ctx context.Context, req *pb.CreateProductReques
 		Stock:       req.Stock,
 		Category:    req.Category,
 		ImageURL:    req.ImageUrl,
+		MerchantID:  uint(req.MerchantId), // 设置商家ID
 	}
 
 	// 保存到数据库
@@ -99,5 +103,6 @@ func convertToPBProduct(product *Product) *pb.Product {
 		Stock:       int32(product.Stock),
 		Category:    product.Category,
 		ImageUrl:    product.ImageURL,
+		MerchantId:  int64(product.MerchantID), // 添加商家ID
 	}
 }

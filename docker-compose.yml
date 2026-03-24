@@ -98,6 +98,19 @@ services:
     environment:
       REDIS_ADDR: "redis:6379"
 
+  merchant-service:
+    build:
+      context: .
+      dockerfile: ./cmd/merchant-service/Dockerfile
+    container_name: ecommerce-merchant-service
+    ports:
+      - "50055:50054"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
+
   api-gateway:
     build:
       context: .
@@ -119,6 +132,7 @@ services:
       PRODUCT_SERVICE_ADDR: "product-service:50052"
       ORDER_SERVICE_ADDR: "order-service:50053"
       CART_SERVICE_ADDR: "cart-service:50054"
+      MERCHANT_SERVICE_ADDR: "merchant-service:50054"
 
 volumes:
   mysql_data:

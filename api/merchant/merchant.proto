@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package merchant;
+
+option go_package = "go-commerce/api/merchant";
+
+message Merchant {
+  int64 id = 1;
+  string name = 2;
+  string contact_info = 3;
+  string created_at = 4;
+}
+
+message CreateMerchantRequest {
+  string name = 1;
+  string contact_info = 2;
+}
+
+message CreateMerchantResponse {
+  Merchant merchant = 1;
+}
+
+message GetMerchantRequest {
+  int64 id = 1;
+}
+
+message GetMerchantResponse {
+  Merchant merchant = 1;
+}
+
+message ListMerchantsRequest {
+  int32 page = 1;
+  int32 page_size = 2;
+}
+
+message ListMerchantsResponse {
+  repeated Merchant merchants = 1;
+  int64 total = 2;
+}
+
+message AddProductRequest {
+  int64 merchant_id = 1;
+  string name = 2;
+  string description = 3;
+  float price = 4;
+  int32 stock = 5;
+  string category = 6;
+  string image_url = 7;
+}
+
+message AddProductResponse {
+  int64 product_id = 1;
+}
+
+message DeleteProductRequest {
+  int64 merchant_id = 1;
+  int64 product_id = 2;
+}
+
+message DeleteProductResponse {
+  bool success = 1;
+}
+
+service MerchantService {
+  rpc CreateMerchant(CreateMerchantRequest) returns (CreateMerchantResponse);
+  rpc GetMerchant(GetMerchantRequest) returns (GetMerchantResponse);
+  rpc ListMerchants(ListMerchantsRequest) returns (ListMerchantsResponse);
+  rpc AddProduct(AddProductRequest) returns (AddProductResponse);
+  rpc DeleteProduct(DeleteProductRequest) returns (DeleteProductResponse);
+}

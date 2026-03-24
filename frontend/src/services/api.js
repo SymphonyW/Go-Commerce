@@ -99,6 +99,110 @@ export const orderAPI = {
     const response = await api.get('/orders');
     return response.data;
   },
+  /**
+   * 取消订单
+   * @param {number} id - 订单ID
+   * @returns {Promise} 取消结果
+   */
+  cancelOrder: async (id) => {
+    const response = await api.put(`/orders/${id}/cancel`);
+    return response.data;
+  },
+};
+
+// 商户相关API
+export const merchantAPI = {
+	/**
+	 * 创建商户
+	 * @param {Object} merchantData - 商户数据
+	 * @returns {Promise} 创建的商户
+	 */
+	createMerchant: async (merchantData) => {
+		const response = await api.post('/merchants', merchantData);
+		return response.data;
+	},
+	/**
+	 * 获取商户详情
+	 * @param {number} id - 商户ID
+	 * @returns {Promise} 商户详情
+	 */
+	getMerchant: async (id) => {
+		const response = await api.get(`/merchants/${id}`);
+		return response.data;
+	},
+	/**
+	 * 获取商户列表
+	 * @returns {Promise} 商户列表
+	 */
+	listMerchants: async () => {
+		const response = await api.get('/merchants');
+		return response.data;
+	},
+	/**
+	 * 商户添加产品
+	 * @param {Object} productData - 产品数据
+	 * @returns {Promise} 添加的产品
+	 */
+	addProduct: async (productData) => {
+		const response = await api.post('/merchants/products', productData);
+		return response.data;
+	},
+	/**
+	 * 商户删除产品
+	 * @param {Object} data - 包含商户ID和产品ID的数据
+	 * @returns {Promise} 删除结果
+	 */
+	deleteProduct: async (data) => {
+		const response = await api.delete('/merchants/products', { data });
+		return response.data;
+	},
+};
+
+// 购物车相关API
+export const cartAPI = {
+	/**
+	 * 添加商品到购物车
+	 * @param {Object} itemData - 商品数据
+	 * @returns {Promise} 添加的购物车商品
+	 */
+	addItem: async (itemData) => {
+		const response = await api.post('/cart/items', itemData);
+		return response.data;
+	},
+	/**
+	 * 获取购物车
+	 * @returns {Promise} 购物车详情
+	 */
+	getCart: async () => {
+		const response = await api.get('/cart');
+		return response.data;
+	},
+	/**
+	 * 更新购物车商品数量
+	 * @param {Object} itemData - 商品数据
+	 * @returns {Promise} 更新后的购物车商品
+	 */
+	updateItem: async (itemData) => {
+		const response = await api.put('/cart/items', itemData);
+		return response.data;
+	},
+	/**
+	 * 删除购物车商品
+	 * @param {Object} itemData - 商品数据
+	 * @returns {Promise} 删除结果
+	 */
+	deleteItem: async (itemData) => {
+		const response = await api.delete('/cart/items', { data: itemData });
+		return response.data;
+	},
+	/**
+	 * 清空购物车
+	 * @returns {Promise} 清空结果
+	 */
+	clearCart: async () => {
+		const response = await api.delete('/cart');
+		return response.data;
+	},
 };
 
 export default api;

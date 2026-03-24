@@ -23,6 +23,7 @@
 3. **产品服务**：管理产品信息
 4. **订单服务**：处理订单创建和管理
 5. **购物车服务**：管理用户购物车
+6. **商户服务**：管理商户信息和商户产品
 
 各服务之间通过gRPC进行通信，数据存储使用MySQL和Redis，消息传递使用RabbitMQ。前端通过API网关与后端服务交互。
 
@@ -44,6 +45,11 @@
         │                  │
         │                  ↓
         │            ┌─────────────┐
+        │            │  商户服务   │
+        │            └─────────────┘
+        │                  │
+        │                  ↓
+        │            ┌─────────────┐
         └────────────│  购物车服务  │
                      └─────────────┘
 ```
@@ -55,12 +61,14 @@ Go-Commerce/
 ├── api/                # gRPC服务定义
 │   ├── auth/           # 认证服务proto文件
 │   ├── cart/           # 购物车服务proto文件
+│   ├── merchant/       # 商户服务proto文件
 │   ├── order/          # 订单服务proto文件
 │   └── product/        # 产品服务proto文件
 ├── cmd/                # 服务入口点
 │   ├── api-gateway/    # API网关服务
 │   ├── auth-service/   # 认证服务
 │   ├── cart-service/   # 购物车服务
+│   ├── merchant-service/ # 商户服务
 │   ├── order-service/  # 订单服务
 │   └── product-service/ # 产品服务
 ├── doc/                # 项目文档
@@ -71,6 +79,7 @@ Go-Commerce/
 ├── internal/           # 内部包
 │   ├── auth/           # 认证服务内部实现
 │   ├── cart/           # 购物车服务内部实现
+│   ├── merchant/       # 商户服务内部实现
 │   ├── order/          # 订单服务内部实现
 │   └── product/        # 产品服务内部实现
 ├── pkg/                # 公共包
@@ -146,14 +155,36 @@ Go-Commerce/
 **职责**：管理用户购物车。
 
 **核心功能**：
-- 添加商品：向购物车添加商品
+- 添加商品：向购物车添加商品，从产品服务获取实际商品信息
 - 移除商品：从购物车移除商品
 - 更新数量：更新购物车中商品的数量
 - 清空购物车：清空用户的购物车
+- 获取购物车：获取用户的完整购物车信息
 
-**主要文件**：`internal/cart/service.go`：购物车服务实现
+**主要文件**：
+- `internal/cart/service.go`：购物车服务实现
+- `cmd/cart-service/main.go`：购物车服务入口
 
-### 4.6 前端应用
+**技术特点**：
+- 使用Redis存储购物车数据，提高性能
+- 与产品服务集成，确保购物车中的商品信息与系统保持一致
+- 支持购物车为空时的正确处理，避免前端显示空白页面
+
+### 4.6 商户服务
+
+**职责**：管理商户信息和商户产品。
+
+**核心功能**：
+- 商户管理：创建、查询商户信息
+- 产品管理：商户添加、删除产品
+- 商户列表：获取商户列表
+
+**主要文件**：
+- `internal/merchant/service.go`：商户服务实现
+- `internal/merchant/grpc_service.go`：商户服务gRPC实现
+- `internal/merchant/model.go`：商户模型定义
+
+### 4.7 前端应用
 
 **职责**：提供用户界面，与API网关交互。
 
@@ -162,9 +193,10 @@ Go-Commerce/
 - 产品浏览：产品列表、详情页面
 - 购物车管理：添加、移除商品
 - 订单管理：创建订单、查看订单历史
+- 商户管理：创建商户、管理商户产品
 
 **主要文件**：
 - `frontend/src/main.jsx`：前端应用入口
 - `frontend/src/components/Navbar.jsx`：导航组件
-- `frontend/src/pages/`：各页面组件
-- `frontend/src/services/api.js`：API调用服务
+- `frontend/src/pages/`：各页面组件，包括新增的Merchants.jsx
+- `frontend/src/services/api.js`：API调用服务，包含商户相关API

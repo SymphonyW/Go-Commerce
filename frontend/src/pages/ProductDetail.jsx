@@ -1,6 +1,21 @@
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { productAPI, orderAPI } from '../services/api';
+import { productAPI, orderAPI, cartAPI } from '../services/api';
+
+// 处理图片URL，将维基百科页面URL转换为实际图片文件URL
+const processImageUrl = (url) => {
+  if (!url) return 'https://via.placeholder.com/400';
+  
+  // 检查是否是维基百科的图片页面URL
+  if (url.includes('wikipedia.org/wiki/File:')) {
+    // 提取文件名
+    const fileName = url.split('/').pop();
+    // 构建实际的图片文件URL
+    return `https://upload.wikimedia.org/wikipedia/commons/thumb/${fileName.charAt(0)}/${fileName.charAt(0) + fileName.charAt(1)}/${fileName}/640px-${fileName}`;
+  }
+  
+  return url;
+};
 
 const ProductDetail = () => {
   const { id } = useParams();
@@ -26,9 +41,23 @@ const ProductDetail = () => {
     fetchProduct();
   }, [id]);
 
-  const handleAddToCart = () => {
-    // 这里可以实现添加到购物车的逻辑
-    alert('商品已添加到购物车');
+  const handleAddToCart = async () => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      navigate('/login');
+      return;
+    }
+
+    try {
+      await cartAPI.addItem({
+        product_id: product.id,
+        quantity: quantity
+      });
+      alert('商品已添加到购物车');
+    } catch (error) {
+      console.error('Failed to add to cart:', error);
+      alert('添加到购物车失败，请稍后重试');
+    }
   };
 
   const handleBuyNow = async () => {
@@ -68,7 +97,7 @@ const ProductDetail = () => {
       <div className="product-detail-container">
         <div className="product-detail-image">
           <img 
-            src={product.imageUrl || 'https://via.placeholder.com/400'} 
+            src={processImageUrl(product.image_url)} 
             alt={product.name} 
           />
         </div>

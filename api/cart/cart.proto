@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package cart;
 
-option go_package = "./";
+option go_package = "go-commerce/api/cart";
 
 message CartItem {
   int64 product_id = 1;

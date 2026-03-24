@@ -60,3 +60,7 @@ coverage/
 # 文档生成
 # API文档生成目录
 docs/api/
+
+# # 相关文档
+# doc/
+# INTERVIEW.md

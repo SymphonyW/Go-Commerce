@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package product;
 
-option go_package = "./";
+option go_package = "go-commerce/api/product";
 
 message Product {
   int64 id = 1;
@@ -12,6 +12,7 @@ message Product {
   int32 stock = 5;
   string category = 6;
   string image_url = 7;
+  int64 merchant_id = 8;
 }
 
 message CreateProductRequest {
@@ -21,6 +22,7 @@ message CreateProductRequest {
   int32 stock = 4;
   string category = 5;
   string image_url = 6;
+  int64 merchant_id = 7;
 }
 
 message CreateProductResponse {

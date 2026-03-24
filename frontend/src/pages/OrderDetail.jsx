@@ -8,6 +8,7 @@ const OrderDetail = () => {
   const [order, setOrder] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [cancelling, setCancelling] = useState(false);
 
   useEffect(() => {
     const fetchOrder = async () => {
@@ -35,6 +36,28 @@ const OrderDetail = () => {
     return <div className="loading">加载中...</div>;
   }
 
+  const handleCancelOrder = async () => {
+    if (window.confirm('确定要取消这个订单吗？')) {
+      try {
+        setCancelling(true);
+        const response = await orderAPI.cancelOrder(id);
+        if (response.success) {
+          // 重新获取订单信息
+          const updatedOrder = await orderAPI.getOrder(id);
+          setOrder(updatedOrder.order);
+          alert('订单取消成功');
+        } else {
+          alert(response.message);
+        }
+      } catch (error) {
+        console.error('取消订单失败:', error);
+        alert('取消订单失败，请稍后重试');
+      } finally {
+        setCancelling(false);
+      }
+    }
+  };
+
   if (error || !order) {
     return <div className="error-message">{error || '订单不存在'}</div>;
   }
@@ -45,10 +68,21 @@ const OrderDetail = () => {
       <div className="order-detail-card">
         <div className="order-detail-header">
           <div className="order-detail-id">订单号: {order.id}</div>
-          <div className={`order-detail-status ${order.status}`}>
-            {order.status === 'pending' ? '待处理' : 
-             order.status === 'completed' ? '已完成' : 
-             order.status === 'cancelled' ? '已取消' : order.status}
+          <div className="order-detail-status-container">
+            <div className={`order-detail-status ${order.status}`}>
+              {order.status === 'pending' ? '待处理' : 
+               order.status === 'completed' ? '已完成' : 
+               order.status === 'cancelled' ? '已取消' : order.status}
+            </div>
+            {order.status === 'pending' && (
+              <button 
+                onClick={handleCancelOrder}
+                disabled={cancelling}
+                className="btn btn-danger btn-sm"
+              >
+                {cancelling ? '取消中...' : '取消订单'}
+              </button>
+            )}
           </div>
         </div>
         <div className="order-detail-info">

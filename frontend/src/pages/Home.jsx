@@ -41,7 +41,7 @@ const Home = () => {
           {products.slice(0, 4).map((product) => (
             <div key={product.id} className="product-card">
               <img 
-                src={product.imageUrl || 'https://via.placeholder.com/200'} 
+                src={product.image_url || 'https://via.placeholder.com/200'} 
                 alt={product.name} 
                 className="product-image"
               />

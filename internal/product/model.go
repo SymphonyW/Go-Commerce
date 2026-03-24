@@ -12,4 +12,5 @@ type Product struct {
 	Stock       int32   `gorm:"not null;default:0"`
 	Category    string  `gorm:"index"`
 	ImageURL    string
+	MerchantID  uint    `gorm:"not null"`
 }

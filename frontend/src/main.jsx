@@ -8,8 +8,12 @@ import Register from './pages/Register';
 import Login from './pages/Login';
 import Products from './pages/Products';
 import ProductDetail from './pages/ProductDetail';
+import Cart from './pages/Cart';
 import Orders from './pages/Orders';
 import OrderDetail from './pages/OrderDetail';
+import MerchantList from './pages/MerchantList';
+import MerchantCreate from './pages/MerchantCreate';
+import MerchantProducts from './pages/MerchantProducts';
 
 function App() {
   return (
@@ -23,6 +27,10 @@ function App() {
             <Route path="/login" element={<Login />} />
             <Route path="/products" element={<Products />} />
             <Route path="/products/:id" element={<ProductDetail />} />
+            <Route path="/cart" element={<Cart />} />
+            <Route path="/merchants" element={<MerchantList />} />
+            <Route path="/merchants/create" element={<MerchantCreate />} />
+            <Route path="/merchants/:id/products" element={<MerchantProducts />} />
             <Route path="/orders" element={<Orders />} />
             <Route path="/orders/:id" element={<OrderDetail />} />
           </Routes>
