@@ -1,0 +1,62 @@
+# Go项目相关
+# 编译生成的二进制文件
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 依赖包目录
+vendor/
+
+# 构建输出目录
+build/
+
+# 临时文件
+*.tmp
+*.temp
+
+# 前端项目相关
+# npm依赖
+node_modules/
+
+# 构建输出目录
+dist/
+
+# 环境变量文件
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# 日志文件
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# 通用文件
+# IDE配置文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统相关文件
+.DS_Store
+Thumbs.db
+
+# Docker相关
+# Docker构建缓存
+.dockerignore
+
+# 测试相关
+# 测试覆盖率报告
+coverage/
+
+# 文档生成
+# API文档生成目录
+docs/api/

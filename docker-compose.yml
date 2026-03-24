@@ -1,0 +1,124 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: ecommerce-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: ecommerce
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: ecommerce-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: ecommerce-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: ./cmd/auth-service/Dockerfile
+    container_name: ecommerce-auth-service
+    ports:
+      - "50051:50051"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
+
+  product-service:
+    build:
+      context: .
+      dockerfile: ./cmd/product-service/Dockerfile
+    container_name: ecommerce-product-service
+    ports:
+      - "50052:50052"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
+
+  order-service:
+    build:
+      context: .
+      dockerfile: ./cmd/order-service/Dockerfile
+    container_name: ecommerce-order-service
+    ports:
+      - "50053:50053"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+
+  cart-service:
+    build:
+      context: .
+      dockerfile: ./cmd/cart-service/Dockerfile
+    container_name: ecommerce-cart-service
+    ports:
+      - "50054:50054"
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_ADDR: "redis:6379"
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: ./cmd/api-gateway/Dockerfile
+    container_name: ecommerce-api-gateway
+    ports:
+      - "8080:8080"
+    depends_on:
+      auth-service:
+        condition: service_started
+      product-service:
+        condition: service_started
+      order-service:
+        condition: service_started
+      cart-service:
+        condition: service_started
+    environment:
+      AUTH_SERVICE_ADDR: "auth-service:50051"
+      PRODUCT_SERVICE_ADDR: "product-service:50052"
+      ORDER_SERVICE_ADDR: "order-service:50053"
+      CART_SERVICE_ADDR: "cart-service:50054"
+
+volumes:
+  mysql_data:

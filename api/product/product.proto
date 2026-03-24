@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package product;
+
+option go_package = "./";
+
+message Product {
+  int64 id = 1;
+  string name = 2;
+  string description = 3;
+  float price = 4;
+  int32 stock = 5;
+  string category = 6;
+  string image_url = 7;
+}
+
+message CreateProductRequest {
+  string name = 1;
+  string description = 2;
+  float price = 3;
+  int32 stock = 4;
+  string category = 5;
+  string image_url = 6;
+}
+
+message CreateProductResponse {
+  Product product = 1;
+}
+
+message GetProductRequest {
+  int64 id = 1;
+}
+
+message GetProductResponse {
+  Product product = 1;
+}
+
+message ListProductsRequest {
+  int32 page = 1;
+  int32 page_size = 2;
+  string category = 3;
+}
+
+message ListProductsResponse {
+  repeated Product products = 1;
+  int64 total = 2;
+}
+
+message UpdateProductRequest {
+  int64 id = 1;
+  optional string name = 2;
+  optional string description = 3;
+  optional float price = 4;
+  optional int32 stock = 5;
+  optional string category = 6;
+  optional string image_url = 7;
+}
+
+message UpdateProductResponse {
+  Product product = 1;
+}
+
+message DeleteProductRequest {
+  int64 id = 1;
+}
+
+message DeleteProductResponse {
+  bool success = 1;
+}
+
+service ProductService {
+  rpc CreateProduct(CreateProductRequest) returns (CreateProductResponse);
+  rpc GetProduct(GetProductRequest) returns (GetProductResponse);
+  rpc ListProducts(ListProductsRequest) returns (ListProductsResponse);
+  rpc UpdateProduct(UpdateProductRequest) returns (UpdateProductResponse);
+  rpc DeleteProduct(DeleteProductRequest) returns (DeleteProductResponse);
+}
