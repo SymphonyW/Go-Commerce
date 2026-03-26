@@ -104,7 +104,7 @@ services:
       dockerfile: ./cmd/merchant-service/Dockerfile
     container_name: ecommerce-merchant-service
     ports:
-      - "50055:50054"
+      - "50055:50055"
     depends_on:
       mysql:
         condition: service_healthy
