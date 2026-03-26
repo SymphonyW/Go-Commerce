@@ -1,3 +1,5 @@
+// 购物车服务入口文件
+// 负责启动购物车服务，处理购物车的添加、更新和删除操作
 package main
 
 import (
@@ -14,10 +16,11 @@ import (
 )
 
 func main() {
+	// 连接Redis
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
-		Password: "", // no password set
-		DB:       0,  // use default DB
+		Password: "", // 无密码
+		DB:       0,  // 使用默认数据库
 	})
 
 	// 连接产品服务
@@ -29,12 +32,19 @@ func main() {
 	defer productConn.Close()
 	productClient := pbProduct.NewProductServiceClient(productConn)
 
+	// 监听TCP端口
 	lis, err := net.Listen("tcp", ":50054")
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
+	
+	// 创建gRPC服务器
 	s := grpc.NewServer()
+	
+	// 注册购物车服务
 	pb.RegisterCartServiceServer(s, cart.NewService(redisClient, productClient))
+	
+	// 启动服务
 	log.Printf("cart service listening at %v", lis.Addr())
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
