@@ -28,7 +28,7 @@ func main() {
 	// 数据库连接字符串
 	// 格式：用户名:密码@tcp(主机:端口)/数据库名?参数
 	dsn := "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
-
+	
 	// 连接数据库
 	// 使用GORM打开数据库连接
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
@@ -79,15 +79,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
-
+	
 	// 创建gRPC服务器
 	s := grpc.NewServer()
-
+	
 	// 注册订单服务
 	// 将order.NewService(db, ch)创建的服务实例注册到gRPC服务器
 	// 传入数据库连接和RabbitMQ通道
 	pb.RegisterOrderServiceServer(s, order.NewService(db, ch))
-
+	
 	// 启动服务
 	// 打印服务监听地址
 	log.Printf("order service listening at %v", lis.Addr())

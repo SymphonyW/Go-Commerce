@@ -28,9 +28,9 @@ func main() {
 	// 连接Redis
 	// 创建Redis客户端，连接本地Redis服务器
 	redisClient := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379", // Redis服务器地址
-		Password: "",               // 无密码
-		DB:       0,                // 使用默认数据库
+		Addr:     "localhost:6379",  // Redis服务器地址
+		Password: "",                 // 无密码
+		DB:       0,                  // 使用默认数据库
 	})
 
 	// 连接产品服务
@@ -49,15 +49,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
-
+	
 	// 创建gRPC服务器
 	s := grpc.NewServer()
-
+	
 	// 注册购物车服务
 	// 将cart.NewService(redisClient, productClient)创建的服务实例注册到gRPC服务器
 	// 传入Redis客户端和产品服务客户端
 	pb.RegisterCartServiceServer(s, cart.NewService(redisClient, productClient))
-
+	
 	// 启动服务
 	// 打印服务监听地址
 	log.Printf("cart service listening at %v", lis.Addr())
