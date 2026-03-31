@@ -47,6 +47,7 @@ services:
     build:
       context: .
       dockerfile: ./cmd/auth-service/Dockerfile
+      pull: false
     container_name: ecommerce-auth-service
     ports:
       - "50051:50051"
@@ -60,6 +61,7 @@ services:
     build:
       context: .
       dockerfile: ./cmd/product-service/Dockerfile
+      pull: false
     container_name: ecommerce-product-service
     ports:
       - "50052:50052"
@@ -73,6 +75,7 @@ services:
     build:
       context: .
       dockerfile: ./cmd/order-service/Dockerfile
+      pull: false
     container_name: ecommerce-order-service
     ports:
       - "50053:50053"
@@ -89,6 +92,7 @@ services:
     build:
       context: .
       dockerfile: ./cmd/cart-service/Dockerfile
+      pull: false
     container_name: ecommerce-cart-service
     ports:
       - "50054:50054"
@@ -102,19 +106,24 @@ services:
     build:
       context: .
       dockerfile: ./cmd/merchant-service/Dockerfile
+      pull: false
     container_name: ecommerce-merchant-service
     ports:
       - "50055:50055"
     depends_on:
       mysql:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
       DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
 
   api-gateway:
     build:
       context: .
       dockerfile: ./cmd/api-gateway/Dockerfile
+      pull: false
     container_name: ecommerce-api-gateway
     ports:
       - "8080:8080"
@@ -132,7 +141,7 @@ services:
       PRODUCT_SERVICE_ADDR: "product-service:50052"
       ORDER_SERVICE_ADDR: "order-service:50053"
       CART_SERVICE_ADDR: "cart-service:50054"
-      MERCHANT_SERVICE_ADDR: "merchant-service:50054"
+      MERCHANT_SERVICE_ADDR: "merchant-service:50055"
 
 volumes:
   mysql_data:

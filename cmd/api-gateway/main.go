@@ -171,8 +171,8 @@ func main() {
 		private.DELETE("/cart", gateway.handleClearCart)            // 清空购物车
 	}
 
-	// 启动HTTP服务器，监听8081端口
-	log.Fatal(r.Run(":8081"))
+	// 启动HTTP服务器，监听8080端口
+	log.Fatal(r.Run(":8080"))
 }
 
 // authMiddleware 认证中间件

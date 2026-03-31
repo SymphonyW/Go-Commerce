@@ -28,14 +28,14 @@ func main() {
 	// 连接Redis
 	// 创建Redis客户端，连接本地Redis服务器
 	redisClient := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",  // Redis服务器地址
+		Addr:     "redis:6379",  // Redis服务器地址
 		Password: "",                 // 无密码
 		DB:       0,                  // 使用默认数据库
 	})
 
 	// 连接产品服务
 	// 用于获取产品信息
-	productServiceAddr := "localhost:50052"
+	productServiceAddr := "product-service:50052"
 	productConn, err := grpc.Dial(productServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatalf("did not connect to product service: %v", err)

@@ -6,6 +6,7 @@ package main
 import (
 	"log"
 	"net"
+	"os"
 
 	// gRPC服务器：用于提供gRPC服务
 	"google.golang.org/grpc"
@@ -23,9 +24,12 @@ import (
 // main 函数是product-service服务的入口点
 // 负责初始化数据库连接、自动迁移表结构、启动gRPC服务器
 func main() {
-	// 数据库连接字符串
-	// 格式：用户名:密码@tcp(主机:端口)/数据库名?参数
-	dsn := "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
+	// 从环境变量获取数据库连接字符串
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		// 默认值，用于本地开发
+		dsn = "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
+	}
 
 	// 连接数据库
 	// 使用GORM打开数据库连接

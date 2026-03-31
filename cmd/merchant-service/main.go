@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 
 	// RabbitMQ客户端：用于消息队列操作
 	"github.com/streadway/amqp"
@@ -26,9 +27,12 @@ import (
 // main 函数是merchant-service服务的入口点
 // 负责初始化数据库连接、自动迁移表结构、连接RabbitMQ、启动gRPC服务器
 func main() {
-	// 数据库连接字符串
-	// 格式：用户名:密码@tcp(主机:端口)/数据库名?参数
-	dsn := "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
+	// 从环境变量获取数据库连接字符串
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		// 默认值，用于本地开发
+		dsn = "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
+	}
 	
 	// 连接数据库
 	// 使用GORM打开数据库连接
@@ -43,9 +47,16 @@ func main() {
 		log.Fatalf("failed to migrate database: %v", err)
 	}
 
+	// 从环境变量获取RabbitMQ连接地址
+	rabbitmqURL := os.Getenv("RABBITMQ_URL")
+	if rabbitmqURL == "" {
+		// 默认值，用于本地开发
+		rabbitmqURL = "amqp://guest:guest@rabbitmq:5672/"
+	}
+
 	// 连接RabbitMQ
 	// 使用默认的guest账号连接本地RabbitMQ服务器
-	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672/")
+	conn, err := amqp.Dial(rabbitmqURL)
 	if err != nil {
 		log.Fatalf("failed to connect to RabbitMQ: %v", err)
 	}

@@ -48,15 +48,36 @@ npm install
 ### 配置设置
 
 1. 确保Docker服务正在运行
-2. 启动基础服务（MySQL、Redis、RabbitMQ）：
+2. 检查并确认`docker-compose.yml`文件中的环境变量配置正确
+
+### 启动服务
+
+#### 方式一：使用Docker Compose启动整个系统（推荐）
+
+```bash
+# 启动所有服务（包括基础服务和应用服务）
+docker-compose up -d
+
+# 查看服务状态
+docker-compose ps
+
+# 查看服务日志（例如查看API网关日志）
+docker-compose logs -f api-gateway
+
+# 启动前端
+cd frontend
+npm run dev
+```
+
+#### 方式二：手动启动服务
+
+1. 启动基础服务：
 
 ```bash
 docker-compose up -d mysql redis rabbitmq
 ```
 
-### 启动服务
-
-#### 后端服务
+2. 启动后端服务（按顺序）：
 
 ```bash
 # 启动认证服务
@@ -78,7 +99,7 @@ go run ./cmd/merchant-service
 go run ./cmd/api-gateway
 ```
 
-#### 前端服务
+3. 启动前端服务：
 
 ```bash
 # 进入前端目录
@@ -88,11 +109,35 @@ cd frontend
 npm run dev
 ```
 
+### 服务依赖关系
+
+- **基础服务**：MySQL、Redis、RabbitMQ
+- **核心服务**：认证服务、产品服务、购物车服务
+- **依赖服务**：订单服务（依赖MySQL和RabbitMQ）、商家服务（依赖MySQL和RabbitMQ）
+- **入口服务**：API网关（依赖所有其他服务）
+
 ### 访问应用
 
 - 前端应用：<http://localhost:5173>
-- API网关：<http://localhost:8081>
+- API网关：<http://localhost:8080> (Docker Compose) 或 <http://localhost:8081> (手动启动)
+- MySQL：<http://localhost:3307> (用户名: root, 密码: password)
+- Redis：<http://localhost:6379>
 - RabbitMQ管理界面：<http://localhost:15672> (用户名: guest, 密码: guest)
+
+### 环境变量说明
+
+- **数据库连接**：`DB_DSN` - MySQL数据库连接字符串
+- **Redis地址**：`REDIS_ADDR` - Redis服务地址
+- **RabbitMQ地址**：`RABBITMQ_URL` - RabbitMQ服务地址
+- **服务地址**：各服务间通信的地址配置（例如`AUTH_SERVICE_ADDR`）
+
+### 故障排除
+
+1. **服务启动失败**：检查Docker服务是否正常运行，查看服务日志获取详细错误信息
+2. **数据库连接失败**：确认MySQL服务已启动，检查数据库连接字符串是否正确
+3. **端口冲突**：如果端口已被占用，修改`docker-compose.yml`中的端口映射
+4. **依赖服务未就绪**：确保基础服务（MySQL、Redis、RabbitMQ）在启动应用服务前已就绪
+5. **前端无法访问API**：检查API网关服务是否正常运行，确认前端API配置中的地址是否正确
 
 ## 使用示例
 
@@ -197,4 +242,5 @@ curl -X DELETE http://localhost:8081/api/cart \
 ## 相关文档
 
 - [技术文档](doc/TECHNICAL_DOCUMENT.md)：详细的技术架构和实现说明
+- [API文档](doc/API_Documentation.md)：完整的API接口说明
 
