@@ -65,8 +65,8 @@ func main() {
 	authServiceAddr := getEnv("AUTH_SERVICE_ADDR", "localhost:50051")
 	productServiceAddr := getEnv("PRODUCT_SERVICE_ADDR", "localhost:50052")
 	orderServiceAddr := getEnv("ORDER_SERVICE_ADDR", "localhost:50053")
-	merchantServiceAddr := getEnv("MERCHANT_SERVICE_ADDR", "localhost:50055")
 	cartServiceAddr := getEnv("CART_SERVICE_ADDR", "localhost:50054")
+	merchantServiceAddr := getEnv("MERCHANT_SERVICE_ADDR", "localhost:50055")
 
 	// 连接认证服务
 	authConn, err := grpc.Dial(authServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
