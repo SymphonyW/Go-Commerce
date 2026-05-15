@@ -22,6 +22,8 @@ const OrderDetail = () => {
   const [payment, setPayment] = useState(null);
   // 支付动作加载状态
   const [paying, setPaying] = useState(false);
+  // 确认收货动作加载状态
+  const [completing, setCompleting] = useState(false);
 
   // 组件挂载时获取订单详情
   useEffect(() => {
@@ -140,6 +142,23 @@ const OrderDetail = () => {
     }
   };
 
+  const handleCompleteOrder = async () => {
+    if (!window.confirm('确认已经收到商品了吗？')) {
+      return;
+    }
+    try {
+      setCompleting(true);
+      await orderAPI.completeOrder(id);
+      await refreshOrder();
+      alert('已确认收货');
+    } catch (error) {
+      console.error('确认收货失败:', error);
+      alert(error.response?.data?.error || '确认收货失败');
+    } finally {
+      setCompleting(false);
+    }
+  };
+
   // 错误状态或订单不存在
   if (error || !order) {
     return <div className="error-message">{error || '订单不存在'}</div>;
@@ -158,6 +177,7 @@ const OrderDetail = () => {
             <div className={`order-detail-status ${order.status}`}>
               {order.status === 'pending' ? '待支付' :
                order.status === 'paid' ? '已支付' :
+               order.status === 'shipped' ? '已发货' :
                order.status === 'completed' ? '已完成' :
                order.status === 'cancelled' ? '已取消' : order.status}
             </div>
@@ -178,6 +198,15 @@ const OrderDetail = () => {
                 className="btn btn-sm"
               >
                 {paying ? '创建支付中...' : '去支付'}
+              </button>
+            )}
+            {order.status === 'shipped' && (
+              <button
+                onClick={handleCompleteOrder}
+                disabled={completing}
+                className="btn btn-sm"
+              >
+                {completing ? '确认中...' : '确认收货'}
               </button>
             )}
           </div>
@@ -212,6 +241,14 @@ const OrderDetail = () => {
               </div>
             )}
           </div>
+        )}
+
+        {order.status === 'paid' && (
+          <div className="payment-actions">订单已支付，等待商家发货</div>
+        )}
+
+        {order.status === 'completed' && (
+          <div className="payment-actions">订单已完成</div>
         )}
         
         {/* 订单商品列表 */}

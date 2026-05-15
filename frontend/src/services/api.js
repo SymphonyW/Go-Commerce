@@ -108,6 +108,14 @@ export const orderAPI = {
     const response = await api.put(`/orders/${id}/cancel`);
     return response.data;
   },
+  shipOrder: async (id) => {
+    const response = await api.put(`/orders/${id}/ship`);
+    return response.data;
+  },
+  completeOrder: async (id) => {
+    const response = await api.put(`/orders/${id}/complete`);
+    return response.data;
+  },
 };
 
 // 支付相关API

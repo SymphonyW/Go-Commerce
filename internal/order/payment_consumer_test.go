@@ -32,7 +32,7 @@ func TestPaymentSucceededConsumerMarksOrderPaid(t *testing.T) {
 	order := Order{
 		UserID:      1,
 		TotalAmount: 99,
-		Status:      "pending",
+		Status:      OrderStatusPending,
 		OrderDate:   time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
@@ -50,7 +50,8 @@ func TestPaymentSucceededConsumerMarksOrderPaid(t *testing.T) {
 	}
 
 	ack := &fakeAcknowledger{}
-	consumer := NewPaymentSucceededConsumer(db, nil)
+	publisher := &recordingPublisher{}
+	consumer := NewPaymentSucceededConsumer(db, publisher, nil)
 	if err := consumer.HandleDelivery(amqp.Delivery{
 		Acknowledger: ack,
 		DeliveryTag:  1,
@@ -63,11 +64,17 @@ func TestPaymentSucceededConsumerMarksOrderPaid(t *testing.T) {
 	if err := db.First(&latest, order.ID).Error; err != nil {
 		t.Fatalf("failed to reload order: %v", err)
 	}
-	if got, want := latest.Status, "paid"; got != want {
+	if got, want := latest.Status, OrderStatusPaid; got != want {
 		t.Fatalf("unexpected order status: got %q want %q", got, want)
 	}
 	if !ack.acked {
 		t.Fatal("expected event to be acked")
+	}
+	if len(publisher.events) != 1 {
+		t.Fatalf("unexpected published event count: got %d want 1", len(publisher.events))
+	}
+	if got, want := publisher.events[0].routingKey, events.OrderPaidType; got != want {
+		t.Fatalf("unexpected routing key: got %q want %q", got, want)
 	}
 }
 
@@ -76,14 +83,14 @@ func TestMarkOrderPaidRejectsCancelledOrder(t *testing.T) {
 	order := Order{
 		UserID:      1,
 		TotalAmount: 99,
-		Status:      "cancelled",
+		Status:      OrderStatusCancelled,
 		OrderDate:   time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)
 	}
 
-	err := MarkOrderPaid(db, int64(order.ID), 1, 99)
+	_, _, err := MarkOrderPaid(db, int64(order.ID), 1, 99)
 	if err == nil {
 		t.Fatal("expected cancelled order to reject payment")
 	}

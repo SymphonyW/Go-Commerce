@@ -17,6 +17,8 @@ import (
 
 	// 导入订单服务的protobuf生成代码
 	pb "go-commerce/api/order"
+	"go-commerce/internal/auth"
+	"go-commerce/internal/merchant"
 	// 导入产品模型：用于库存检查和更新
 	"go-commerce/internal/product"
 	"go-commerce/pkg/events"
@@ -87,8 +89,8 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 	order := Order{
 		UserID:      uint(req.UserId), // 用户ID
 		TotalAmount: totalAmount,      // 订单总金额
-		Status:      "pending",        // 订单状态，初始为待处理
-		OrderDate:   time.Now(),       // 订单日期
+		Status:      OrderStatusPending,
+		OrderDate:   time.Now(), // 订单日期
 	}
 	if err := tx.Create(&order).Error; err != nil {
 		tx.Rollback()
@@ -133,6 +135,7 @@ func newOrderCreatedEvent(order *Order, userID int64, totalAmount float64, items
 	for i, item := range items {
 		eventItems[i] = events.OrderItemSnapshot{
 			ProductID:   item.ProductID,
+			MerchantID:  int64(item.MerchantID),
 			ProductName: item.ProductName,
 			Price:       item.Price,
 			Quantity:    item.Quantity,
@@ -209,6 +212,7 @@ func buildOrderSnapshots(tx *gorm.DB, items []aggregatedCreateOrderItem) ([]Orde
 		// 订单项必须保存下单瞬间的名称与价格，保证历史订单展示稳定。
 		orderItems = append(orderItems, OrderItem{
 			ProductID:   int64(productInfo.ID),
+			MerchantID:  productInfo.MerchantID,
 			ProductName: productInfo.Name,
 			Price:       productInfo.Price,
 			Quantity:    item.Quantity,
@@ -377,11 +381,11 @@ func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (
 		}, nil
 	}
 
-	// 检查订单状态
-	if order.Status != "pending" {
+	// 取消订单也必须经过统一状态机，避免后续状态扩展时出现旁路。
+	if err := ValidateTransition(order.Status, OrderStatusCancelled); err != nil {
 		return &pb.CancelOrderResponse{
 			Success: false,
-			Message: "只能取消待处理状态的订单",
+			Message: err.Error(),
 		}, nil
 	}
 
@@ -415,7 +419,13 @@ func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (
 	}
 
 	// 更新订单状态
-	order.Status = "cancelled"
+	if err := TransitionTo(&order, OrderStatusCancelled); err != nil {
+		tx.Rollback()
+		return &pb.CancelOrderResponse{
+			Success: false,
+			Message: err.Error(),
+		}, nil
+	}
 	if err := tx.Save(&order).Error; err != nil {
 		tx.Rollback()
 		return &pb.CancelOrderResponse{
@@ -455,4 +465,146 @@ func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (
 		Success: true,
 		Message: "订单取消成功",
 	}, nil
+}
+
+// ShipOrder 允许具备权限的商家或管理员把已支付订单推进到已发货。
+func (s *Service) ShipOrder(ctx context.Context, req *pb.ShipOrderRequest) (*pb.ShipOrderResponse, error) {
+	var order Order
+	if err := s.db.First(&order, req.Id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "order not found")
+		}
+		return nil, status.Errorf(codes.Internal, "failed to fetch order: %v", err)
+	}
+
+	var orderItems []OrderItem
+	if err := s.db.Where("order_id = ?", order.ID).Find(&orderItems).Error; err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to fetch order items: %v", err)
+	}
+	if err := s.authorizeShipment(uint(req.ActorUserId), orderItems); err != nil {
+		return nil, orderStatusError(err)
+	}
+
+	fromStatus := order.Status
+	if err := TransitionTo(&order, OrderStatusShipped); err != nil {
+		return nil, orderStatusError(err)
+	}
+	if err := s.db.Save(&order).Error; err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to update order status: %v", err)
+	}
+
+	s.publishOrderStatusChanged(ctx, events.OrderShippedType, &order, fromStatus, OrderStatusShipped)
+	return &pb.ShipOrderResponse{Success: true, Message: "订单已发货"}, nil
+}
+
+// CompleteOrder 仅允许订单所属用户确认收货，把已发货订单推进到已完成。
+func (s *Service) CompleteOrder(ctx context.Context, req *pb.CompleteOrderRequest) (*pb.CompleteOrderResponse, error) {
+	var order Order
+	if err := s.db.Where("id = ? AND user_id = ?", req.Id, req.UserId).First(&order).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "order not found")
+		}
+		return nil, status.Errorf(codes.Internal, "failed to fetch order: %v", err)
+	}
+
+	fromStatus := order.Status
+	if err := TransitionTo(&order, OrderStatusCompleted); err != nil {
+		return nil, orderStatusError(err)
+	}
+	if err := s.db.Save(&order).Error; err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to update order status: %v", err)
+	}
+
+	s.publishOrderStatusChanged(ctx, events.OrderCompletedType, &order, fromStatus, OrderStatusCompleted)
+	return &pb.CompleteOrderResponse{Success: true, Message: "订单已完成"}, nil
+}
+
+func (s *Service) authorizeShipment(actorUserID uint, orderItems []OrderItem) error {
+	var actor auth.User
+	if err := s.db.First(&actor, actorUserID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return merchant.ErrUserNotFound
+		}
+		return err
+	}
+
+	switch actor.Role {
+	case auth.RoleAdmin:
+		return nil
+	case auth.RoleMerchant:
+		// 订单项保存商家快照后，商家只能为自己名下商品构成的订单发货。
+		merchantIDs := uniqueMerchantIDs(orderItems)
+		if len(merchantIDs) == 0 {
+			return merchant.ErrPermissionDenied
+		}
+
+		var merchants []merchant.Merchant
+		if err := s.db.Where("id IN ?", merchantIDs).Find(&merchants).Error; err != nil {
+			return err
+		}
+		if len(merchants) != len(merchantIDs) {
+			return merchant.ErrPermissionDenied
+		}
+		for _, shop := range merchants {
+			if shop.OwnerUserID == nil || *shop.OwnerUserID != actorUserID {
+				return merchant.ErrPermissionDenied
+			}
+		}
+		return nil
+	default:
+		return merchant.ErrPermissionDenied
+	}
+}
+
+func uniqueMerchantIDs(orderItems []OrderItem) []uint {
+	seen := make(map[uint]struct{}, len(orderItems))
+	merchantIDs := make([]uint, 0, len(orderItems))
+	for _, item := range orderItems {
+		if item.MerchantID == 0 {
+			return nil
+		}
+		if _, ok := seen[item.MerchantID]; ok {
+			continue
+		}
+		seen[item.MerchantID] = struct{}{}
+		merchantIDs = append(merchantIDs, item.MerchantID)
+	}
+	return merchantIDs
+}
+
+func (s *Service) publishOrderStatusChanged(ctx context.Context, eventType string, order *Order, fromStatus, toStatus string) {
+	event := newOrderStatusChangedEvent(eventType, order, fromStatus, toStatus)
+	if err := s.publisher.Publish(ctx, eventType, event); err != nil {
+		log.Printf(
+			"event_publish_failed event_type=%s event_id=%s order_id=%d user_id=%d error=%v",
+			event.EventType,
+			event.EventID,
+			order.ID,
+			order.UserID,
+			err,
+		)
+	}
+}
+
+func newOrderStatusChangedEvent(eventType string, order *Order, fromStatus, toStatus string) events.OrderStatusChangedEvent {
+	return events.OrderStatusChangedEvent{
+		BaseEvent:  events.NewBaseEvent(eventType, time.Now()),
+		OrderID:    int64(order.ID),
+		UserID:     int64(order.UserID),
+		FromStatus: fromStatus,
+		ToStatus:   toStatus,
+	}
+}
+
+func orderStatusError(err error) error {
+	switch {
+	case errors.Is(err, ErrInvalidOrderTransition):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, merchant.ErrPermissionDenied):
+		return status.Error(codes.PermissionDenied, "order operation is not allowed")
+	case errors.Is(err, merchant.ErrUserNotFound):
+		return status.Error(codes.NotFound, "user not found")
+	default:
+		return status.Errorf(codes.Internal, "order operation failed: %v", err)
+	}
 }

@@ -10,10 +10,6 @@ const (
 	PaymentMethodMockBalance = "mock_balance"
 	PaymentMethodMockWechat  = "mock_wechat"
 	PaymentMethodMockAlipay  = "mock_alipay"
-
-	OrderStatusPending   = "pending"
-	OrderStatusPaid      = "paid"
-	OrderStatusCancelled = "cancelled"
 )
 
 // Payment 记录一次独立支付尝试，订单和支付通过 order_id 关联但职责分离。

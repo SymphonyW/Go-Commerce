@@ -9,6 +9,9 @@ import (
 
 const (
 	OrderCreatedType     = "order.created"
+	OrderPaidType        = "order.paid"
+	OrderShippedType     = "order.shipped"
+	OrderCompletedType   = "order.completed"
 	OrderCancelledType   = "order.cancelled"
 	PaymentSucceededType = "payment.succeeded"
 )
@@ -28,6 +31,7 @@ func (e BaseEvent) GetEventID() string {
 // OrderItemSnapshot 表示下单瞬间的商品快照。
 type OrderItemSnapshot struct {
 	ProductID   int64   `json:"product_id"`
+	MerchantID  int64   `json:"merchant_id"`
 	ProductName string  `json:"product_name"`
 	Price       float64 `json:"price"`
 	Quantity    int32   `json:"quantity"`
@@ -48,6 +52,15 @@ type OrderCancelledEvent struct {
 	OrderID int64  `json:"order_id"`
 	UserID  int64  `json:"user_id"`
 	Reason  string `json:"reason,omitempty"`
+}
+
+// OrderStatusChangedEvent 表示订单主状态发生了一次合法迁移。
+type OrderStatusChangedEvent struct {
+	BaseEvent
+	OrderID    int64  `json:"order_id"`
+	UserID     int64  `json:"user_id"`
+	FromStatus string `json:"from_status"`
+	ToStatus   string `json:"to_status"`
 }
 
 // PaymentSucceededEvent 表示一次支付已经成功完成。

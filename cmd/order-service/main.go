@@ -101,7 +101,7 @@ func main() {
 	pb.RegisterOrderServiceServer(s, order.NewService(db, publisher))
 
 	if consumerChannel != nil {
-		go consumePaymentSucceededEvents(consumerChannel, exchangeName, db)
+		go consumePaymentSucceededEvents(consumerChannel, exchangeName, db, publisher)
 	}
 
 	// 启动服务
@@ -113,7 +113,7 @@ func main() {
 	}
 }
 
-func consumePaymentSucceededEvents(ch *amqp.Channel, exchangeName string, db *gorm.DB) {
+func consumePaymentSucceededEvents(ch *amqp.Channel, exchangeName string, db *gorm.DB, publisher mq.Publisher) {
 	if err := ch.ExchangeDeclare(exchangeName, "topic", true, false, false, false, nil); err != nil {
 		log.Printf("rabbitmq_exchange_declare_failed exchange=%s error=%v", exchangeName, err)
 		return
@@ -133,7 +133,7 @@ func consumePaymentSucceededEvents(ch *amqp.Channel, exchangeName string, db *go
 		return
 	}
 
-	consumer := order.NewPaymentSucceededConsumer(db, log.Default())
+	consumer := order.NewPaymentSucceededConsumer(db, publisher, log.Default())
 	log.Printf("order_payment_consumer_started exchange=%s queue=%s routing_key=%s", exchangeName, queue.Name, events.PaymentSucceededType)
 	for delivery := range deliveries {
 		if err := consumer.HandleDelivery(delivery); err != nil {

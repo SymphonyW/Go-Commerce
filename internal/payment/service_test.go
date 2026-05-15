@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	pbOrder "go-commerce/api/order"
+	orderdomain "go-commerce/internal/order"
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
 
@@ -39,6 +40,14 @@ func (f *fakeOrderClient) ListOrders(context.Context, *pbOrder.ListOrdersRequest
 }
 
 func (f *fakeOrderClient) CancelOrder(context.Context, *pbOrder.CancelOrderRequest, ...grpc.CallOption) (*pbOrder.CancelOrderResponse, error) {
+	return nil, nil
+}
+
+func (f *fakeOrderClient) ShipOrder(context.Context, *pbOrder.ShipOrderRequest, ...grpc.CallOption) (*pbOrder.ShipOrderResponse, error) {
+	return nil, nil
+}
+
+func (f *fakeOrderClient) CompleteOrder(context.Context, *pbOrder.CompleteOrderRequest, ...grpc.CallOption) (*pbOrder.CompleteOrderResponse, error) {
 	return nil, nil
 }
 
@@ -83,7 +92,7 @@ func TestCreatePaymentRejectsMissingOrder(t *testing.T) {
 
 func TestCreatePaymentRejectsOtherUsersOrder(t *testing.T) {
 	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 2, Status: OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 2, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
 	}}, nil)
 
 	_, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
@@ -94,7 +103,7 @@ func TestCreatePaymentRejectsOtherUsersOrder(t *testing.T) {
 
 func TestCreatePaymentForPendingOrder(t *testing.T) {
 	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
 	}}, nil)
 
 	payment, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
@@ -114,7 +123,7 @@ func TestCreatePaymentForPendingOrder(t *testing.T) {
 
 func TestCreatePaymentRejectsDuplicateActivePayment(t *testing.T) {
 	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
 	}}, nil)
 
 	if _, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance); err != nil {
@@ -127,7 +136,7 @@ func TestCreatePaymentRejectsDuplicateActivePayment(t *testing.T) {
 }
 
 func TestCreatePaymentRejectsNonPendingOrders(t *testing.T) {
-	tests := []string{OrderStatusCancelled, OrderStatusPaid}
+	tests := []string{orderdomain.OrderStatusCancelled, orderdomain.OrderStatusPaid}
 	for _, orderStatus := range tests {
 		t.Run(orderStatus, func(t *testing.T) {
 			service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
@@ -145,7 +154,7 @@ func TestCreatePaymentRejectsNonPendingOrders(t *testing.T) {
 func TestSucceedPaymentPublishesEvent(t *testing.T) {
 	publisher := &recordingPublisher{}
 	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
 	}}, publisher)
 
 	payment, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
@@ -176,7 +185,7 @@ func TestSucceedPaymentPublishesEvent(t *testing.T) {
 
 func TestFailPaymentMarksRecordFailed(t *testing.T) {
 	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
 	}}, nil)
 
 	payment, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)

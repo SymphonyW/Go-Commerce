@@ -10,6 +10,7 @@ import (
 	"time"
 
 	pbOrder "go-commerce/api/order"
+	orderdomain "go-commerce/internal/order"
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
 
@@ -54,7 +55,7 @@ func (s *Service) CreatePayment(ctx context.Context, userID, orderID int64, meth
 	if err != nil {
 		return nil, err
 	}
-	if order.Status != OrderStatusPending {
+	if order.Status != orderdomain.OrderStatusPending {
 		return nil, ErrOrderNotPayable
 	}
 
@@ -106,7 +107,7 @@ func (s *Service) SucceedPayment(ctx context.Context, userID, paymentID uint) (*
 	if err != nil {
 		return nil, err
 	}
-	if order.Status != OrderStatusPending || float64(order.TotalAmount) != payment.Amount {
+	if order.Status != orderdomain.OrderStatusPending || float64(order.TotalAmount) != payment.Amount {
 		return nil, ErrOrderNotPayable
 	}
 

@@ -9,8 +9,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	pb "go-commerce/api/order"
+	"go-commerce/internal/auth"
+	"go-commerce/internal/merchant"
 	"go-commerce/internal/product"
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
@@ -34,7 +37,7 @@ func newTestService(t *testing.T) (*Service, *gorm.DB) {
 		t.Fatalf("failed to open test database: %v", err)
 	}
 
-	if err := db.AutoMigrate(&product.Product{}, &Order{}, &OrderItem{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
 
@@ -71,7 +74,7 @@ func newTestServiceWithPublisher(t *testing.T, publisher mq.Publisher) (*Service
 		t.Fatalf("failed to open test database: %v", err)
 	}
 
-	if err := db.AutoMigrate(&product.Product{}, &Order{}, &OrderItem{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
 
@@ -86,7 +89,7 @@ func newConcurrentTestService(t *testing.T) (*Service, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("failed to open concurrent test database: %v", err)
 	}
-	if err := db.AutoMigrate(&product.Product{}, &Order{}, &OrderItem{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}); err != nil {
 		t.Fatalf("failed to migrate concurrent test database: %v", err)
 	}
 
@@ -114,6 +117,40 @@ func createTestProduct(t *testing.T, db *gorm.DB, name string, price float64, st
 	}
 
 	return item
+}
+
+func createTestUser(t *testing.T, db *gorm.DB, role string) auth.User {
+	t.Helper()
+
+	var count int64
+	if err := db.Model(&auth.User{}).Count(&count).Error; err != nil {
+		t.Fatalf("failed to count users: %v", err)
+	}
+
+	user := auth.User{
+		Username: fmt.Sprintf("%s-user-%s-%d", role, strings.NewReplacer("/", "-", " ", "-").Replace(t.Name()), count+1),
+		Password: "password",
+		Email:    fmt.Sprintf("%s-%s-%d@example.com", role, strings.NewReplacer("/", "-", " ", "-").Replace(t.Name()), count+1),
+		Role:     role,
+	}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	return user
+}
+
+func createTestMerchant(t *testing.T, db *gorm.DB, ownerUserID uint) merchant.Merchant {
+	t.Helper()
+
+	shop := merchant.Merchant{
+		Name:        "测试商家",
+		ContactInfo: "merchant@example.com",
+		OwnerUserID: &ownerUserID,
+	}
+	if err := db.Create(&shop).Error; err != nil {
+		t.Fatalf("failed to create merchant: %v", err)
+	}
+	return shop
 }
 
 func TestCreateOrderUsesDatabaseSnapshot(t *testing.T) {
@@ -152,6 +189,24 @@ func TestCreateOrderUsesDatabaseSnapshot(t *testing.T) {
 	}
 	if got, want := saved.Price, 88.5; got != want {
 		t.Fatalf("unexpected saved snapshot price: got %.2f want %.2f", got, want)
+	}
+}
+
+func TestCreateOrderStartsPending(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "默认状态商品", 10, 5)
+
+	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
+		UserId: 1,
+		Items: []*pb.CreateOrderItem{
+			{ProductId: int64(item.ID), Quantity: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder returned error: %v", err)
+	}
+	if got, want := resp.Order.Status, OrderStatusPending; got != want {
+		t.Fatalf("unexpected order status: got %q want %q", got, want)
 	}
 }
 
@@ -531,5 +586,185 @@ func TestCancelOrderPublishesOrderCancelledEvent(t *testing.T) {
 	}
 	if got, want := event.OrderID, resp.Order.Id; got != want {
 		t.Fatalf("unexpected order id: got %d want %d", got, want)
+	}
+}
+
+func TestCancelOrderRejectsCompletedOrder(t *testing.T) {
+	service, db := newTestService(t)
+	order := Order{
+		UserID:      1,
+		TotalAmount: 10,
+		Status:      OrderStatusCompleted,
+		OrderDate:   time.Now(),
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatalf("failed to create order: %v", err)
+	}
+
+	resp, err := service.CancelOrder(context.Background(), &pb.CancelOrderRequest{
+		Id:     int64(order.ID),
+		UserId: 1,
+	})
+	if err != nil {
+		t.Fatalf("CancelOrder returned error: %v", err)
+	}
+	if resp.Success {
+		t.Fatal("expected completed order cancellation to fail")
+	}
+	if got, want := resp.Message, "invalid order status transition: completed -> cancelled"; got != want {
+		t.Fatalf("unexpected message: got %q want %q", got, want)
+	}
+}
+
+func TestShipOrderTransitionsPaidToShipped(t *testing.T) {
+	publisher := &recordingPublisher{}
+	service, db := newTestServiceWithPublisher(t, publisher)
+	merchantUser := createTestUser(t, db, auth.RoleMerchant)
+	shop := createTestMerchant(t, db, merchantUser.ID)
+	order := Order{
+		UserID:      1,
+		TotalAmount: 10,
+		Status:      OrderStatusPaid,
+		OrderDate:   time.Now(),
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatalf("failed to create order: %v", err)
+	}
+	if err := db.Create(&OrderItem{OrderID: order.ID, ProductID: 1, ProductName: "商品", Price: 10, Quantity: 1, MerchantID: shop.ID}).Error; err != nil {
+		t.Fatalf("failed to create order item: %v", err)
+	}
+
+	resp, err := service.ShipOrder(context.Background(), &pb.ShipOrderRequest{
+		Id:          int64(order.ID),
+		ActorUserId: int64(merchantUser.ID),
+	})
+	if err != nil {
+		t.Fatalf("ShipOrder returned error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("expected ship to succeed, got message %q", resp.Message)
+	}
+
+	var latest Order
+	if err := db.First(&latest, order.ID).Error; err != nil {
+		t.Fatalf("failed to reload order: %v", err)
+	}
+	if got, want := latest.Status, OrderStatusShipped; got != want {
+		t.Fatalf("unexpected order status: got %q want %q", got, want)
+	}
+	if len(publisher.events) != 1 {
+		t.Fatalf("unexpected published event count: got %d want 1", len(publisher.events))
+	}
+	if got, want := publisher.events[0].routingKey, events.OrderShippedType; got != want {
+		t.Fatalf("unexpected routing key: got %q want %q", got, want)
+	}
+}
+
+func TestShipOrderRejectsForeignMerchant(t *testing.T) {
+	service, db := newTestService(t)
+	owner := createTestUser(t, db, auth.RoleMerchant)
+	otherMerchant := createTestUser(t, db, auth.RoleMerchant)
+	shop := createTestMerchant(t, db, owner.ID)
+	order := Order{
+		UserID:      1,
+		TotalAmount: 10,
+		Status:      OrderStatusPaid,
+		OrderDate:   time.Now(),
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatalf("failed to create order: %v", err)
+	}
+	if err := db.Create(&OrderItem{OrderID: order.ID, ProductID: 1, ProductName: "商品", Price: 10, Quantity: 1, MerchantID: shop.ID}).Error; err != nil {
+		t.Fatalf("failed to create order item: %v", err)
+	}
+
+	_, err := service.ShipOrder(context.Background(), &pb.ShipOrderRequest{
+		Id:          int64(order.ID),
+		ActorUserId: int64(otherMerchant.ID),
+	})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.PermissionDenied)
+	}
+}
+
+func TestShipOrderRejectsPendingOrder(t *testing.T) {
+	service, db := newTestService(t)
+	admin := createTestUser(t, db, auth.RoleAdmin)
+	order := Order{
+		UserID:      1,
+		TotalAmount: 10,
+		Status:      OrderStatusPending,
+		OrderDate:   time.Now(),
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatalf("failed to create order: %v", err)
+	}
+
+	_, err := service.ShipOrder(context.Background(), &pb.ShipOrderRequest{
+		Id:          int64(order.ID),
+		ActorUserId: int64(admin.ID),
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.FailedPrecondition)
+	}
+}
+
+func TestCompleteOrderTransitionsShippedToCompleted(t *testing.T) {
+	publisher := &recordingPublisher{}
+	service, db := newTestServiceWithPublisher(t, publisher)
+	order := Order{
+		UserID:      7,
+		TotalAmount: 10,
+		Status:      OrderStatusShipped,
+		OrderDate:   time.Now(),
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatalf("failed to create order: %v", err)
+	}
+
+	resp, err := service.CompleteOrder(context.Background(), &pb.CompleteOrderRequest{
+		Id:     int64(order.ID),
+		UserId: 7,
+	})
+	if err != nil {
+		t.Fatalf("CompleteOrder returned error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("expected completion to succeed, got message %q", resp.Message)
+	}
+
+	var latest Order
+	if err := db.First(&latest, order.ID).Error; err != nil {
+		t.Fatalf("failed to reload order: %v", err)
+	}
+	if got, want := latest.Status, OrderStatusCompleted; got != want {
+		t.Fatalf("unexpected order status: got %q want %q", got, want)
+	}
+	if len(publisher.events) != 1 {
+		t.Fatalf("unexpected published event count: got %d want 1", len(publisher.events))
+	}
+	if got, want := publisher.events[0].routingKey, events.OrderCompletedType; got != want {
+		t.Fatalf("unexpected routing key: got %q want %q", got, want)
+	}
+}
+
+func TestCompleteOrderRejectsPaidOrder(t *testing.T) {
+	service, db := newTestService(t)
+	order := Order{
+		UserID:      7,
+		TotalAmount: 10,
+		Status:      OrderStatusPaid,
+		OrderDate:   time.Now(),
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatalf("failed to create order: %v", err)
+	}
+
+	_, err := service.CompleteOrder(context.Background(), &pb.CompleteOrderRequest{
+		Id:     int64(order.ID),
+		UserId: 7,
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.FailedPrecondition)
 	}
 }

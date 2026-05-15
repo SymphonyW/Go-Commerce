@@ -152,7 +152,7 @@ npm run dev
 ## RabbitMQ 事件链路
 
 - 统一交换机：`ecommerce.events`（topic）
-- 当前事件：`order.created`、`order.cancelled`、`payment.succeeded`
+- 当前事件：`order.created`、`order.paid`、`order.shipped`、`order.completed`、`order.cancelled`、`payment.succeeded`
 - 生产者：`order-service`、`payment-service`
 - 消费者：
   - `notification-service` 绑定队列 `notification.order.created`，消费 `order.created` 后打印“发送下单成功通知”日志
@@ -256,6 +256,20 @@ curl -X POST http://localhost:8081/api/payments/1/success \
 ```
 
 > 支付接口只接受当前登录用户发起的请求。创建支付前会校验订单存在、归属当前用户、状态为 `pending`，支付金额直接取订单总金额；模拟失败时支付记录变为 `failed`，订单继续保持 `pending`，便于再次发起支付。
+
+### 完整订单生命周期
+
+```bash
+# 商家或管理员发货
+curl -X PUT http://localhost:8081/api/orders/1/ship \
+  -H "Authorization: Bearer MERCHANT_OR_ADMIN_TOKEN"
+
+# 用户确认收货
+curl -X PUT http://localhost:8081/api/orders/1/complete \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+> 当前订单状态主线为 `pending -> paid -> shipped -> completed`，另有 `pending -> cancelled` 旁路。所有状态变化都会先经过统一状态机校验；商家只能为自己名下商品构成的订单发货，混合商家订单在当前最小实现中仅允许 `admin` 发货。
 
 ### 购物车操作
 

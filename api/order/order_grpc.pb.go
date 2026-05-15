@@ -19,10 +19,12 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	OrderService_CreateOrder_FullMethodName = "/order.OrderService/CreateOrder"
-	OrderService_GetOrder_FullMethodName    = "/order.OrderService/GetOrder"
-	OrderService_ListOrders_FullMethodName  = "/order.OrderService/ListOrders"
-	OrderService_CancelOrder_FullMethodName = "/order.OrderService/CancelOrder"
+	OrderService_CreateOrder_FullMethodName   = "/order.OrderService/CreateOrder"
+	OrderService_GetOrder_FullMethodName      = "/order.OrderService/GetOrder"
+	OrderService_ListOrders_FullMethodName    = "/order.OrderService/ListOrders"
+	OrderService_CancelOrder_FullMethodName   = "/order.OrderService/CancelOrder"
+	OrderService_ShipOrder_FullMethodName     = "/order.OrderService/ShipOrder"
+	OrderService_CompleteOrder_FullMethodName = "/order.OrderService/CompleteOrder"
 )
 
 // OrderServiceClient is the client API for OrderService service.
@@ -33,6 +35,8 @@ type OrderServiceClient interface {
 	GetOrder(ctx context.Context, in *GetOrderRequest, opts ...grpc.CallOption) (*GetOrderResponse, error)
 	ListOrders(ctx context.Context, in *ListOrdersRequest, opts ...grpc.CallOption) (*ListOrdersResponse, error)
 	CancelOrder(ctx context.Context, in *CancelOrderRequest, opts ...grpc.CallOption) (*CancelOrderResponse, error)
+	ShipOrder(ctx context.Context, in *ShipOrderRequest, opts ...grpc.CallOption) (*ShipOrderResponse, error)
+	CompleteOrder(ctx context.Context, in *CompleteOrderRequest, opts ...grpc.CallOption) (*CompleteOrderResponse, error)
 }
 
 type orderServiceClient struct {
@@ -79,6 +83,24 @@ func (c *orderServiceClient) CancelOrder(ctx context.Context, in *CancelOrderReq
 	return out, nil
 }
 
+func (c *orderServiceClient) ShipOrder(ctx context.Context, in *ShipOrderRequest, opts ...grpc.CallOption) (*ShipOrderResponse, error) {
+	out := new(ShipOrderResponse)
+	err := c.cc.Invoke(ctx, OrderService_ShipOrder_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orderServiceClient) CompleteOrder(ctx context.Context, in *CompleteOrderRequest, opts ...grpc.CallOption) (*CompleteOrderResponse, error) {
+	out := new(CompleteOrderResponse)
+	err := c.cc.Invoke(ctx, OrderService_CompleteOrder_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // OrderServiceServer is the server API for OrderService service.
 // All implementations must embed UnimplementedOrderServiceServer
 // for forward compatibility
@@ -87,6 +109,8 @@ type OrderServiceServer interface {
 	GetOrder(context.Context, *GetOrderRequest) (*GetOrderResponse, error)
 	ListOrders(context.Context, *ListOrdersRequest) (*ListOrdersResponse, error)
 	CancelOrder(context.Context, *CancelOrderRequest) (*CancelOrderResponse, error)
+	ShipOrder(context.Context, *ShipOrderRequest) (*ShipOrderResponse, error)
+	CompleteOrder(context.Context, *CompleteOrderRequest) (*CompleteOrderResponse, error)
 	mustEmbedUnimplementedOrderServiceServer()
 }
 
@@ -105,6 +129,12 @@ func (UnimplementedOrderServiceServer) ListOrders(context.Context, *ListOrdersRe
 }
 func (UnimplementedOrderServiceServer) CancelOrder(context.Context, *CancelOrderRequest) (*CancelOrderResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CancelOrder not implemented")
+}
+func (UnimplementedOrderServiceServer) ShipOrder(context.Context, *ShipOrderRequest) (*ShipOrderResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ShipOrder not implemented")
+}
+func (UnimplementedOrderServiceServer) CompleteOrder(context.Context, *CompleteOrderRequest) (*CompleteOrderResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CompleteOrder not implemented")
 }
 func (UnimplementedOrderServiceServer) mustEmbedUnimplementedOrderServiceServer() {}
 
@@ -191,6 +221,42 @@ func _OrderService_CancelOrder_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _OrderService_ShipOrder_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ShipOrderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrderServiceServer).ShipOrder(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrderService_ShipOrder_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrderServiceServer).ShipOrder(ctx, req.(*ShipOrderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrderService_CompleteOrder_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CompleteOrderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrderServiceServer).CompleteOrder(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrderService_CompleteOrder_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrderServiceServer).CompleteOrder(ctx, req.(*CompleteOrderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // OrderService_ServiceDesc is the grpc.ServiceDesc for OrderService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -213,6 +279,14 @@ var OrderService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelOrder",
 			Handler:    _OrderService_CancelOrder_Handler,
+		},
+		{
+			MethodName: "ShipOrder",
+			Handler:    _OrderService_ShipOrder_Handler,
+		},
+		{
+			MethodName: "CompleteOrder",
+			Handler:    _OrderService_CompleteOrder_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

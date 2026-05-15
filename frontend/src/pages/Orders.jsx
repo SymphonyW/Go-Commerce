@@ -54,6 +54,7 @@ const Orders = () => {
                 <div className={`order-status ${order.status}`}>
                   {order.status === 'pending' ? '待支付' :
                    order.status === 'paid' ? '已支付' :
+                   order.status === 'shipped' ? '已发货' :
                    order.status === 'completed' ? '已完成' :
                    order.status === 'cancelled' ? '已取消' : order.status}
                 </div>

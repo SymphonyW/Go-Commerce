@@ -174,6 +174,8 @@ func main() {
 		private.GET("/orders/:id", gateway.handleGetOrder)           // 获取订单详情
 		private.GET("/orders", gateway.handleListOrders)             // 获取订单列表
 		private.PUT("/orders/:id/cancel", gateway.handleCancelOrder) // 取消订单
+		private.PUT("/orders/:id/ship", gateway.requireRole("merchant", "admin"), gateway.handleShipOrder)
+		private.PUT("/orders/:id/complete", gateway.handleCompleteOrder)
 		// 支付相关路由
 		private.POST("/payments", gateway.handleCreatePayment)
 		private.GET("/payments/:id", gateway.handleGetPayment)
@@ -776,6 +778,8 @@ func writeGRPCError(c *gin.Context, err error) {
 		c.JSON(http.StatusForbidden, gin.H{"error": grpcStatus.Message()})
 	case codes.NotFound:
 		c.JSON(http.StatusNotFound, gin.H{"error": grpcStatus.Message()})
+	case codes.FailedPrecondition:
+		c.JSON(http.StatusConflict, gin.H{"error": grpcStatus.Message()})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": grpcStatus.Message()})
 	}
@@ -979,5 +983,55 @@ func (g *APIGateway) handleCancelOrder(c *gin.Context) {
 	}
 
 	// 返回取消订单响应
+	c.JSON(http.StatusOK, resp)
+}
+
+// handleShipOrder 处理商家/管理员发货请求。
+func (g *APIGateway) handleShipOrder(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	orderID, err := parsePathID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid order id"})
+		return
+	}
+
+	resp, err := g.orderClient.ShipOrder(context.Background(), &pbOrder.ShipOrderRequest{
+		Id:          orderID,
+		ActorUserId: userID.(int64),
+	})
+	if err != nil {
+		writeGRPCError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// handleCompleteOrder 处理用户确认收货请求。
+func (g *APIGateway) handleCompleteOrder(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	orderID, err := parsePathID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid order id"})
+		return
+	}
+
+	resp, err := g.orderClient.CompleteOrder(context.Background(), &pbOrder.CompleteOrderRequest{
+		Id:     orderID,
+		UserId: userID.(int64),
+	})
+	if err != nil {
+		writeGRPCError(c, err)
+		return
+	}
 	c.JSON(http.StatusOK, resp)
 }

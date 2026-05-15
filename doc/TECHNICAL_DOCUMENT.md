@@ -155,6 +155,7 @@ Go-Commerce/
 **核心功能**：
 - 创建订单：基于商品真实信息创建订单，按后端价格计算总额
 - 商品快照：保存下单时的商品名称与价格，保证历史订单不受后续改价影响
+- 状态机：统一约束订单状态流转，阻止非法迁移
 - 订单列表：获取用户的订单列表
 - 订单详情：获取单个订单的详细信息
 
@@ -163,13 +164,32 @@ Go-Commerce/
 - `internal/order/model.go`：订单模型定义
 
 **事件发布设计**：
-- 订单事务提交成功后，订单服务通过统一事件交换机发布 `order.created` 与 `order.cancelled`。
+- 订单事务提交成功后，订单服务通过统一事件交换机发布 `order.created`、`order.cancelled`、`order.shipped` 与 `order.completed`。
 - 订单服务同时监听 `payment.succeeded`，消费成功后把订单状态从 `pending` 更新为 `paid`。
+- 支付成功完成后，订单服务还会补发 `order.paid`，方便后续通知、履约等消费者订阅。
 - 事件体统一包含 `event_id`、`event_type`、`occurred_at`，业务侧无需依赖 routing key 才能识别事件。
 - 当前阶段采用弱一致：消息发布失败只记录结构化日志，不回滚已经成功提交的订单事务。
 
+**订单状态机**：
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending
+    pending --> paid
+    pending --> cancelled
+    paid --> shipped
+    shipped --> completed
+```
+
+- `pending -> paid`：支付成功事件驱动
+- `pending -> cancelled`：用户取消
+- `paid -> shipped`：商家或管理员发货
+- `shipped -> completed`：用户确认收货
+- `cancelled -> paid`、`paid -> completed`、`completed -> cancelled` 等非法流转都会被统一拦截
+
 **库存一致性设计**：
 - 创建订单时先在服务端合并重复 `product_id`，再基于真实商品信息生成订单快照。
+- 订单项额外保存 `merchant_id` 快照，后续发货授权以该快照为准，不依赖商品后续归属变化。
 - 扣减库存统一走条件更新：`UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?`，通过 `RowsAffected` 判断是否成功，避免并发下出现超卖或负库存。
 - 订单主表、订单项与库存扣减处于同一事务中；任一环节失败，库存变化会随事务一并回滚。
 - 取消订单时统一走原子回补：`UPDATE products SET stock = stock + ? WHERE id = ?`。
@@ -275,6 +295,9 @@ Go-Commerce/
 | 事件 | 生产者 | 消费者 | 说明 |
 |------|--------|--------|------|
 | `order.created` | `order-service` | `notification-service` | 下单成功后异步触发通知 |
+| `order.paid` | `order-service` | 暂无 | 订单由支付事件推进为已支付后发布 |
+| `order.shipped` | `order-service` | 暂无 | 商家或管理员发货后发布 |
+| `order.completed` | `order-service` | 暂无 | 用户确认收货后发布 |
 | `order.cancelled` | `order-service` | 暂无 | 当前先完成发布，为后续库存、营销、风控扩展预留 |
 | `payment.succeeded` | `payment-service` | `order-service` | 支付成功后异步把订单推进为 `paid` |
 

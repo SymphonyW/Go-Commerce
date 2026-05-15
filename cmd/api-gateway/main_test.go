@@ -18,6 +18,7 @@ import (
 
 type fakeOrderClient struct {
 	lastCreateOrderReq *pbOrder.CreateOrderRequest
+	lastShipOrderReq   *pbOrder.ShipOrderRequest
 }
 
 func (f *fakeOrderClient) CreateOrder(ctx context.Context, in *pbOrder.CreateOrderRequest, opts ...grpc.CallOption) (*pbOrder.CreateOrderResponse, error) {
@@ -48,6 +49,15 @@ func (f *fakeOrderClient) ListOrders(ctx context.Context, in *pbOrder.ListOrders
 
 func (f *fakeOrderClient) CancelOrder(ctx context.Context, in *pbOrder.CancelOrderRequest, opts ...grpc.CallOption) (*pbOrder.CancelOrderResponse, error) {
 	return nil, nil
+}
+
+func (f *fakeOrderClient) ShipOrder(ctx context.Context, in *pbOrder.ShipOrderRequest, opts ...grpc.CallOption) (*pbOrder.ShipOrderResponse, error) {
+	f.lastShipOrderReq = in
+	return &pbOrder.ShipOrderResponse{Success: true}, nil
+}
+
+func (f *fakeOrderClient) CompleteOrder(ctx context.Context, in *pbOrder.CompleteOrderRequest, opts ...grpc.CallOption) (*pbOrder.CompleteOrderResponse, error) {
+	return &pbOrder.CompleteOrderResponse{Success: true}, nil
 }
 
 func TestHandleCreateOrderIgnoresForgedClientFields(t *testing.T) {
@@ -263,5 +273,56 @@ func TestHandleCreatePaymentInjectsCurrentUser(t *testing.T) {
 	}
 	if got, want := client.lastCreatePaymentReq.UserId, int64(7); got != want {
 		t.Fatalf("unexpected user id: got %d want %d", got, want)
+	}
+}
+
+func TestCustomerCannotShipOrder(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	token, err := appjwt.GenerateToken(7, "customer")
+	if err != nil {
+		t.Fatalf("failed to generate token: %v", err)
+	}
+
+	gateway := &APIGateway{orderClient: &fakeOrderClient{}}
+	router := gin.New()
+	router.PUT("/api/orders/:id/ship", gateway.authMiddleware(), gateway.requireRole("merchant", "admin"), gateway.handleShipOrder)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/orders/1/ship", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusForbidden; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+}
+
+func TestShipOrderInjectsCurrentActor(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	token, err := appjwt.GenerateToken(9, "merchant")
+	if err != nil {
+		t.Fatalf("failed to generate token: %v", err)
+	}
+
+	client := &fakeOrderClient{}
+	gateway := &APIGateway{orderClient: client}
+	router := gin.New()
+	router.PUT("/api/orders/:id/ship", gateway.authMiddleware(), gateway.requireRole("merchant", "admin"), gateway.handleShipOrder)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/orders/1/ship", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusOK; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+	if client.lastShipOrderReq == nil {
+		t.Fatal("expected ShipOrder to be called")
+	}
+	if got, want := client.lastShipOrderReq.ActorUserId, int64(9); got != want {
+		t.Fatalf("unexpected actor user id: got %d want %d", got, want)
 	}
 }

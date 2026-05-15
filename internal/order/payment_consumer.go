@@ -1,6 +1,7 @@
 package order
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"gorm.io/gorm"
 
 	"go-commerce/pkg/events"
+	"go-commerce/pkg/mq"
 )
 
 var (
@@ -19,15 +21,19 @@ var (
 
 // PaymentSucceededConsumer 将支付成功事件转化为订单状态迁移。
 type PaymentSucceededConsumer struct {
-	db     *gorm.DB
-	logger *log.Logger
+	db        *gorm.DB
+	publisher mq.Publisher
+	logger    *log.Logger
 }
 
-func NewPaymentSucceededConsumer(db *gorm.DB, logger *log.Logger) *PaymentSucceededConsumer {
+func NewPaymentSucceededConsumer(db *gorm.DB, publisher mq.Publisher, logger *log.Logger) *PaymentSucceededConsumer {
+	if publisher == nil {
+		publisher = mq.NopPublisher{}
+	}
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &PaymentSucceededConsumer{db: db, logger: logger}
+	return &PaymentSucceededConsumer{db: db, publisher: publisher, logger: logger}
 }
 
 func (c *PaymentSucceededConsumer) HandleDelivery(delivery amqp.Delivery) error {
@@ -37,9 +43,23 @@ func (c *PaymentSucceededConsumer) HandleDelivery(delivery amqp.Delivery) error 
 		return fmt.Errorf("decode payment.succeeded event: %w", err)
 	}
 
-	if err := MarkOrderPaid(c.db, event.OrderID, event.UserID, event.Amount); err != nil {
+	order, changed, err := MarkOrderPaid(c.db, event.OrderID, event.UserID, event.Amount)
+	if err != nil {
 		_ = delivery.Nack(false, false)
 		return err
+	}
+	if changed {
+		statusEvent := newOrderStatusChangedEvent(events.OrderPaidType, order, OrderStatusPending, OrderStatusPaid)
+		if err := c.publisher.Publish(context.Background(), events.OrderPaidType, statusEvent); err != nil {
+			c.logger.Printf(
+				"event_publish_failed event_type=%s event_id=%s order_id=%d user_id=%d error=%v",
+				statusEvent.EventType,
+				statusEvent.EventID,
+				order.ID,
+				order.UserID,
+				err,
+			)
+		}
 	}
 
 	c.logger.Printf(
@@ -58,21 +78,23 @@ func (c *PaymentSucceededConsumer) HandleDelivery(delivery amqp.Delivery) error 
 }
 
 // MarkOrderPaid 只允许金额一致的 pending 订单进入 paid；重复事件保持幂等。
-func MarkOrderPaid(db *gorm.DB, orderID, userID int64, amount float64) error {
+func MarkOrderPaid(db *gorm.DB, orderID, userID int64, amount float64) (*Order, bool, error) {
 	var order Order
 	if err := db.Where("id = ? AND user_id = ?", orderID, userID).First(&order).Error; err != nil {
-		return err
+		return nil, false, err
 	}
 	if order.TotalAmount != amount {
-		return ErrOrderPaymentMismatch
+		return nil, false, ErrOrderPaymentMismatch
 	}
-	if order.Status == "paid" {
-		return nil
+	if order.Status == OrderStatusPaid {
+		return &order, false, nil
 	}
-	if order.Status != "pending" {
-		return ErrOrderCannotBePaid
+	if err := TransitionTo(&order, OrderStatusPaid); err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrOrderCannotBePaid, err)
 	}
 
-	order.Status = "paid"
-	return db.Save(&order).Error
+	if err := db.Save(&order).Error; err != nil {
+		return nil, false, err
+	}
+	return &order, true, nil
 }

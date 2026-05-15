@@ -21,7 +21,7 @@ message Order {
   int64 user_id = 2;
   repeated OrderItem items = 3;
   float total_amount = 4;
-  string status = 5; // "pending", "paid", "shipped", "delivered", "cancelled"
+  string status = 5; // "pending", "paid", "shipped", "completed", "cancelled"
   string created_at = 6;
 }
 
@@ -64,9 +64,31 @@ message CancelOrderResponse {
   string message = 2;
 }
 
+message ShipOrderRequest {
+  int64 id = 1;
+  int64 actor_user_id = 2;
+}
+
+message ShipOrderResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message CompleteOrderRequest {
+  int64 id = 1;
+  int64 user_id = 2;
+}
+
+message CompleteOrderResponse {
+  bool success = 1;
+  string message = 2;
+}
+
 service OrderService {
   rpc CreateOrder(CreateOrderRequest) returns (CreateOrderResponse);
   rpc GetOrder(GetOrderRequest) returns (GetOrderResponse);
   rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
   rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+  rpc ShipOrder(ShipOrderRequest) returns (ShipOrderResponse);
+  rpc CompleteOrder(CompleteOrderRequest) returns (CompleteOrderResponse);
 }
