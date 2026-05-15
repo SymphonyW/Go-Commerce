@@ -10,7 +10,8 @@ import (
 // 用于存储商家的基本信息
 // 对应数据库中的merchants表
 type Merchant struct {
-	gorm.Model          // 嵌入GORM基础模型
+	gorm.Model         // 嵌入GORM基础模型
 	Name        string `gorm:"not null"` // 商家名称，非空
 	ContactInfo string `gorm:"not null"` // 联系信息，非空
+	OwnerUserID *uint  `gorm:"index"`    // 归属用户ID；历史数据可暂时为空，待后续回填
 }

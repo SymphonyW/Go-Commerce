@@ -32,10 +32,16 @@ const MerchantProducts = () => {
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const role = localStorage.getItem('role');
+  const canManageMerchants = role === 'merchant' || role === 'admin';
 
   useEffect(() => {
     fetchProducts();
   }, [id]);
+
+  if (!canManageMerchants) {
+    return <div className="error-message">当前账户没有管理商户商品的权限。</div>;
+  }
 
   const fetchProducts = async () => {
     try {

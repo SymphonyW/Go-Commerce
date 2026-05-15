@@ -10,11 +10,13 @@
   - `username` (string)：用户名
   - `password` (string)：密码
   - `email` (string)：邮箱
+  - `role` (string，可选)：用户角色，可选 `customer` 或 `merchant`，默认 `customer`
 - **响应**：
   ```json
   {
     "user_id": 1,
-    "token": "JWT_TOKEN"
+    "token": "JWT_TOKEN",
+    "role": "customer"
   }
   ```
 
@@ -29,7 +31,8 @@
   ```json
   {
     "user_id": 1,
-    "token": "JWT_TOKEN"
+    "token": "JWT_TOKEN",
+    "role": "customer"
   }
   ```
 
@@ -90,9 +93,13 @@
 
 - **端点**：`POST /api/merchants`
 - **描述**：创建新商家
+- **权限**：需要登录，且角色为 `merchant` 或 `admin`
 - **参数**：
   - `name` (string)：商家名称
   - `contact_info` (string)：联系方式
+- **说明**：
+  - 服务端会自动把新商家绑定到当前登录用户
+  - `customer` 无权创建商家
 - **响应**：
   ```json
   {
@@ -100,6 +107,7 @@
       "id": 1,
       "name": "Test Merchant",
       "contact_info": "test@merchant.com",
+      "owner_user_id": 2,
       "created_at": "2026-03-24T00:00:00Z"
     }
   }
@@ -118,6 +126,7 @@
       "id": 1,
       "name": "Test Merchant",
       "contact_info": "test@merchant.com",
+      "owner_user_id": 2,
       "created_at": "2026-03-24T00:00:00Z"
     }
   }
@@ -138,6 +147,7 @@
         "id": 1,
         "name": "Test Merchant",
         "contact_info": "test@merchant.com",
+        "owner_user_id": 2,
         "created_at": "2026-03-24T00:00:00Z"
       }
     ],
@@ -149,6 +159,7 @@
 
 - **端点**：`POST /api/merchants/products`
 - **描述**：商家添加新商品
+- **权限**：需要登录，且角色为 `merchant` 或 `admin`
 - **参数**：
   - `merchant_id` (int)：商家ID
   - `name` (string)：商品名称
@@ -157,6 +168,9 @@
   - `stock` (int)：商品库存
   - `category` (string)：商品分类
   - `image_url` (string)：商品图片URL
+- **说明**：
+  - `merchant` 只能操作归属于自己的商家
+  - `admin` 可以操作任意商家
 - **响应**：
   ```json
   {
@@ -168,9 +182,13 @@
 
 - **端点**：`DELETE /api/merchants/products`
 - **描述**：商家删除自有商品
+- **权限**：需要登录，且角色为 `merchant` 或 `admin`
 - **参数**：
   - `merchant_id` (int)：商家ID
   - `product_id` (int)：商品ID
+- **说明**：
+  - `merchant` 只能删除自己商家下的商品
+  - `admin` 可以删除任意商家下的商品
 - **响应**：
   ```json
   {

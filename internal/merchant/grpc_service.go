@@ -4,6 +4,7 @@ package merchant
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	// gRPC状态码：用于返回标准化的错误信息
@@ -22,56 +23,64 @@ import (
 // 实现了MerchantServiceServer接口
 
 type GRPCService struct {
-	pb.UnimplementedMerchantServiceServer // 嵌入未实现的MerchantServiceServer，以保持向后兼容性
-	db *gorm.DB                         // 数据库连接
+	pb.UnimplementedMerchantServiceServer          // 嵌入未实现的MerchantServiceServer，以保持向后兼容性
+	db                                    *gorm.DB // 数据库连接
+	core                                  *Service // 领域服务，集中处理权限与归属校验
 }
 
 // NewGRPCService 创建商家服务gRPC实例
 // 参数：
-//   db: 数据库连接
+//
+//	db: 数据库连接
+//
 // 返回值：
-//   *GRPCService: 商家服务gRPC实例
+//
+//	*GRPCService: 商家服务gRPC实例
 func NewGRPCService(db *gorm.DB) *GRPCService {
-	return &GRPCService{db: db}
+	return &GRPCService{db: db, core: NewService(db)}
 }
 
 // CreateMerchant 创建商家
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 创建商家请求，包含商家名称和联系信息
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 创建商家请求，包含商家名称和联系信息
+//
 // 返回值：
-//   *pb.CreateMerchantResponse: 创建商家响应，包含创建的商家信息
-//   error: 错误信息
+//
+//	*pb.CreateMerchantResponse: 创建商家响应，包含创建的商家信息
+//	error: 错误信息
 func (s *GRPCService) CreateMerchant(ctx context.Context, req *pb.CreateMerchantRequest) (*pb.CreateMerchantResponse, error) {
-	// 构建商家对象
-	merchant := Merchant{
+	merchant, err := s.core.CreateMerchantForUser(uint(req.OwnerUserId), Merchant{
 		Name:        req.Name,        // 商家名称
 		ContactInfo: req.ContactInfo, // 联系信息
-	}
-
-	// 保存到数据库
-	if err := s.db.Create(&merchant).Error; err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to create merchant: %v", err)
+	})
+	if err != nil {
+		return nil, merchantStatusError(err, "failed to create merchant")
 	}
 
 	// 返回创建商家响应
 	return &pb.CreateMerchantResponse{
 		Merchant: &pb.Merchant{
-			Id:          int64(merchant.ID),          // 商家ID
-			Name:        merchant.Name,               // 商家名称
-			ContactInfo: merchant.ContactInfo,        // 联系信息
+			Id:          int64(merchant.ID),                      // 商家ID
+			Name:        merchant.Name,                           // 商家名称
+			ContactInfo: merchant.ContactInfo,                    // 联系信息
 			CreatedAt:   merchant.CreatedAt.Format(time.RFC3339), // 创建时间
+			OwnerUserId: ownerUserIDValue(merchant.OwnerUserID),
 		},
 	}, nil
 }
 
 // GetMerchant 获取商家信息
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 获取商家请求，包含商家ID
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 获取商家请求，包含商家ID
+//
 // 返回值：
-//   *pb.GetMerchantResponse: 获取商家响应，包含商家详细信息
-//   error: 错误信息
+//
+//	*pb.GetMerchantResponse: 获取商家响应，包含商家详细信息
+//	error: 错误信息
 func (s *GRPCService) GetMerchant(ctx context.Context, req *pb.GetMerchantRequest) (*pb.GetMerchantResponse, error) {
 	// 查找商家
 	var merchant Merchant
@@ -85,21 +94,25 @@ func (s *GRPCService) GetMerchant(ctx context.Context, req *pb.GetMerchantReques
 	// 返回获取商家响应
 	return &pb.GetMerchantResponse{
 		Merchant: &pb.Merchant{
-			Id:          int64(merchant.ID),          // 商家ID
-			Name:        merchant.Name,               // 商家名称
-			ContactInfo: merchant.ContactInfo,        // 联系信息
+			Id:          int64(merchant.ID),                      // 商家ID
+			Name:        merchant.Name,                           // 商家名称
+			ContactInfo: merchant.ContactInfo,                    // 联系信息
 			CreatedAt:   merchant.CreatedAt.Format(time.RFC3339), // 创建时间
+			OwnerUserId: ownerUserIDValue(merchant.OwnerUserID),
 		},
 	}, nil
 }
 
 // ListMerchants 列出商家
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 列出商家请求，包含页码和每页数量
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 列出商家请求，包含页码和每页数量
+//
 // 返回值：
-//   *pb.ListMerchantsResponse: 列出商家响应，包含商家列表和总数
-//   error: 错误信息
+//
+//	*pb.ListMerchantsResponse: 列出商家响应，包含商家列表和总数
+//	error: 错误信息
 func (s *GRPCService) ListMerchants(ctx context.Context, req *pb.ListMerchantsRequest) (*pb.ListMerchantsResponse, error) {
 	var merchants []Merchant
 	var total int64
@@ -117,10 +130,11 @@ func (s *GRPCService) ListMerchants(ctx context.Context, req *pb.ListMerchantsRe
 	pbMerchants := make([]*pb.Merchant, len(merchants))
 	for i, merchant := range merchants {
 		pbMerchants[i] = &pb.Merchant{
-			Id:          int64(merchant.ID),          // 商家ID
-			Name:        merchant.Name,               // 商家名称
-			ContactInfo: merchant.ContactInfo,        // 联系信息
+			Id:          int64(merchant.ID),                      // 商家ID
+			Name:        merchant.Name,                           // 商家名称
+			ContactInfo: merchant.ContactInfo,                    // 联系信息
 			CreatedAt:   merchant.CreatedAt.Format(time.RFC3339), // 创建时间
+			OwnerUserId: ownerUserIDValue(merchant.OwnerUserID),
 		}
 	}
 
@@ -133,67 +147,72 @@ func (s *GRPCService) ListMerchants(ctx context.Context, req *pb.ListMerchantsRe
 
 // AddProduct 商家新增商品
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 添加商品请求，包含商家ID和商品详细信息
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 添加商品请求，包含商家ID和商品详细信息
+//
 // 返回值：
-//   *pb.AddProductResponse: 添加商品响应，包含创建的商品ID
-//   error: 错误信息
+//
+//	*pb.AddProductResponse: 添加商品响应，包含创建的商品ID
+//	error: 错误信息
 func (s *GRPCService) AddProduct(ctx context.Context, req *pb.AddProductRequest) (*pb.AddProductResponse, error) {
-	// 验证商家是否存在
-	var merchant Merchant
-	if err := s.db.First(&merchant, req.MerchantId).Error; err != nil {
-		return nil, status.Errorf(codes.NotFound, "merchant not found: %v", err)
-	}
-
-	// 创建商品
-	product := product.Product{
-		Name:        req.Name,        // 商品名称
-		Description: req.Description, // 商品描述
+	productID, err := s.core.AddProductForUser(uint(req.ActorUserId), uint(req.MerchantId), product.Product{
+		Name:        req.Name,           // 商品名称
+		Description: req.Description,    // 商品描述
 		Price:       float64(req.Price), // 商品价格
-		Stock:       req.Stock,       // 商品库存
-		Category:    req.Category,    // 商品分类
-		ImageURL:    req.ImageUrl,    // 商品图片URL
-		MerchantID:  uint(req.MerchantId), // 商家ID
-	}
-
-	// 保存到数据库
-	if err := s.db.Create(&product).Error; err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to create product: %v", err)
+		Stock:       req.Stock,          // 商品库存
+		Category:    req.Category,       // 商品分类
+		ImageURL:    req.ImageUrl,       // 商品图片URL
+	})
+	if err != nil {
+		return nil, merchantStatusError(err, "failed to create product")
 	}
 
 	// 返回添加商品响应
 	return &pb.AddProductResponse{
-		ProductId: int64(product.ID),
+		ProductId: int64(productID),
 	}, nil
 }
 
 // DeleteProduct 商家删除自有商品
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 删除商品请求，包含商家ID和商品ID
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 删除商品请求，包含商家ID和商品ID
+//
 // 返回值：
-//   *pb.DeleteProductResponse: 删除商品响应，包含删除是否成功
-//   error: 错误信息
+//
+//	*pb.DeleteProductResponse: 删除商品响应，包含删除是否成功
+//	error: 错误信息
 func (s *GRPCService) DeleteProduct(ctx context.Context, req *pb.DeleteProductRequest) (*pb.DeleteProductResponse, error) {
-	// 验证商家是否存在
-	var merchant Merchant
-	if err := s.db.First(&merchant, req.MerchantId).Error; err != nil {
-		return nil, status.Errorf(codes.NotFound, "merchant not found: %v", err)
-	}
-
-	// 验证商品是否存在且属于该商家
-	var product product.Product
-	if err := s.db.Where("id = ? AND merchant_id = ?", req.ProductId, req.MerchantId).First(&product).Error; err != nil {
-		return nil, status.Errorf(codes.NotFound, "product not found or not belong to this merchant")
-	}
-
-	// 删除商品
-	if err := s.db.Delete(&product).Error; err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to delete product: %v", err)
+	if err := s.core.DeleteProductForUser(uint(req.ActorUserId), uint(req.MerchantId), uint(req.ProductId)); err != nil {
+		return nil, merchantStatusError(err, "failed to delete product")
 	}
 
 	// 返回删除商品响应
 	return &pb.DeleteProductResponse{
 		Success: true,
 	}, nil
+}
+
+func ownerUserIDValue(ownerUserID *uint) int64 {
+	if ownerUserID == nil {
+		return 0
+	}
+	return int64(*ownerUserID)
+}
+
+func merchantStatusError(err error, fallback string) error {
+	switch {
+	case errors.Is(err, ErrPermissionDenied):
+		return status.Error(codes.PermissionDenied, "merchant operation is not allowed")
+	case errors.Is(err, ErrUserNotFound):
+		return status.Error(codes.NotFound, "user not found")
+	case errors.Is(err, ErrMerchantNotFound):
+		return status.Error(codes.NotFound, "merchant not found")
+	case errors.Is(err, ErrProductNotFound):
+		return status.Error(codes.NotFound, "product not found or not belong to this merchant")
+	default:
+		return status.Errorf(codes.Internal, "%s: %v", fallback, err)
+	}
 }

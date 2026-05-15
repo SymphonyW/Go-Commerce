@@ -149,11 +149,8 @@ func main() {
 		public.GET("/products", gateway.handleListProducts)   // 获取产品列表
 		public.GET("/products/:id", gateway.handleGetProduct) // 获取单个产品详情
 		// 商家相关路由
-		public.POST("/merchants", gateway.handleCreateMerchant)                   // 创建商家
-		public.GET("/merchants/:id", gateway.handleGetMerchant)                   // 获取商家详情
-		public.GET("/merchants", gateway.handleListMerchants)                     // 获取商家列表
-		public.POST("/merchants/products", gateway.handleMerchantAddProduct)      // 商家添加产品
-		public.DELETE("/merchants/products", gateway.handleMerchantDeleteProduct) // 商家删除产品
+		public.GET("/merchants/:id", gateway.handleGetMerchant) // 获取商家详情
+		public.GET("/merchants", gateway.handleListMerchants)   // 获取商家列表
 	}
 
 	// 私有路由组：需要认证的接口
@@ -171,6 +168,10 @@ func main() {
 		private.PUT("/cart/items", gateway.handleUpdateCartItem)    // 更新购物车商品
 		private.DELETE("/cart/items", gateway.handleDeleteCartItem) // 删除购物车商品
 		private.DELETE("/cart", gateway.handleClearCart)            // 清空购物车
+		// 商家写操作需要登录，并要求 merchant 或 admin 角色
+		private.POST("/merchants", gateway.requireRole("merchant", "admin"), gateway.handleCreateMerchant)
+		private.POST("/merchants/products", gateway.requireRole("merchant", "admin"), gateway.handleMerchantAddProduct)
+		private.DELETE("/merchants/products", gateway.requireRole("merchant", "admin"), gateway.handleMerchantDeleteProduct)
 	}
 
 	// 启动HTTP服务器，监听8080端口
@@ -211,6 +212,39 @@ func (g *APIGateway) authMiddleware() gin.HandlerFunc {
 
 		// 将用户ID存储到上下文中
 		c.Set("user_id", claims.UserID)
+		c.Set("role", claims.Role)
+		c.Next()
+	}
+}
+
+// requireRole 校验当前用户是否具备指定角色之一。
+func (g *APIGateway) requireRole(allowedRoles ...string) gin.HandlerFunc {
+	allowed := make(map[string]struct{}, len(allowedRoles))
+	for _, role := range allowedRoles {
+		allowed[role] = struct{}{}
+	}
+
+	return func(c *gin.Context) {
+		roleValue, exists := c.Get("role")
+		if !exists {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+			c.Abort()
+			return
+		}
+
+		role, ok := roleValue.(string)
+		if !ok {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+			c.Abort()
+			return
+		}
+
+		if _, ok := allowed[role]; !ok {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+			c.Abort()
+			return
+		}
+
 		c.Next()
 	}
 }
@@ -225,6 +259,7 @@ func (g *APIGateway) handleRegister(c *gin.Context) {
 		Username string `json:"username"` // 用户名
 		Password string `json:"password"` // 密码
 		Email    string `json:"email"`    // 邮箱
+		Role     string `json:"role"`     // 用户角色
 	}
 
 	// 绑定JSON请求体
@@ -238,6 +273,7 @@ func (g *APIGateway) handleRegister(c *gin.Context) {
 		Username: req.Username,
 		Password: req.Password,
 		Email:    req.Email,
+		Role:     req.Role,
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -248,6 +284,7 @@ func (g *APIGateway) handleRegister(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"user_id": resp.UserId,
 		"token":   resp.Token,
+		"role":    resp.Role,
 	})
 }
 
@@ -282,6 +319,7 @@ func (g *APIGateway) handleLogin(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"user_id": resp.UserId,
 		"token":   resp.Token,
+		"role":    resp.Role,
 	})
 }
 
@@ -454,6 +492,12 @@ func (g *APIGateway) handleListOrders(c *gin.Context) {
 //
 //	c: Gin上下文，包含请求和响应信息
 func (g *APIGateway) handleCreateMerchant(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
 	// 定义请求结构体
 	var req struct {
 		Name        string `json:"name"`         // 商家名称
@@ -470,9 +514,10 @@ func (g *APIGateway) handleCreateMerchant(c *gin.Context) {
 	resp, err := g.merchantClient.CreateMerchant(context.Background(), &pbMerchant.CreateMerchantRequest{
 		Name:        req.Name,
 		ContactInfo: req.ContactInfo,
+		OwnerUserId: userID.(int64),
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeGRPCError(c, err)
 		return
 	}
 
@@ -532,6 +577,12 @@ func (g *APIGateway) handleListMerchants(c *gin.Context) {
 //
 //	c: Gin上下文，包含请求和响应信息
 func (g *APIGateway) handleMerchantAddProduct(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
 	// 定义请求结构体
 	var req struct {
 		MerchantId  int64   `json:"merchant_id"` // 商家ID
@@ -558,9 +609,10 @@ func (g *APIGateway) handleMerchantAddProduct(c *gin.Context) {
 		Stock:       req.Stock,
 		Category:    req.Category,
 		ImageUrl:    req.ImageUrl,
+		ActorUserId: userID.(int64),
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeGRPCError(c, err)
 		return
 	}
 
@@ -573,6 +625,12 @@ func (g *APIGateway) handleMerchantAddProduct(c *gin.Context) {
 //
 //	c: Gin上下文，包含请求和响应信息
 func (g *APIGateway) handleMerchantDeleteProduct(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
 	// 定义请求结构体
 	var req struct {
 		MerchantId int64 `json:"merchant_id"` // 商家ID
@@ -587,16 +645,33 @@ func (g *APIGateway) handleMerchantDeleteProduct(c *gin.Context) {
 
 	// 调用商家服务的DeleteProduct方法
 	resp, err := g.merchantClient.DeleteProduct(context.Background(), &pbMerchant.DeleteProductRequest{
-		MerchantId: req.MerchantId,
-		ProductId:  req.ProductId,
+		MerchantId:  req.MerchantId,
+		ProductId:   req.ProductId,
+		ActorUserId: userID.(int64),
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeGRPCError(c, err)
 		return
 	}
 
 	// 返回删除产品响应
 	c.JSON(http.StatusOK, resp)
+}
+
+func writeGRPCError(c *gin.Context, err error) {
+	grpcStatus := status.Convert(err)
+	switch grpcStatus.Code() {
+	case codes.InvalidArgument:
+		c.JSON(http.StatusBadRequest, gin.H{"error": grpcStatus.Message()})
+	case codes.Unauthenticated:
+		c.JSON(http.StatusUnauthorized, gin.H{"error": grpcStatus.Message()})
+	case codes.PermissionDenied:
+		c.JSON(http.StatusForbidden, gin.H{"error": grpcStatus.Message()})
+	case codes.NotFound:
+		c.JSON(http.StatusNotFound, gin.H{"error": grpcStatus.Message()})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": grpcStatus.Message()})
+	}
 }
 
 // handleAddCartItem 处理添加购物车商品请求

@@ -7,6 +7,7 @@ const Register = () => {
     username: '',
     password: '',
     email: '',
+    role: 'customer',
   });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -29,6 +30,7 @@ const Register = () => {
       const data = await authAPI.register(formData);
       localStorage.setItem('token', data.token);
       localStorage.setItem('user_id', data.user_id);
+      localStorage.setItem('role', data.role);
       navigate('/');
     } catch (error) {
       setError(error.response?.data?.error || '注册失败，请稍后重试');
@@ -75,6 +77,13 @@ const Register = () => {
               onChange={handleChange}
               required
             />
+          </div>
+          <div className="form-group">
+            <label htmlFor="role">账户类型</label>
+            <select id="role" name="role" value={formData.role} onChange={handleChange}>
+              <option value="customer">普通用户</option>
+              <option value="merchant">商家用户</option>
+            </select>
           </div>
           <button type="submit" className="btn btn-primary" disabled={loading}>
             {loading ? '注册中...' : '注册'}

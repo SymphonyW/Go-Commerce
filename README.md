@@ -8,6 +8,7 @@ Go Commerce是一个基于微服务架构的电子商务系统，使用Go语言�
 
 - **微服务架构**：采用模块化设计，各服务独立部署和扩展
 - **用户认证**：基于JWT的安全认证系统
+- **角色权限**：支持 `customer`、`merchant`、`admin` 三类角色，并校验商家资源归属
 - **产品管理**：完整的产品CRUD操作，支持分类和搜索
 - **购物车功能**：基于Redis的购物车管理
 - **订单管理**：完整的订单创建和跟踪流程
@@ -146,8 +147,10 @@ npm run dev
 ```bash
 curl -X POST http://localhost:8081/api/register \
   -H "Content-Type: application/json" \
-  -d '{"username": "testuser", "password": "password123", "email": "test@example.com"}'
+  -d '{"username": "testuser", "password": "password123", "email": "test@example.com", "role": "customer"}'
 ```
+
+> 注册时可选择 `customer` 或 `merchant`。`admin` 角色预留给后台配置或手工初始化，不开放公网自助注册。
 
 ### 登录获取令牌
 
@@ -168,6 +171,7 @@ curl http://localhost:8081/api/products
 ```bash
 curl -X POST http://localhost:8081/api/merchants \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer MERCHANT_TOKEN" \
   -d '{"name": "Test Merchant", "contact_info": "test@merchant.com"}'
 ```
 
@@ -176,6 +180,7 @@ curl -X POST http://localhost:8081/api/merchants \
 ```bash
 curl -X POST http://localhost:8081/api/merchants/products \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer MERCHANT_TOKEN" \
   -d '{"merchant_id": 1, "name": "Test Product", "description": "Test Description", "price": 99.99, "stock": 100, "category": "Electronics", "image_url": "https://example.com/image.jpg"}'
 ```
 
@@ -184,8 +189,11 @@ curl -X POST http://localhost:8081/api/merchants/products \
 ```bash
 curl -X DELETE http://localhost:8081/api/merchants/products \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer MERCHANT_TOKEN" \
   -d '{"merchant_id": 1, "product_id": 1}'
 ```
+
+> 商家写操作都要求登录。`merchant` 只能管理自己名下的商家，`admin` 可管理全部商家，`customer` 无权执行商家写操作。
 
 ### 用户下单
 

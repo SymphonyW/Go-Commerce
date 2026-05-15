@@ -7,6 +7,12 @@ const MerchantCreate = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const navigate = useNavigate();
+  const role = localStorage.getItem('role');
+  const canManageMerchants = role === 'merchant' || role === 'admin';
+
+  if (!canManageMerchants) {
+    return <div className="error-message">当前账户没有创建商户的权限。</div>;
+  }
 
   const handleChange = (e) => {
     const { name, value } = e.target;

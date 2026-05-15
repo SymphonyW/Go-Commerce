@@ -122,6 +122,7 @@ Go-Commerce/
 - 用户注册：创建新用户账号
 - 用户登录：验证用户凭据并生成JWT令牌
 - 密码哈希：安全存储用户密码
+- 角色写入：JWT 中携带 `user_id` 与 `role`，支持后续权限判断
 
 **主要文件**：
 - `internal/auth/service.go`：认证服务实现
@@ -182,11 +183,19 @@ Go-Commerce/
 - 商户管理：创建、查询商户信息
 - 产品管理：商户添加、删除产品
 - 商户列表：获取商户列表
+- 资源归属：商户记录保存 `owner_user_id`
+- 权限控制：`merchant` 只能管理自己的商户，`admin` 可以管理全部商户
 
 **主要文件**：
 - `internal/merchant/service.go`：商户服务实现
 - `internal/merchant/grpc_service.go`：商户服务gRPC实现
 - `internal/merchant/model.go`：商户模型定义
+
+**RBAC 与归属校验设计**：
+- 用户角色最小集合为 `customer`、`merchant`、`admin`
+- API 网关先做粗粒度角色拦截，未登录返回 `401`，无角色权限返回 `403`
+- 商户服务再基于数据库中的真实角色和 `owner_user_id` 做最终授权，避免只信任前端传入的 `merchant_id`
+- 为兼容历史商户数据，`owner_user_id` 先允许为空；旧数据回填完成后，再考虑收紧为非空约束
 
 ### 4.7 前端应用
 

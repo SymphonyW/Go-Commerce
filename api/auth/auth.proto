@@ -8,11 +8,13 @@ message RegisterRequest {
   string username = 1;
   string password = 2;
   string email = 3;
+  string role = 4;
 }
 
 message RegisterResponse {
   int64 user_id = 1;
   string token = 2;
+  string role = 3;
 }
 
 message LoginRequest {
@@ -23,6 +25,7 @@ message LoginRequest {
 message LoginResponse {
   int64 user_id = 1;
   string token = 2;
+  string role = 3;
 }
 
 message ValidateTokenRequest {
@@ -32,6 +35,7 @@ message ValidateTokenRequest {
 message ValidateTokenResponse {
   bool valid = 1;
   int64 user_id = 2;
+  string role = 3;
 }
 
 service AuthService {

@@ -5,6 +5,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"strings"
 
 	// bcrypt：用于密码哈希处理
 	"golang.org/x/crypto/bcrypt"
@@ -24,31 +25,42 @@ import (
 // 实现了AuthServiceServer接口
 
 type Service struct {
-	pb.UnimplementedAuthServiceServer // 嵌入未实现的AuthServiceServer，以保持向后兼容性
-	db *gorm.DB                       // 数据库连接
+	pb.UnimplementedAuthServiceServer          // 嵌入未实现的AuthServiceServer，以保持向后兼容性
+	db                                *gorm.DB // 数据库连接
 }
 
 // NewService 创建认证服务实例
 // 参数：
-//   db: 数据库连接
+//
+//	db: 数据库连接
+//
 // 返回值：
-//   *Service: 认证服务实例
+//
+//	*Service: 认证服务实例
 func NewService(db *gorm.DB) *Service {
 	return &Service{db: db}
 }
 
 // Register 用户注册：创建新用户并生成JWT令牌
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 注册请求，包含用户名、密码和邮箱
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 注册请求，包含用户名、密码和邮箱
+//
 // 返回值：
-//   *pb.RegisterResponse: 注册响应，包含用户ID和JWT令牌
-//   error: 错误信息
+//
+//	*pb.RegisterResponse: 注册响应，包含用户ID和JWT令牌
+//	error: 错误信息
 func (s *Service) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.RegisterResponse, error) {
 	// 检查用户名是否已存在
 	var existingUser User
 	if err := s.db.Where("username = ?", req.Username).First(&existingUser).Error; err == nil {
 		return nil, status.Errorf(codes.AlreadyExists, "username already exists")
+	}
+
+	role, err := normalizeRegistrationRole(req.Role)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
 	// 密码哈希处理
@@ -63,6 +75,7 @@ func (s *Service) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Re
 		Username: req.Username,
 		Password: string(hashedPassword),
 		Email:    req.Email,
+		Role:     role,
 	}
 	if err := s.db.Create(&user).Error; err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to create user")
@@ -70,7 +83,7 @@ func (s *Service) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Re
 
 	// 生成JWT令牌
 	// 用于后续的身份验证
-	token, err := jwt.GenerateToken(int64(user.ID))
+	token, err := jwt.GenerateToken(int64(user.ID), user.Role)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to generate token")
 	}
@@ -79,16 +92,20 @@ func (s *Service) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Re
 	return &pb.RegisterResponse{
 		UserId: int64(user.ID),
 		Token:  token,
+		Role:   user.Role,
 	}, nil
 }
 
 // Login 用户登录：验证用户凭据并生成JWT令牌
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 登录请求，包含用户名和密码
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 登录请求，包含用户名和密码
+//
 // 返回值：
-//   *pb.LoginResponse: 登录响应，包含用户ID和JWT令牌
-//   error: 错误信息
+//
+//	*pb.LoginResponse: 登录响应，包含用户ID和JWT令牌
+//	error: 错误信息
 func (s *Service) Login(ctx context.Context, req *pb.LoginRequest) (*pb.LoginResponse, error) {
 	// 查找用户
 	var user User
@@ -107,7 +124,15 @@ func (s *Service) Login(ctx context.Context, req *pb.LoginRequest) (*pb.LoginRes
 
 	// 生成JWT令牌
 	// 用于后续的身份验证
-	token, err := jwt.GenerateToken(int64(user.ID))
+	role := normalizeStoredRole(user.Role)
+	if role != user.Role {
+		user.Role = role
+		if err := s.db.Model(&user).Update("role", role).Error; err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to normalize user role")
+		}
+	}
+
+	token, err := jwt.GenerateToken(int64(user.ID), role)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to generate token")
 	}
@@ -116,16 +141,20 @@ func (s *Service) Login(ctx context.Context, req *pb.LoginRequest) (*pb.LoginRes
 	return &pb.LoginResponse{
 		UserId: int64(user.ID),
 		Token:  token,
+		Role:   role,
 	}, nil
 }
 
 // ValidateToken 验证令牌：检查JWT令牌的有效性
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 验证令牌请求，包含JWT令牌
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 验证令牌请求，包含JWT令牌
+//
 // 返回值：
-//   *pb.ValidateTokenResponse: 验证响应，包含令牌是否有效和用户ID
-//   error: 错误信息
+//
+//	*pb.ValidateTokenResponse: 验证响应，包含令牌是否有效和用户ID
+//	error: 错误信息
 func (s *Service) ValidateToken(ctx context.Context, req *pb.ValidateTokenRequest) (*pb.ValidateTokenResponse, error) {
 	// 验证令牌
 	claims, err := jwt.ValidateToken(req.Token)
@@ -138,5 +167,28 @@ func (s *Service) ValidateToken(ctx context.Context, req *pb.ValidateTokenReques
 	return &pb.ValidateTokenResponse{
 		Valid:  true,
 		UserId: claims.UserID,
+		Role:   normalizeStoredRole(claims.Role),
 	}, nil
+}
+
+// normalizeRegistrationRole 只允许公开注册为 customer 或 merchant，admin 需通过后台或人工方式配置。
+func normalizeRegistrationRole(role string) (string, error) {
+	switch strings.TrimSpace(strings.ToLower(role)) {
+	case "", RoleCustomer:
+		return RoleCustomer, nil
+	case RoleMerchant:
+		return RoleMerchant, nil
+	default:
+		return "", errors.New("invalid role")
+	}
+}
+
+// normalizeStoredRole 为历史用户数据提供兼容默认值，避免旧记录缺少 role 时无法登录。
+func normalizeStoredRole(role string) string {
+	switch role {
+	case RoleMerchant, RoleAdmin:
+		return role
+	default:
+		return RoleCustomer
+	}
 }

@@ -3,10 +3,13 @@ import { Link, useNavigate } from 'react-router-dom';
 const Navbar = () => {
   const navigate = useNavigate();
   const token = localStorage.getItem('token');
+  const role = localStorage.getItem('role');
+  const canManageMerchants = role === 'merchant' || role === 'admin';
 
   const handleLogout = () => {
     localStorage.removeItem('token');
     localStorage.removeItem('user_id');
+    localStorage.removeItem('role');
     navigate('/login');
   };
 
@@ -23,9 +26,11 @@ const Navbar = () => {
           <Link to="/products" className="navbar-link">
             商品
           </Link>
-          <Link to="/merchants" className="navbar-link">
-            商户管理
-          </Link>
+          {canManageMerchants && (
+            <Link to="/merchants" className="navbar-link">
+              商户管理
+            </Link>
+          )}
           {token ? (
             <>
               <Link to="/cart" className="navbar-link">

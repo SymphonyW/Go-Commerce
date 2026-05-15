@@ -2,36 +2,55 @@ package merchant
 
 import (
 	"errors"
+
+	"go-commerce/internal/auth"
 	"go-commerce/internal/product"
+
 	"gorm.io/gorm"
 )
 
-// Service 商家服务
+var (
+	ErrUserNotFound     = errors.New("user not found")
+	ErrMerchantNotFound = errors.New("merchant not found")
+	ErrProductNotFound  = errors.New("product not found or not belong to this merchant")
+	ErrPermissionDenied = errors.New("permission denied")
+)
+
+// Service 商家领域服务，集中处理资源归属与权限校验。
 type Service struct {
 	DB *gorm.DB
 }
 
-// NewService 创建商家服务实例
+// NewService 创建商家服务实例。
 func NewService(db *gorm.DB) *Service {
 	return &Service{DB: db}
 }
 
-// AddProduct 商家新增商品
-// 参数：merchantID (uint) - 商家ID
-// 参数：productData (product.Product) - 商品信息
-// 返回：productID (uint) - 新增商品的ID
-// 异常：error - 商家权限验证失败时抛出
-func (s *Service) AddProduct(merchantID uint, productData product.Product) (uint, error) {
-	// 验证商家是否存在
-	var merchant Merchant
-	if err := s.DB.First(&merchant, merchantID).Error; err != nil {
-		return 0, errors.New("merchant not found")
+// CreateMerchantForUser 为具备商家权限的用户创建商家，并绑定资源归属。
+func (s *Service) CreateMerchantForUser(ownerUserID uint, merchantData Merchant) (Merchant, error) {
+	actor, err := s.loadActor(ownerUserID)
+	if err != nil {
+		return Merchant{}, err
+	}
+	if !canManageMerchantWrites(actor.Role) {
+		return Merchant{}, ErrPermissionDenied
 	}
 
-	// 设置商品归属商家
-	productData.MerchantID = merchantID
+	merchantData.OwnerUserID = &ownerUserID
+	if err := s.DB.Create(&merchantData).Error; err != nil {
+		return Merchant{}, err
+	}
 
-	// 保存商品
+	return merchantData, nil
+}
+
+// AddProductForUser 仅允许商家本人或管理员向目标商家新增商品。
+func (s *Service) AddProductForUser(actorUserID uint, merchantID uint, productData product.Product) (uint, error) {
+	if _, err := s.authorizeMerchantWrite(actorUserID, merchantID); err != nil {
+		return 0, err
+	}
+
+	productData.MerchantID = merchantID
 	if err := s.DB.Create(&productData).Error; err != nil {
 		return 0, err
 	}
@@ -39,28 +58,77 @@ func (s *Service) AddProduct(merchantID uint, productData product.Product) (uint
 	return productData.ID, nil
 }
 
-// DeleteProduct 商家删除自有商品
-// 参数：merchantID (uint) - 商家ID
-// 参数：productID (uint) - 商品ID
-// 返回：error - 操作错误
-// 异常：error - 商家权限验证失败时抛出
-func (s *Service) DeleteProduct(merchantID uint, productID uint) error {
-	// 验证商家是否存在
-	var merchant Merchant
-	if err := s.DB.First(&merchant, merchantID).Error; err != nil {
-		return errors.New("merchant not found")
+// DeleteProductForUser 仅允许商家本人或管理员删除目标商家下的商品。
+func (s *Service) DeleteProductForUser(actorUserID uint, merchantID uint, productID uint) error {
+	if _, err := s.authorizeMerchantWrite(actorUserID, merchantID); err != nil {
+		return err
 	}
 
-	// 验证商品是否存在且属于该商家
-	var product product.Product
-	if err := s.DB.Where("id = ? AND merchant_id = ?", productID, merchantID).First(&product).Error; err != nil {
-		return errors.New("product not found or not belong to this merchant")
+	var productInfo product.Product
+	if err := s.DB.Where("id = ? AND merchant_id = ?", productID, merchantID).First(&productInfo).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrProductNotFound
+		}
+		return err
 	}
 
-	// 删除商品
-	if err := s.DB.Delete(&product).Error; err != nil {
+	if err := s.DB.Delete(&productInfo).Error; err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// authorizeMerchantWrite 以数据库中的真实角色与资源归属为准，避免只信任网关参数。
+func (s *Service) authorizeMerchantWrite(actorUserID uint, merchantID uint) (Merchant, error) {
+	actor, err := s.loadActor(actorUserID)
+	if err != nil {
+		return Merchant{}, err
+	}
+	if !canManageMerchantWrites(actor.Role) {
+		return Merchant{}, ErrPermissionDenied
+	}
+
+	var merchant Merchant
+	if err := s.DB.First(&merchant, merchantID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return Merchant{}, ErrMerchantNotFound
+		}
+		return Merchant{}, err
+	}
+
+	if actor.Role != auth.RoleAdmin {
+		// 历史商家记录若尚未回填 owner_user_id，默认不授予普通商家写权限。
+		if merchant.OwnerUserID == nil || *merchant.OwnerUserID != actorUserID {
+			return Merchant{}, ErrPermissionDenied
+		}
+	}
+
+	return merchant, nil
+}
+
+func (s *Service) loadActor(userID uint) (auth.User, error) {
+	var actor auth.User
+	if err := s.DB.First(&actor, userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return auth.User{}, ErrUserNotFound
+		}
+		return auth.User{}, err
+	}
+
+	actor.Role = normalizeActorRole(actor.Role)
+	return actor, nil
+}
+
+func canManageMerchantWrites(role string) bool {
+	return role == auth.RoleMerchant || role == auth.RoleAdmin
+}
+
+func normalizeActorRole(role string) string {
+	switch role {
+	case auth.RoleMerchant, auth.RoleAdmin:
+		return role
+	default:
+		return auth.RoleCustomer
+	}
 }

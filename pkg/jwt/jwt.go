@@ -17,24 +17,29 @@ var secretKey = []byte("your-secret-key")
 // 包含用户ID和标准JWT声明
 
 type Claims struct {
-	UserID int64 `json:"user_id"` // 用户ID
-	jwt.RegisteredClaims           // 嵌入标准JWT声明
+	UserID               int64  `json:"user_id"` // 用户ID
+	Role                 string `json:"role"`    // 用户角色
+	jwt.RegisteredClaims        // 嵌入标准JWT声明
 }
 
 // GenerateToken 生成JWT令牌
 // 参数：
-//   userID: 用户ID
+//
+//	userID: 用户ID
+//
 // 返回值：
-//   string: JWT令牌字符串
-//   error: 错误信息
-func GenerateToken(userID int64) (string, error) {
+//
+//	string: JWT令牌字符串
+//	error: 错误信息
+func GenerateToken(userID int64, role string) (string, error) {
 	// 构建JWT声明
 	claims := Claims{
 		UserID: userID,
+		Role:   role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)), // 令牌过期时间：24小时
-			IssuedAt:  jwt.NewNumericDate(time.Now()),                   // 令牌签发时间
-			Issuer:    "go-ecommerce",                                 // 令牌签发者
+			IssuedAt:  jwt.NewNumericDate(time.Now()),                     // 令牌签发时间
+			Issuer:    "go-ecommerce",                                     // 令牌签发者
 		},
 	}
 
@@ -46,10 +51,13 @@ func GenerateToken(userID int64) (string, error) {
 
 // ValidateToken 验证JWT令牌
 // 参数：
-//   tokenString: JWT令牌字符串
+//
+//	tokenString: JWT令牌字符串
+//
 // 返回值：
-//   *Claims: JWT声明，包含用户ID
-//   error: 错误信息
+//
+//	*Claims: JWT声明，包含用户ID
+//	error: 错误信息
 func ValidateToken(tokenString string) (*Claims, error) {
 	// 初始化声明结构体
 	claims := &Claims{}

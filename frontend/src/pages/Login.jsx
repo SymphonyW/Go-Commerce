@@ -28,6 +28,7 @@ const Login = () => {
       const data = await authAPI.login(formData);
       localStorage.setItem('token', data.token);
       localStorage.setItem('user_id', data.user_id);
+      localStorage.setItem('role', data.role);
       navigate('/');
     } catch (error) {
       setError(error.response?.data?.error || '登录失败，请检查用户名和密码');
