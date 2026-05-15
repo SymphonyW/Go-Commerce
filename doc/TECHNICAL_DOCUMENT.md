@@ -155,6 +155,13 @@ Go-Commerce/
 - `internal/order/service.go`：订单服务实现
 - `internal/order/model.go`：订单模型定义
 
+**库存一致性设计**：
+- 创建订单时先在服务端合并重复 `product_id`，再基于真实商品信息生成订单快照。
+- 扣减库存统一走条件更新：`UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?`，通过 `RowsAffected` 判断是否成功，避免并发下出现超卖或负库存。
+- 订单主表、订单项与库存扣减处于同一事务中；任一环节失败，库存变化会随事务一并回滚。
+- 取消订单时统一走原子回补：`UPDATE products SET stock = stock + ? WHERE id = ?`。
+- 可通过 `go test ./internal/order -run TestCreateOrderConcurrentRequestsDoNotOversell -v` 快速验证并发防超卖行为。
+
 ### 4.5 购物车服务
 
 **职责**：管理用户购物车。

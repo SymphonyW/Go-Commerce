@@ -4,6 +4,7 @@ package order
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math"
 	"time"
@@ -33,10 +34,13 @@ type Service struct {
 
 // NewService 创建订单服务实例
 // 参数：
-//   db: 数据库连接
-//   ch: RabbitMQ通道
+//
+//	db: 数据库连接
+//	ch: RabbitMQ通道
+//
 // 返回值：
-//   *Service: 订单服务实例
+//
+//	*Service: 订单服务实例
 func NewService(db *gorm.DB, ch *amqp.Channel) *Service {
 	return &Service{db: db, ch: ch}
 }
@@ -44,11 +48,14 @@ func NewService(db *gorm.DB, ch *amqp.Channel) *Service {
 // CreateOrder 创建订单：创建新订单并发送订单事件
 // 功能：用户下单，检查库存并生成订单记录
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 订单创建请求，包含用户ID和订单商品列表
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 订单创建请求，包含用户ID和订单商品列表
+//
 // 返回值：
-//   *pb.CreateOrderResponse: 订单创建响应，包含创建的订单信息
-//   error: 错误信息
+//
+//	*pb.CreateOrderResponse: 订单创建响应，包含创建的订单信息
+//	error: 错误信息
 func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (*pb.CreateOrderResponse, error) {
 	aggregatedItems, err := aggregateCreateOrderItems(req.Items)
 	if err != nil {
@@ -174,10 +181,6 @@ func buildOrderSnapshots(tx *gorm.DB, items []aggregatedCreateOrderItem) ([]Orde
 			return nil, 0, status.Errorf(codes.Internal, "failed to fetch product %d: %v", item.ProductID, err)
 		}
 
-		if productInfo.Stock < item.Quantity {
-			return nil, 0, status.Errorf(codes.InvalidArgument, "insufficient stock for product %s", productInfo.Name)
-		}
-
 		// 订单项必须保存下单瞬间的名称与价格，保证历史订单展示稳定。
 		orderItems = append(orderItems, OrderItem{
 			ProductID:   int64(productInfo.ID),
@@ -187,9 +190,18 @@ func buildOrderSnapshots(tx *gorm.DB, items []aggregatedCreateOrderItem) ([]Orde
 		})
 		totalAmount += productInfo.Price * float64(item.Quantity)
 
-		productInfo.Stock -= item.Quantity
-		if err := tx.Save(&productInfo).Error; err != nil {
-			return nil, 0, status.Errorf(codes.Internal, "failed to update stock for product %d: %v", item.ProductID, err)
+		// 库存扣减使用数据库条件更新，确保并发下 stock 不会被扣成负数。
+		if err := product.DeductStock(tx, item.ProductID, item.Quantity); err != nil {
+			switch {
+			case errors.Is(err, product.ErrProductNotFound):
+				return nil, 0, status.Errorf(codes.NotFound, "product not found: %d", item.ProductID)
+			case errors.Is(err, product.ErrInsufficientStock):
+				return nil, 0, status.Errorf(codes.InvalidArgument, "insufficient stock for product %s", productInfo.Name)
+			case errors.Is(err, product.ErrInvalidQuantity):
+				return nil, 0, status.Error(codes.InvalidArgument, "quantity must be greater than zero")
+			default:
+				return nil, 0, status.Errorf(codes.Internal, "failed to deduct stock for product %d: %v", item.ProductID, err)
+			}
 		}
 	}
 
@@ -198,10 +210,13 @@ func buildOrderSnapshots(tx *gorm.DB, items []aggregatedCreateOrderItem) ([]Orde
 
 // convertToPBOrder 转换订单模型为proto对象
 // 参数：
-//   order: 订单模型对象
-//   items: 订单项模型对象列表
+//
+//	order: 订单模型对象
+//	items: 订单项模型对象列表
+//
 // 返回值：
-//   *pb.Order: proto订单对象
+//
+//	*pb.Order: proto订单对象
 func convertToPBOrder(order *Order, items []OrderItem) *pb.Order {
 	pbItems := make([]*pb.OrderItem, len(items))
 	for i, item := range items {
@@ -225,11 +240,14 @@ func convertToPBOrder(order *Order, items []OrderItem) *pb.Order {
 
 // publishEvent 发布事件到RabbitMQ
 // 参数：
-//   ch: RabbitMQ通道
-//   exchange: 交换机名称
-//   event: 事件数据
+//
+//	ch: RabbitMQ通道
+//	exchange: 交换机名称
+//	event: 事件数据
+//
 // 返回值：
-//   error: 错误信息
+//
+//	error: 错误信息
 func publishEvent(ch *amqp.Channel, exchange string, event interface{}) error {
 	// 实际实现会将事件发布到RabbitMQ
 	return nil
@@ -238,11 +256,14 @@ func publishEvent(ch *amqp.Channel, exchange string, event interface{}) error {
 // ListOrders 获取用户订单列表
 // 功能：根据用户ID获取订单列表
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 订单列表请求，包含用户ID、页码和每页数量
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 订单列表请求，包含用户ID、页码和每页数量
+//
 // 返回值：
-//   *pb.ListOrdersResponse: 订单列表响应，包含订单列表和总数
-//   error: 错误信息
+//
+//	*pb.ListOrdersResponse: 订单列表响应，包含订单列表和总数
+//	error: 错误信息
 func (s *Service) ListOrders(ctx context.Context, req *pb.ListOrdersRequest) (*pb.ListOrdersResponse, error) {
 	// 从数据库查询用户订单
 	var orders []Order
@@ -289,11 +310,14 @@ func (s *Service) ListOrders(ctx context.Context, req *pb.ListOrdersRequest) (*p
 // GetOrder 获取订单详情
 // 功能：根据订单ID和用户ID获取订单详情
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 订单详情请求，包含订单ID和用户ID
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 订单详情请求，包含订单ID和用户ID
+//
 // 返回值：
-//   *pb.GetOrderResponse: 订单详情响应，包含订单详细信息
-//   error: 错误信息
+//
+//	*pb.GetOrderResponse: 订单详情响应，包含订单详细信息
+//	error: 错误信息
 func (s *Service) GetOrder(ctx context.Context, req *pb.GetOrderRequest) (*pb.GetOrderResponse, error) {
 	// 查询订单
 	var order Order
@@ -319,11 +343,14 @@ func (s *Service) GetOrder(ctx context.Context, req *pb.GetOrderRequest) (*pb.Ge
 // CancelOrder 取消订单
 // 功能：根据订单ID和用户ID取消订单
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 取消订单请求，包含订单ID和用户ID
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 取消订单请求，包含订单ID和用户ID
+//
 // 返回值：
-//   *pb.CancelOrderResponse: 取消订单响应，包含取消结果和消息
-//   error: 错误信息
+//
+//	*pb.CancelOrderResponse: 取消订单响应，包含取消结果和消息
+//	error: 错误信息
 func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (*pb.CancelOrderResponse, error) {
 	// 查询订单
 	var order Order
@@ -366,20 +393,9 @@ func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (
 		}, nil
 	}
 
-	// 恢复库存
+	// 使用原子自增恢复库存，避免取消链路再走“先查后改”。
 	for _, item := range orderItems {
-		var product product.Product
-		if err := tx.First(&product, item.ProductID).Error; err != nil {
-			tx.Rollback()
-			return &pb.CancelOrderResponse{
-				Success: false,
-				Message: "获取商品信息失败",
-			}, nil
-		}
-
-		// 恢复库存
-		product.Stock += item.Quantity
-		if err := tx.Save(&product).Error; err != nil {
+		if err := product.RestoreStock(tx, item.ProductID, item.Quantity); err != nil {
 			tx.Rollback()
 			return &pb.CancelOrderResponse{
 				Success: false,

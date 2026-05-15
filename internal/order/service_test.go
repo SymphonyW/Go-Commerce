@@ -3,7 +3,10 @@ package order
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	pb "go-commerce/api/order"
@@ -31,6 +34,27 @@ func newTestService(t *testing.T) (*Service, *gorm.DB) {
 	if err := db.AutoMigrate(&product.Product{}, &Order{}, &OrderItem{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
+
+	return NewService(db, nil), db
+}
+
+func newConcurrentTestService(t *testing.T) (*Service, *gorm.DB) {
+	t.Helper()
+
+	dsn := filepath.Join(t.TempDir(), "orders.db") + "?_busy_timeout=5000&_journal_mode=WAL"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open concurrent test database: %v", err)
+	}
+	if err := db.AutoMigrate(&product.Product{}, &Order{}, &OrderItem{}); err != nil {
+		t.Fatalf("failed to migrate concurrent test database: %v", err)
+	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("failed to open sql db: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(100)
 
 	return NewService(db, nil), db
 }
@@ -211,5 +235,149 @@ func TestCreateOrderMergesDuplicateProducts(t *testing.T) {
 	}
 	if got, want := latest.Stock, int32(7); got != want {
 		t.Fatalf("unexpected remaining stock: got %d want %d", got, want)
+	}
+}
+
+func TestCreateOrderRollsBackStockWhenOrderInsertFails(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "回滚商品", 10, 5)
+
+	if err := db.Exec(`
+		CREATE TRIGGER fail_order_insert
+		BEFORE INSERT ON orders
+		BEGIN
+			SELECT RAISE(FAIL, 'forced order insert failure');
+		END;
+	`).Error; err != nil {
+		t.Fatalf("failed to create trigger: %v", err)
+	}
+
+	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
+		UserId: 1,
+		Items: []*pb.CreateOrderItem{
+			{ProductId: int64(item.ID), Quantity: 2},
+		},
+	})
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.Internal)
+	}
+
+	var latest product.Product
+	if err := db.First(&latest, item.ID).Error; err != nil {
+		t.Fatalf("failed to query product after rollback: %v", err)
+	}
+	if got, want := latest.Stock, int32(5); got != want {
+		t.Fatalf("unexpected stock after rollback: got %d want %d", got, want)
+	}
+}
+
+func TestCreateOrderRollsBackStockWhenOrderItemInsertFails(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "订单项回滚商品", 10, 5)
+
+	if err := db.Exec(`
+		CREATE TRIGGER fail_order_item_insert
+		BEFORE INSERT ON order_items
+		BEGIN
+			SELECT RAISE(FAIL, 'forced order item insert failure');
+		END;
+	`).Error; err != nil {
+		t.Fatalf("failed to create trigger: %v", err)
+	}
+
+	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
+		UserId: 1,
+		Items: []*pb.CreateOrderItem{
+			{ProductId: int64(item.ID), Quantity: 2},
+		},
+	})
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.Internal)
+	}
+
+	var latest product.Product
+	if err := db.First(&latest, item.ID).Error; err != nil {
+		t.Fatalf("failed to query product after rollback: %v", err)
+	}
+	if got, want := latest.Stock, int32(5); got != want {
+		t.Fatalf("unexpected stock after rollback: got %d want %d", got, want)
+	}
+}
+
+func TestCreateOrderConcurrentRequestsDoNotOversell(t *testing.T) {
+	service, db := newConcurrentTestService(t)
+	item := createTestProduct(t, db, "并发商品", 10, 10)
+
+	const requestCount = 100
+	var successCount int32
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	for i := 0; i < requestCount; i++ {
+		wg.Add(1)
+		go func(userID int64) {
+			defer wg.Done()
+			<-start
+
+			if _, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
+				UserId: userID,
+				Items: []*pb.CreateOrderItem{
+					{ProductId: int64(item.ID), Quantity: 1},
+				},
+			}); err == nil {
+				atomic.AddInt32(&successCount, 1)
+			}
+		}(int64(i + 1))
+	}
+
+	close(start)
+	wg.Wait()
+
+	var latest product.Product
+	if err := db.First(&latest, item.ID).Error; err != nil {
+		t.Fatalf("failed to query latest product: %v", err)
+	}
+	if successCount > 10 {
+		t.Fatalf("oversold inventory: success count %d exceeds stock 10", successCount)
+	}
+	if latest.Stock < 0 {
+		t.Fatalf("stock should never be negative, got %d", latest.Stock)
+	}
+	if got, want := int(successCount)+int(latest.Stock), 10; got != want {
+		t.Fatalf("unexpected stock conservation: got success+stock=%d want %d", got, want)
+	}
+}
+
+func TestCancelOrderRestoresStockAtomically(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "取消回补商品", 10, 5)
+
+	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
+		UserId: 1,
+		Items: []*pb.CreateOrderItem{
+			{ProductId: int64(item.ID), Quantity: 2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder returned error: %v", err)
+	}
+
+	cancelResp, err := service.CancelOrder(context.Background(), &pb.CancelOrderRequest{
+		Id:     resp.Order.Id,
+		UserId: 1,
+	})
+	if err != nil {
+		t.Fatalf("CancelOrder returned error: %v", err)
+	}
+	if !cancelResp.Success {
+		t.Fatalf("expected cancellation to succeed, got message %q", cancelResp.Message)
+	}
+
+	var latest product.Product
+	if err := db.First(&latest, item.ID).Error; err != nil {
+		t.Fatalf("failed to query restored product: %v", err)
+	}
+	if got, want := latest.Stock, int32(5); got != want {
+		t.Fatalf("unexpected restored stock: got %d want %d", got, want)
 	}
 }
