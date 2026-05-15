@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	OrderCreatedType   = "order.created"
-	OrderCancelledType = "order.cancelled"
+	OrderCreatedType     = "order.created"
+	OrderCancelledType   = "order.cancelled"
+	PaymentSucceededType = "payment.succeeded"
 )
 
 // BaseEvent 为所有领域事件提供统一元数据，消费者无需依赖 routing key 也能识别消息类型。
@@ -47,6 +48,16 @@ type OrderCancelledEvent struct {
 	OrderID int64  `json:"order_id"`
 	UserID  int64  `json:"user_id"`
 	Reason  string `json:"reason,omitempty"`
+}
+
+// PaymentSucceededEvent 表示一次支付已经成功完成。
+type PaymentSucceededEvent struct {
+	BaseEvent
+	PaymentID int64   `json:"payment_id"`
+	PaymentNo string  `json:"payment_no"`
+	OrderID   int64   `json:"order_id"`
+	UserID    int64   `json:"user_id"`
+	Amount    float64 `json:"amount"`
 }
 
 // NewBaseEvent 统一生成事件元数据，时间使用 UTC RFC3339Nano。

@@ -12,6 +12,7 @@ import (
 
 	pbMerchant "go-commerce/api/merchant"
 	pbOrder "go-commerce/api/order"
+	pbPayment "go-commerce/api/payment"
 	appjwt "go-commerce/pkg/jwt"
 )
 
@@ -89,6 +90,34 @@ func TestHandleCreateOrderIgnoresForgedClientFields(t *testing.T) {
 
 type fakeMerchantClient struct {
 	lastCreateMerchantReq *pbMerchant.CreateMerchantRequest
+}
+
+type fakePaymentClient struct {
+	lastCreatePaymentReq *pbPayment.CreatePaymentRequest
+}
+
+func (f *fakePaymentClient) CreatePayment(ctx context.Context, in *pbPayment.CreatePaymentRequest, opts ...grpc.CallOption) (*pbPayment.CreatePaymentResponse, error) {
+	f.lastCreatePaymentReq = in
+	return &pbPayment.CreatePaymentResponse{
+		Payment: &pbPayment.Payment{
+			Id:            1,
+			OrderId:       in.OrderId,
+			UserId:        in.UserId,
+			PaymentMethod: in.PaymentMethod,
+		},
+	}, nil
+}
+
+func (f *fakePaymentClient) GetPayment(ctx context.Context, in *pbPayment.GetPaymentRequest, opts ...grpc.CallOption) (*pbPayment.GetPaymentResponse, error) {
+	return nil, nil
+}
+
+func (f *fakePaymentClient) MarkPaymentSucceeded(ctx context.Context, in *pbPayment.PaymentActionRequest, opts ...grpc.CallOption) (*pbPayment.PaymentActionResponse, error) {
+	return nil, nil
+}
+
+func (f *fakePaymentClient) MarkPaymentFailed(ctx context.Context, in *pbPayment.PaymentActionRequest, opts ...grpc.CallOption) (*pbPayment.PaymentActionResponse, error) {
+	return nil, nil
 }
 
 func (f *fakeMerchantClient) CreateMerchant(ctx context.Context, in *pbMerchant.CreateMerchantRequest, opts ...grpc.CallOption) (*pbMerchant.CreateMerchantResponse, error) {
@@ -207,5 +236,32 @@ func TestPublicMerchantReadRoutesRemainAccessible(t *testing.T) {
 
 	if got, want := resp.Code, http.StatusOK; got != want {
 		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+}
+
+func TestHandleCreatePaymentInjectsCurrentUser(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	client := &fakePaymentClient{}
+	gateway := &APIGateway{paymentClient: client}
+	router := gin.New()
+	router.POST("/api/payments", func(c *gin.Context) {
+		c.Set("user_id", int64(7))
+		gateway.handleCreatePayment(c)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/payments", strings.NewReader(`{"order_id":1,"payment_method":"mock_balance","user_id":999}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusOK; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+	if client.lastCreatePaymentReq == nil {
+		t.Fatal("expected CreatePayment to be called")
+	}
+	if got, want := client.lastCreatePaymentReq.UserId, int64(7); got != want {
+		t.Fatalf("unexpected user id: got %d want %d", got, want)
 	}
 }

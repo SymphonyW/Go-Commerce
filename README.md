@@ -12,9 +12,10 @@ Go Commerce是一个基于微服务架构的电子商务系统，使用Go语言�
 - **产品管理**：完整的产品CRUD操作，支持分类和搜索
 - **购物车功能**：基于Redis的购物车管理
 - **订单管理**：完整的订单创建和跟踪流程
+- **支付模拟**：独立 `payment-service` 提供可演示的创建支付、模拟成功/失败能力
 - **商家管理**：支持商家注册、商品管理（增删操作）
 - **用户下单**：支持用户下单，后端按真实商品价格计算金额并保存下单快照
-- **事件驱动**：订单服务向 RabbitMQ 统一事件交换机发布订单事件，通知服务异步消费下单成功消息
+- **事件驱动**：订单与支付服务向 RabbitMQ 统一事件交换机发布领域事件，通知服务与订单服务按需异步消费
 - **响应式前端**：使用React构建的现代化用户界面
 
 ## 快速启动
@@ -91,6 +92,9 @@ go run ./cmd/product-service
 # 启动订单服务
 go run ./cmd/order-service
 
+# 启动支付服务
+go run ./cmd/payment-service
+
 # 启动通知服务
 go run ./cmd/notification-service
 
@@ -118,7 +122,7 @@ npm run dev
 
 - **基础服务**：MySQL、Redis、RabbitMQ
 - **核心服务**：认证服务、产品服务、购物车服务
-- **依赖服务**：订单服务（依赖MySQL和RabbitMQ）、商家服务（依赖MySQL和RabbitMQ）、通知服务（依赖RabbitMQ）
+- **依赖服务**：订单服务（依赖MySQL和RabbitMQ）、支付服务（依赖MySQL、RabbitMQ和订单服务）、商家服务（依赖MySQL和RabbitMQ）、通知服务（依赖RabbitMQ）
 - **入口服务**：API网关（依赖所有其他服务）
 
 ### 访问应用
@@ -148,11 +152,13 @@ npm run dev
 ## RabbitMQ 事件链路
 
 - 统一交换机：`ecommerce.events`（topic）
-- 当前事件：`order.created`、`order.cancelled`
-- 生产者：`order-service`
-- 消费者：`notification-service` 绑定队列 `notification.order.created`，消费 `order.created` 后打印“发送下单成功通知”日志
+- 当前事件：`order.created`、`order.cancelled`、`payment.succeeded`
+- 生产者：`order-service`、`payment-service`
+- 消费者：
+  - `notification-service` 绑定队列 `notification.order.created`，消费 `order.created` 后打印“发送下单成功通知”日志
+  - `order-service` 绑定队列 `order.payment.succeeded`，消费 `payment.succeeded` 后把订单从 `pending` 更新为 `paid`
 
-当前阶段先采用“数据库事务提交成功后再发布消息”的弱一致方案：如果 RabbitMQ 不可用，订单创建/取消仍会成功，但 `order-service` 会记录 `event_publish_failed` 日志，当前事件可能丢失。后续如需强一致，应继续演进为本地消息表 / Outbox 方案。
+当前阶段先采用“数据库事务提交成功后再发布消息”的弱一致方案：如果 RabbitMQ 不可用，订单创建/取消仍会成功，支付记录也可能已经成功，但事件会记录 `event_publish_failed` 日志且存在丢失风险。后续如需更强一致，应继续演进为本地消息表 / Outbox 方案。
 
 ### 事件验证
 
@@ -167,7 +173,7 @@ docker-compose logs -f notification-service
 # http://localhost:15672  guest / guest
 ```
 
-验证要点：创建订单后可在管理界面看到 `ecommerce.events` 与 `notification.order.created`，通知服务会打印 `order.created` 对应日志；取消订单时，`order.cancelled` 会发布到同一交换机。
+验证要点：创建订单后可在管理界面看到 `ecommerce.events` 与 `notification.order.created`，通知服务会打印 `order.created` 对应日志；支付成功后会出现 `order.payment.succeeded` 队列并把订单状态改为 `paid`；取消订单时，`order.cancelled` 会发布到同一交换机。
 
 ## 使用示例
 
@@ -234,6 +240,22 @@ curl -X POST http://localhost:8081/api/orders \
 ```
 
 > 创建订单时，客户端只需要提交商品 ID 和数量；订单金额以后端查询到的真实商品价格为准，订单详情会保留下单时的商品名称与价格快照。
+
+### 发起并模拟支付
+
+```bash
+# 创建支付单
+curl -X POST http://localhost:8081/api/payments \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -d '{"order_id": 1, "payment_method": "mock_balance"}'
+
+# 模拟支付成功
+curl -X POST http://localhost:8081/api/payments/1/success \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+> 支付接口只接受当前登录用户发起的请求。创建支付前会校验订单存在、归属当前用户、状态为 `pending`，支付金额直接取订单总金额；模拟失败时支付记录变为 `failed`，订单继续保持 `pending`，便于再次发起支付。
 
 ### 购物车操作
 

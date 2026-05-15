@@ -3,7 +3,7 @@
 // 提供取消订单功能
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { orderAPI } from '../services/api';
+import { orderAPI, paymentAPI } from '../services/api';
 
 const OrderDetail = () => {
   // 获取URL参数中的订单ID
@@ -18,6 +18,10 @@ const OrderDetail = () => {
   const [error, setError] = useState('');
   // 取消订单的加载状态
   const [cancelling, setCancelling] = useState(false);
+  // 当前支付记录
+  const [payment, setPayment] = useState(null);
+  // 支付动作加载状态
+  const [paying, setPaying] = useState(false);
 
   // 组件挂载时获取订单详情
   useEffect(() => {
@@ -79,6 +83,63 @@ const OrderDetail = () => {
     }
   };
 
+  const refreshOrder = async () => {
+    const updatedOrder = await orderAPI.getOrder(id);
+    setOrder(updatedOrder.order);
+  };
+
+  // 创建模拟支付记录，后续由用户手动触发成功或失败，便于演示完整状态流转。
+  const handleCreatePayment = async () => {
+    try {
+      setPaying(true);
+      const response = await paymentAPI.createPayment({
+        order_id: Number(id),
+        payment_method: 'mock_balance',
+      });
+      setPayment(response.payment);
+    } catch (error) {
+      console.error('创建支付失败:', error);
+      alert(error.response?.data?.error || '创建支付失败');
+    } finally {
+      setPaying(false);
+    }
+  };
+
+  const handlePaymentSuccess = async () => {
+    if (!payment) {
+      return;
+    }
+    try {
+      setPaying(true);
+      const response = await paymentAPI.markSuccess(payment.id);
+      setPayment(response.payment);
+      await refreshOrder();
+      alert('支付成功');
+    } catch (error) {
+      console.error('模拟支付成功失败:', error);
+      alert(error.response?.data?.error || '支付失败');
+    } finally {
+      setPaying(false);
+    }
+  };
+
+  const handlePaymentFail = async () => {
+    if (!payment) {
+      return;
+    }
+    try {
+      setPaying(true);
+      const response = await paymentAPI.markFailed(payment.id);
+      setPayment(response.payment);
+      alert('已模拟支付失败，订单仍保持待支付');
+    } catch (error) {
+      console.error('模拟支付失败操作异常:', error);
+      alert(error.response?.data?.error || '支付失败操作异常');
+    } finally {
+      setPaying(false);
+    }
+  };
+
   // 错误状态或订单不存在
   if (error || !order) {
     return <div className="error-message">{error || '订单不存在'}</div>;
@@ -95,8 +156,9 @@ const OrderDetail = () => {
           <div className="order-detail-status-container">
             {/* 订单状态 */}
             <div className={`order-detail-status ${order.status}`}>
-              {order.status === 'pending' ? '待处理' : 
-               order.status === 'completed' ? '已完成' : 
+              {order.status === 'pending' ? '待支付' :
+               order.status === 'paid' ? '已支付' :
+               order.status === 'completed' ? '已完成' :
                order.status === 'cancelled' ? '已取消' : order.status}
             </div>
             {/* 取消订单按钮（仅当订单状态为待处理时显示） */}
@@ -109,6 +171,15 @@ const OrderDetail = () => {
                 {cancelling ? '取消中...' : '取消订单'}
               </button>
             )}
+            {order.status === 'pending' && !payment && (
+              <button
+                onClick={handleCreatePayment}
+                disabled={paying}
+                className="btn btn-sm"
+              >
+                {paying ? '创建支付中...' : '去支付'}
+              </button>
+            )}
           </div>
         </div>
         
@@ -117,6 +188,31 @@ const OrderDetail = () => {
           <div className="order-detail-date">下单时间: {order.created_at}</div>
           <div className="order-detail-total">总金额: ¥{order.total_amount}</div>
         </div>
+
+        {payment && order.status === 'pending' && (
+          <div className="payment-actions">
+            <h3>支付模拟</h3>
+            <div>支付单号: {payment.payment_no}</div>
+            <div>支付状态: {payment.status}</div>
+            {payment.status === 'created' && (
+              <div className="payment-buttons">
+                <button onClick={handlePaymentSuccess} disabled={paying} className="btn btn-sm">
+                  模拟支付成功
+                </button>
+                <button onClick={handlePaymentFail} disabled={paying} className="btn btn-danger btn-sm">
+                  模拟支付失败
+                </button>
+              </div>
+            )}
+            {payment.status === 'failed' && (
+              <div className="payment-buttons">
+                <button onClick={handleCreatePayment} disabled={paying} className="btn btn-sm">
+                  {paying ? '重新创建中...' : '重新发起支付'}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         
         {/* 订单商品列表 */}
         <div className="order-detail-items">

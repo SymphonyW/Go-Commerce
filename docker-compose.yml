@@ -89,6 +89,27 @@ services:
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
       EVENT_EXCHANGE: "ecommerce.events"
 
+  payment-service:
+    build:
+      context: .
+      dockerfile: ./cmd/payment-service/Dockerfile
+      pull: false
+    container_name: ecommerce-payment-service
+    ports:
+      - "50056:50056"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      order-service:
+        condition: service_started
+    environment:
+      DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
+      ORDER_SERVICE_ADDR: "order-service:50053"
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+      EVENT_EXCHANGE: "ecommerce.events"
+
   cart-service:
     build:
       context: .
@@ -148,6 +169,8 @@ services:
         condition: service_started
       order-service:
         condition: service_started
+      payment-service:
+        condition: service_started
       cart-service:
         condition: service_started
     environment:
@@ -156,6 +179,7 @@ services:
       ORDER_SERVICE_ADDR: "order-service:50053"
       CART_SERVICE_ADDR: "cart-service:50054"
       MERCHANT_SERVICE_ADDR: "merchant-service:50055"
+      PAYMENT_SERVICE_ADDR: "payment-service:50056"
 
 volumes:
   mysql_data:

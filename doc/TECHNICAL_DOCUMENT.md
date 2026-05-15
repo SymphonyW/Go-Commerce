@@ -25,9 +25,10 @@
 2. **认证服务**：处理用户注册、登录和认证
 3. **产品服务**：管理产品信息
 4. **订单服务**：处理订单创建和管理
-5. **购物车服务**：管理用户购物车
-6. **商户服务**：管理商户信息和商户产品
-7. **通知服务**：异步消费订单事件并执行通知动作
+5. **支付服务**：管理模拟支付记录并发布支付结果事件
+6. **购物车服务**：管理用户购物车
+7. **商户服务**：管理商户信息和商户产品
+8. **通知服务**：异步消费订单事件并执行通知动作
 
 各服务之间通过gRPC进行通信，数据存储使用MySQL和Redis，消息传递使用RabbitMQ。前端通过API网关与后端服务交互。
 
@@ -67,6 +68,7 @@ Go-Commerce/
 │   ├── cart/           # 购物车服务proto文件
 │   ├── merchant/       # 商户服务proto文件
 │   ├── order/          # 订单服务proto文件
+│   ├── payment/        # 支付服务proto文件
 │   └── product/        # 产品服务proto文件
 ├── cmd/                # 服务入口点
 │   ├── api-gateway/    # API网关服务
@@ -75,6 +77,7 @@ Go-Commerce/
 │   ├── merchant-service/ # 商户服务
 │   ├── notification-service/ # 通知服务
 │   ├── order-service/  # 订单服务
+│   ├── payment-service/ # 支付服务
 │   └── product-service/ # 产品服务
 ├── doc/                # 项目文档
 ├── frontend/           # 前端应用
@@ -87,6 +90,7 @@ Go-Commerce/
 │   ├── merchant/       # 商户服务内部实现
 │   ├── notification/   # 通知消费逻辑
 │   ├── order/          # 订单服务内部实现
+│   ├── payment/        # 支付服务内部实现
 │   └── product/        # 产品服务内部实现
 ├── pkg/                # 公共包
 │   └── jwt/            # JWT工具
@@ -160,6 +164,7 @@ Go-Commerce/
 
 **事件发布设计**：
 - 订单事务提交成功后，订单服务通过统一事件交换机发布 `order.created` 与 `order.cancelled`。
+- 订单服务同时监听 `payment.succeeded`，消费成功后把订单状态从 `pending` 更新为 `paid`。
 - 事件体统一包含 `event_id`、`event_type`、`occurred_at`，业务侧无需依赖 routing key 才能识别事件。
 - 当前阶段采用弱一致：消息发布失败只记录结构化日志，不回滚已经成功提交的订单事务。
 
@@ -170,7 +175,28 @@ Go-Commerce/
 - 取消订单时统一走原子回补：`UPDATE products SET stock = stock + ? WHERE id = ?`。
 - 可通过 `go test ./internal/order -run TestCreateOrderConcurrentRequestsDoNotOversell -v` 快速验证并发防超卖行为。
 
-### 4.5 购物车服务
+### 4.5 支付服务
+
+**职责**：维护支付记录，并把“订单已支付”作为独立领域事实发布给订单服务。
+
+**核心功能**：
+- 创建支付：基于当前用户和订单状态生成支付记录
+- 模拟结果：支持手动触发支付成功或失败，便于演示与自动化测试
+- 归属校验：只允许用户查询和推进自己的支付记录
+- 事件发布：支付成功后发布 `payment.succeeded`
+
+**主要文件**：
+- `internal/payment/service.go`：支付核心逻辑
+- `internal/payment/grpc_service.go`：支付 gRPC 接口
+- `internal/payment/model.go`：支付模型定义
+- `cmd/payment-service/main.go`：支付服务入口
+
+**设计取舍**：
+- 支付失败后订单继续保持 `pending`，允许再次创建新的支付尝试。
+- 当前采用事件驱动方式通知订单服务，职责边界更清晰，也方便后续继续接入风控、账务、通知等消费者。
+- 当前仍是弱一致模型：支付状态先落库，事件随后发布；若 RabbitMQ 不可用，可能出现“支付已成功但订单暂未变更”的情况，后续需要通过 Outbox、重试与补偿任务继续强化。
+
+### 4.6 购物车服务
 
 **职责**：管理用户购物车。
 
@@ -190,7 +216,7 @@ Go-Commerce/
 - 与产品服务集成，确保购物车中的商品信息与系统保持一致
 - 支持购物车为空时的正确处理，避免前端显示空白页面
 
-### 4.6 商户服务
+### 4.7 商户服务
 
 **职责**：管理商户信息和商户产品。
 
@@ -212,7 +238,7 @@ Go-Commerce/
 - 商户服务再基于数据库中的真实角色和 `owner_user_id` 做最终授权，避免只信任前端传入的 `merchant_id`
 - 为兼容历史商户数据，`owner_user_id` 先允许为空；旧数据回填完成后，再考虑收紧为非空约束
 
-### 4.7 通知服务
+### 4.8 通知服务
 
 **职责**：异步消费订单事件，演示订单服务与后续业务服务之间的解耦。
 
@@ -226,7 +252,7 @@ Go-Commerce/
 - `cmd/notification-service/main.go`：通知服务入口
 - `internal/notification/consumer.go`：消息处理逻辑
 
-### 4.8 前端应用
+### 4.9 前端应用
 
 **职责**：提供用户界面，与API网关交互。
 
@@ -250,7 +276,8 @@ Go-Commerce/
 |------|--------|--------|------|
 | `order.created` | `order-service` | `notification-service` | 下单成功后异步触发通知 |
 | `order.cancelled` | `order-service` | 暂无 | 当前先完成发布，为后续库存、营销、风控扩展预留 |
+| `payment.succeeded` | `payment-service` | `order-service` | 支付成功后异步把订单推进为 `paid` |
 
-统一交换机使用 `ecommerce.events`（topic）。生产者通过 `pkg/mq.Publisher` 抽象发布能力，RabbitMQ 细节封装在 `pkg/mq`；事件结构定义在 `pkg/events`。这让订单服务只关心“发布什么事件”，而不是“怎样调用 AMQP SDK”。
+统一交换机使用 `ecommerce.events`（topic）。生产者通过 `pkg/mq.Publisher` 抽象发布能力，RabbitMQ 细节封装在 `pkg/mq`；事件结构定义在 `pkg/events`。这让各服务只关心“发布什么事件”，而不是“怎样调用 AMQP SDK”。
 
-当前消息链路是弱一致模型：数据库事务先提交，RabbitMQ 发布随后执行。若 RabbitMQ 暂时不可用，订单主流程继续成功，但会输出 `event_publish_failed` 日志，事件可能丢失。若未来要把“订单落库”和“事件必达”绑得更紧，需要继续引入本地消息表 / Outbox、重试与死信队列。
+当前消息链路是弱一致模型：数据库事务先提交，RabbitMQ 发布随后执行。若 RabbitMQ 暂时不可用，订单创建、取消或支付主流程仍可成功，但会输出 `event_publish_failed` 日志，事件可能丢失。若未来要把“业务落库”和“事件必达”绑得更紧，需要继续引入本地消息表 / Outbox、重试与死信队列。

@@ -110,6 +110,26 @@ export const orderAPI = {
   },
 };
 
+// 支付相关API
+export const paymentAPI = {
+  createPayment: async (paymentData) => {
+    const response = await api.post('/payments', paymentData);
+    return response.data;
+  },
+  getPayment: async (id) => {
+    const response = await api.get(`/payments/${id}`);
+    return response.data;
+  },
+  markSuccess: async (id) => {
+    const response = await api.post(`/payments/${id}/success`);
+    return response.data;
+  },
+  markFailed: async (id) => {
+    const response = await api.post(`/payments/${id}/fail`);
+    return response.data;
+  },
+};
+
 // 商户相关API
 export const merchantAPI = {
 	/**

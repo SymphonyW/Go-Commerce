@@ -21,6 +21,7 @@ import (
 	"go-commerce/internal/order"
 	// 导入订单服务的protobuf生成代码
 	pb "go-commerce/api/order"
+	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
 )
 
@@ -61,6 +62,7 @@ func main() {
 
 	// 当前阶段采用弱一致策略：RabbitMQ 暂不可用时主交易链路继续运行，但事件会丢失并记录告警。
 	var publisher mq.Publisher = mq.NopPublisher{}
+	var consumerChannel *amqp.Channel
 	conn, err := amqp.Dial(rabbitmqURL)
 	if err != nil {
 		log.Printf("rabbitmq_connection_failed exchange=%s error=%v", exchangeName, err)
@@ -73,6 +75,13 @@ func main() {
 		} else {
 			defer ch.Close()
 			publisher = mq.NewRabbitMQPublisher(ch, exchangeName)
+		}
+
+		consumerChannel, channelErr = conn.Channel()
+		if channelErr != nil {
+			log.Printf("rabbitmq_consumer_channel_open_failed exchange=%s error=%v", exchangeName, channelErr)
+		} else {
+			defer consumerChannel.Close()
 		}
 	}
 
@@ -91,11 +100,44 @@ func main() {
 	// 传入数据库连接和事件发布器
 	pb.RegisterOrderServiceServer(s, order.NewService(db, publisher))
 
+	if consumerChannel != nil {
+		go consumePaymentSucceededEvents(consumerChannel, exchangeName, db)
+	}
+
 	// 启动服务
 	// 打印服务监听地址
 	log.Printf("order service listening at %v", lis.Addr())
 	// 启动gRPC服务器，开始接受请求
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
+	}
+}
+
+func consumePaymentSucceededEvents(ch *amqp.Channel, exchangeName string, db *gorm.DB) {
+	if err := ch.ExchangeDeclare(exchangeName, "topic", true, false, false, false, nil); err != nil {
+		log.Printf("rabbitmq_exchange_declare_failed exchange=%s error=%v", exchangeName, err)
+		return
+	}
+	queue, err := ch.QueueDeclare("order.payment.succeeded", true, false, false, false, nil)
+	if err != nil {
+		log.Printf("rabbitmq_queue_declare_failed queue=order.payment.succeeded error=%v", err)
+		return
+	}
+	if err := ch.QueueBind(queue.Name, events.PaymentSucceededType, exchangeName, false, nil); err != nil {
+		log.Printf("rabbitmq_queue_bind_failed queue=%s routing_key=%s error=%v", queue.Name, events.PaymentSucceededType, err)
+		return
+	}
+	deliveries, err := ch.Consume(queue.Name, "", false, false, false, false, nil)
+	if err != nil {
+		log.Printf("rabbitmq_consume_failed queue=%s error=%v", queue.Name, err)
+		return
+	}
+
+	consumer := order.NewPaymentSucceededConsumer(db, log.Default())
+	log.Printf("order_payment_consumer_started exchange=%s queue=%s routing_key=%s", exchangeName, queue.Name, events.PaymentSucceededType)
+	for delivery := range deliveries {
+		if err := consumer.HandleDelivery(delivery); err != nil {
+			log.Printf("payment_event_handle_failed error=%v", err)
+		}
 	}
 }

@@ -24,6 +24,7 @@ import (
 	pbCart "go-commerce/api/cart"
 	pbMerchant "go-commerce/api/merchant"
 	pbOrder "go-commerce/api/order"
+	pbPayment "go-commerce/api/payment"
 	pbProduct "go-commerce/api/product"
 
 	// JWT工具：用于验证用户令牌
@@ -55,6 +56,7 @@ type APIGateway struct {
 	authClient     pbAuth.AuthServiceClient         // 认证服务客户端
 	productClient  pbProduct.ProductServiceClient   // 产品服务客户端
 	orderClient    pbOrder.OrderServiceClient       // 订单服务客户端
+	paymentClient  pbPayment.PaymentServiceClient   // 支付服务客户端
 	merchantClient pbMerchant.MerchantServiceClient // 商家服务客户端
 	cartClient     pbCart.CartServiceClient         // 购物车服务客户端
 }
@@ -69,6 +71,7 @@ func main() {
 	orderServiceAddr := getEnv("ORDER_SERVICE_ADDR", "localhost:50053")
 	cartServiceAddr := getEnv("CART_SERVICE_ADDR", "localhost:50054")
 	merchantServiceAddr := getEnv("MERCHANT_SERVICE_ADDR", "localhost:50055")
+	paymentServiceAddr := getEnv("PAYMENT_SERVICE_ADDR", "localhost:50056")
 
 	// 连接认证服务
 	authConn, err := grpc.Dial(authServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -94,6 +97,14 @@ func main() {
 	defer orderConn.Close()
 	orderClient := pbOrder.NewOrderServiceClient(orderConn)
 
+	// 连接支付服务
+	paymentConn, err := grpc.Dial(paymentServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Fatalf("did not connect to payment service: %v", err)
+	}
+	defer paymentConn.Close()
+	paymentClient := pbPayment.NewPaymentServiceClient(paymentConn)
+
 	// 连接商家服务
 	merchantConn, err := grpc.Dial(merchantServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -115,6 +126,7 @@ func main() {
 		authClient:     authClient,
 		productClient:  productClient,
 		orderClient:    orderClient,
+		paymentClient:  paymentClient,
 		merchantClient: merchantClient,
 		cartClient:     cartClient,
 	}
@@ -162,6 +174,11 @@ func main() {
 		private.GET("/orders/:id", gateway.handleGetOrder)           // 获取订单详情
 		private.GET("/orders", gateway.handleListOrders)             // 获取订单列表
 		private.PUT("/orders/:id/cancel", gateway.handleCancelOrder) // 取消订单
+		// 支付相关路由
+		private.POST("/payments", gateway.handleCreatePayment)
+		private.GET("/payments/:id", gateway.handleGetPayment)
+		private.POST("/payments/:id/success", gateway.handleMarkPaymentSucceeded)
+		private.POST("/payments/:id/fail", gateway.handleMarkPaymentFailed)
 		// 购物车相关路由
 		private.POST("/cart/items", gateway.handleAddCartItem)      // 添加购物车商品
 		private.GET("/cart", gateway.handleGetCart)                 // 获取购物车
@@ -176,6 +193,96 @@ func main() {
 
 	// 启动HTTP服务器，监听8080端口
 	log.Fatal(r.Run(":8080"))
+}
+
+func (g *APIGateway) handleCreatePayment(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
+	var req struct {
+		OrderID       int64  `json:"order_id"`
+		PaymentMethod string `json:"payment_method"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	resp, err := g.paymentClient.CreatePayment(context.Background(), &pbPayment.CreatePaymentRequest{
+		OrderId:       req.OrderID,
+		UserId:        userID.(int64),
+		PaymentMethod: req.PaymentMethod,
+	})
+	if err != nil {
+		writeGRPCError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func (g *APIGateway) handleGetPayment(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	paymentID, err := parsePathID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payment id"})
+		return
+	}
+	resp, err := g.paymentClient.GetPayment(context.Background(), &pbPayment.GetPaymentRequest{
+		Id:     paymentID,
+		UserId: userID.(int64),
+	})
+	if err != nil {
+		writeGRPCError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func (g *APIGateway) handleMarkPaymentSucceeded(c *gin.Context) {
+	g.handlePaymentAction(c, true)
+}
+
+func (g *APIGateway) handleMarkPaymentFailed(c *gin.Context) {
+	g.handlePaymentAction(c, false)
+}
+
+func (g *APIGateway) handlePaymentAction(c *gin.Context, succeed bool) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	paymentID, err := parsePathID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payment id"})
+		return
+	}
+
+	req := &pbPayment.PaymentActionRequest{Id: paymentID, UserId: userID.(int64)}
+	var resp *pbPayment.PaymentActionResponse
+	if succeed {
+		resp, err = g.paymentClient.MarkPaymentSucceeded(context.Background(), req)
+	} else {
+		resp, err = g.paymentClient.MarkPaymentFailed(context.Background(), req)
+	}
+	if err != nil {
+		writeGRPCError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func parsePathID(raw string) (int64, error) {
+	var id int64
+	_, err := fmt.Sscanf(raw, "%d", &id)
+	return id, err
 }
 
 // authMiddleware 认证中间件
