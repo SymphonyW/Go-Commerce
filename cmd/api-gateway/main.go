@@ -15,7 +15,9 @@ import (
 	"github.com/gin-gonic/gin"
 	// gRPC客户端：用于与后端微服务通信
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	// 导入各个服务的protobuf生成代码
 	pbAuth "go-commerce/api/auth"
@@ -343,10 +345,8 @@ func (g *APIGateway) handleCreateOrder(c *gin.Context) {
 	// 定义请求结构体
 	var req struct {
 		Items []struct {
-			ProductId   int64   `json:"product_id"`   // 产品ID
-			ProductName string  `json:"product_name"` // 产品名称
-			Price       float32 `json:"price"`        // 产品价格
-			Quantity    int32   `json:"quantity"`     // 产品数量
+			ProductId int64 `json:"product_id"` // 产品ID
+			Quantity  int32 `json:"quantity"`   // 产品数量
 		} `json:"items"` // 订单商品列表
 	}
 
@@ -357,13 +357,11 @@ func (g *APIGateway) handleCreateOrder(c *gin.Context) {
 	}
 
 	// 转换订单商品格式
-	orderItems := make([]*pbOrder.OrderItem, len(req.Items))
+	orderItems := make([]*pbOrder.CreateOrderItem, len(req.Items))
 	for i, item := range req.Items {
-		orderItems[i] = &pbOrder.OrderItem{
-			ProductId:   item.ProductId,
-			ProductName: item.ProductName,
-			Price:       item.Price,
-			Quantity:    item.Quantity,
+		orderItems[i] = &pbOrder.CreateOrderItem{
+			ProductId: item.ProductId,
+			Quantity:  item.Quantity,
 		}
 	}
 
@@ -373,7 +371,15 @@ func (g *APIGateway) handleCreateOrder(c *gin.Context) {
 		Items:  orderItems,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		grpcStatus := status.Convert(err)
+		switch grpcStatus.Code() {
+		case codes.InvalidArgument:
+			c.JSON(http.StatusBadRequest, gin.H{"error": grpcStatus.Message()})
+		case codes.NotFound:
+			c.JSON(http.StatusNotFound, gin.H{"error": grpcStatus.Message()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": grpcStatus.Message()})
+		}
 		return
 	}
 

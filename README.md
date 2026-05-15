@@ -12,7 +12,7 @@ Go Commerce是一个基于微服务架构的电子商务系统，使用Go语言�
 - **购物车功能**：基于Redis的购物车管理
 - **订单管理**：完整的订单创建和跟踪流程
 - **商家管理**：支持商家注册、商品管理（增删操作）
-- **用户下单**：支持用户下单，检查库存，生成订单记录
+- **用户下单**：支持用户下单，后端按真实商品价格计算金额并保存下单快照
 - **响应式前端**：使用React构建的现代化用户界面
 
 ## 快速启动
@@ -193,8 +193,10 @@ curl -X DELETE http://localhost:8081/api/merchants/products \
 curl -X POST http://localhost:8081/api/orders \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_TOKEN" \
-  -d '{"items": [{"product_id": 1, "product_name": "Test Product", "price": 99.99, "quantity": 1}]}'
+  -d '{"items": [{"product_id": 1, "quantity": 1}]}'
 ```
+
+> 创建订单时，客户端只需要提交商品 ID 和数量；订单金额以后端查询到的真实商品价格为准，订单详情会保留下单时的商品名称与价格快照。
 
 ### 购物车操作
 

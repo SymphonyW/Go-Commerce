@@ -5,6 +5,7 @@ package order
 import (
 	"context"
 	"log"
+	"math"
 	"time"
 
 	// RabbitMQ客户端：用于消息队列操作
@@ -25,9 +26,9 @@ import (
 // 实现了OrderServiceServer接口
 
 type Service struct {
-	pb.UnimplementedOrderServiceServer // 嵌入未实现的OrderServiceServer，以保持向后兼容性
-	db *gorm.DB                       // 数据库连接
-	ch *amqp.Channel                   // RabbitMQ通道，用于发布订单事件
+	pb.UnimplementedOrderServiceServer               // 嵌入未实现的OrderServiceServer，以保持向后兼容性
+	db                                 *gorm.DB      // 数据库连接
+	ch                                 *amqp.Channel // RabbitMQ通道，用于发布订单事件
 }
 
 // NewService 创建订单服务实例
@@ -49,64 +50,44 @@ func NewService(db *gorm.DB, ch *amqp.Channel) *Service {
 //   *pb.CreateOrderResponse: 订单创建响应，包含创建的订单信息
 //   error: 错误信息
 func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (*pb.CreateOrderResponse, error) {
-	// 开始数据库事务
+	aggregatedItems, err := aggregateCreateOrderItems(req.Items)
+	if err != nil {
+		return nil, err
+	}
+
+	// 开启事务，确保商品快照、库存扣减和订单落库要么全部成功，要么全部回滚。
 	tx := s.db.Begin()
+	if tx.Error != nil {
+		return nil, status.Errorf(codes.Internal, "failed to start transaction: %v", tx.Error)
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			tx.Rollback()
 		}
 	}()
 
-	// 检查库存
-	for _, item := range req.Items {
-		var product product.Product
-		if err := tx.First(&product, item.ProductId).Error; err != nil {
-			tx.Rollback()
-			return nil, status.Errorf(codes.NotFound, "product not found: %v", err)
-		}
-
-		// 检查库存是否充足
-		if product.Stock < item.Quantity {
-			tx.Rollback()
-			return nil, status.Errorf(codes.InvalidArgument, "insufficient stock for product %s", product.Name)
-		}
-
-		// 扣减库存
-		product.Stock -= item.Quantity
-		if err := tx.Save(&product).Error; err != nil {
-			tx.Rollback()
-			return nil, status.Errorf(codes.Internal, "failed to update stock: %v", err)
-		}
-	}
-
-	// 计算订单总金额
-	var totalAmount float64
-	for _, item := range req.Items {
-		totalAmount += float64(item.Price) * float64(item.Quantity)
+	// 订单金额和订单项快照必须以后端读取到的真实商品信息为准，不能信任客户端输入。
+	orderItems, totalAmount, err := buildOrderSnapshots(tx, aggregatedItems)
+	if err != nil {
+		tx.Rollback()
+		return nil, err
 	}
 
 	// 创建订单记录
 	order := Order{
-		UserID:      uint(req.UserId),  // 用户ID
-		TotalAmount: totalAmount,        // 订单总金额
-		Status:      "pending",          // 订单状态，初始为待处理
-		OrderDate:   time.Now(),         // 订单日期
+		UserID:      uint(req.UserId), // 用户ID
+		TotalAmount: totalAmount,      // 订单总金额
+		Status:      "pending",        // 订单状态，初始为待处理
+		OrderDate:   time.Now(),       // 订单日期
 	}
 	if err := tx.Create(&order).Error; err != nil {
 		tx.Rollback()
 		return nil, status.Errorf(codes.Internal, "failed to create order: %v", err)
 	}
 
-	// 创建订单商品记录
-	orderItems := make([]OrderItem, len(req.Items))
-	for i, item := range req.Items {
-		orderItems[i] = OrderItem{
-			OrderID:     order.ID,         // 订单ID
-			ProductID:   item.ProductId,   // 产品ID
-			ProductName: item.ProductName, // 产品名称
-			Price:       float64(item.Price), // 产品价格
-			Quantity:    item.Quantity,    // 产品数量
-		}
+	// 订单项保存“下单时快照”，后续商品改价不会影响历史订单展示。
+	for i := range orderItems {
+		orderItems[i].OrderID = order.ID
 	}
 	if err := tx.Create(&orderItems).Error; err != nil {
 		tx.Rollback()
@@ -125,12 +106,94 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 	}
 
 	// 提交事务
-	tx.Commit()
+	if err := tx.Commit().Error; err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to commit order transaction: %v", err)
+	}
 
 	// 返回创建订单响应
 	return &pb.CreateOrderResponse{
 		Order: convertToPBOrder(&order, orderItems),
 	}, nil
+}
+
+// aggregatedCreateOrderItem 表示同一商品在一次下单请求中的合并结果。
+type aggregatedCreateOrderItem struct {
+	ProductID int64
+	Quantity  int32
+}
+
+// aggregateCreateOrderItems 只接受客户端可信输入，并将重复商品先合并后再参与库存校验。
+func aggregateCreateOrderItems(items []*pb.CreateOrderItem) ([]aggregatedCreateOrderItem, error) {
+	if len(items) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "order items cannot be empty")
+	}
+
+	quantities := make(map[int64]int32, len(items))
+	orderedProductIDs := make([]int64, 0, len(items))
+
+	for _, item := range items {
+		if item == nil || item.ProductId <= 0 {
+			return nil, status.Error(codes.InvalidArgument, "invalid product id")
+		}
+		if item.Quantity <= 0 {
+			return nil, status.Error(codes.InvalidArgument, "quantity must be greater than zero")
+		}
+
+		currentQuantity, exists := quantities[item.ProductId]
+		if !exists {
+			orderedProductIDs = append(orderedProductIDs, item.ProductId)
+		}
+		if item.Quantity > math.MaxInt32-currentQuantity {
+			return nil, status.Error(codes.InvalidArgument, "quantity is too large")
+		}
+		quantities[item.ProductId] = currentQuantity + item.Quantity
+	}
+
+	aggregatedItems := make([]aggregatedCreateOrderItem, 0, len(orderedProductIDs))
+	for _, productID := range orderedProductIDs {
+		aggregatedItems = append(aggregatedItems, aggregatedCreateOrderItem{
+			ProductID: productID,
+			Quantity:  quantities[productID],
+		})
+	}
+
+	return aggregatedItems, nil
+}
+
+// buildOrderSnapshots 基于数据库中的真实商品信息生成订单项快照，并在同一事务内完成库存扣减。
+func buildOrderSnapshots(tx *gorm.DB, items []aggregatedCreateOrderItem) ([]OrderItem, float64, error) {
+	orderItems := make([]OrderItem, 0, len(items))
+	var totalAmount float64
+
+	for _, item := range items {
+		var productInfo product.Product
+		if err := tx.First(&productInfo, item.ProductID).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return nil, 0, status.Errorf(codes.NotFound, "product not found: %d", item.ProductID)
+			}
+			return nil, 0, status.Errorf(codes.Internal, "failed to fetch product %d: %v", item.ProductID, err)
+		}
+
+		if productInfo.Stock < item.Quantity {
+			return nil, 0, status.Errorf(codes.InvalidArgument, "insufficient stock for product %s", productInfo.Name)
+		}
+
+		// 订单项必须保存下单瞬间的名称与价格，保证历史订单展示稳定。
+		orderItems = append(orderItems, OrderItem{
+			ProductID:   int64(productInfo.ID),
+			ProductName: productInfo.Name,
+			Price:       productInfo.Price,
+			Quantity:    item.Quantity,
+		})
+		totalAmount += productInfo.Price * float64(item.Quantity)
+
+		productInfo.Stock -= item.Quantity
+		if err := tx.Save(&productInfo).Error; err != nil {
+			return nil, 0, status.Errorf(codes.Internal, "failed to update stock for product %d: %v", item.ProductID, err)
+		}
+	}
+
+	return orderItems, totalAmount, nil
 }
 
 // convertToPBOrder 转换订单模型为proto对象
@@ -143,20 +206,20 @@ func convertToPBOrder(order *Order, items []OrderItem) *pb.Order {
 	pbItems := make([]*pb.OrderItem, len(items))
 	for i, item := range items {
 		pbItems[i] = &pb.OrderItem{
-			ProductId:   item.ProductID,   // 产品ID
-			ProductName: item.ProductName, // 产品名称
+			ProductId:   item.ProductID,      // 产品ID
+			ProductName: item.ProductName,    // 产品名称
 			Price:       float32(item.Price), // 产品价格
-			Quantity:    item.Quantity,    // 产品数量
+			Quantity:    item.Quantity,       // 产品数量
 		}
 	}
 
 	return &pb.Order{
-		Id:           int64(order.ID),          // 订单ID
-		UserId:       int64(order.UserID),       // 用户ID
-		Items:        pbItems,                   // 订单商品列表
-		TotalAmount:  float32(order.TotalAmount), // 订单总金额
-		Status:       order.Status,              // 订单状态
-		CreatedAt:    order.OrderDate.Format(time.RFC3339), // 订单创建时间
+		Id:          int64(order.ID),                      // 订单ID
+		UserId:      int64(order.UserID),                  // 用户ID
+		Items:       pbItems,                              // 订单商品列表
+		TotalAmount: float32(order.TotalAmount),           // 订单总金额
+		Status:      order.Status,                         // 订单状态
+		CreatedAt:   order.OrderDate.Format(time.RFC3339), // 订单创建时间
 	}
 }
 

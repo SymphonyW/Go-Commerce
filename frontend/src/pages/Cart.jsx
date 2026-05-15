@@ -96,8 +96,6 @@ const Cart = () => {
       // 从购物车创建订单
       const orderItems = cart.items.map(item => ({
         product_id: item.product_id,
-        product_name: item.product_name,
-        price: item.price,
         quantity: item.quantity
       }));
 
