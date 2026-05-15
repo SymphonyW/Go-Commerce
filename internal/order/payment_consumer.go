@@ -9,6 +9,7 @@ import (
 
 	"github.com/streadway/amqp"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
@@ -80,21 +81,32 @@ func (c *PaymentSucceededConsumer) HandleDelivery(delivery amqp.Delivery) error 
 // MarkOrderPaid 只允许金额一致的 pending 订单进入 paid；重复事件保持幂等。
 func MarkOrderPaid(db *gorm.DB, orderID, userID int64, amount float64) (*Order, bool, error) {
 	var order Order
-	if err := db.Where("id = ? AND user_id = ?", orderID, userID).First(&order).Error; err != nil {
-		return nil, false, err
-	}
-	if order.TotalAmount != amount {
-		return nil, false, ErrOrderPaymentMismatch
-	}
-	if order.Status == OrderStatusPaid {
-		return &order, false, nil
-	}
-	if err := TransitionTo(&order, OrderStatusPaid); err != nil {
-		return nil, false, fmt.Errorf("%w: %v", ErrOrderCannotBePaid, err)
-	}
+	changed := false
 
-	if err := db.Save(&order).Error; err != nil {
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND user_id = ?", orderID, userID).
+			First(&order).Error; err != nil {
+			return err
+		}
+		if order.TotalAmount != amount {
+			return ErrOrderPaymentMismatch
+		}
+		if order.Status == OrderStatusPaid {
+			return nil
+		}
+		if err := TransitionTo(&order, OrderStatusPaid); err != nil {
+			return fmt.Errorf("%w: %v", ErrOrderCannotBePaid, err)
+		}
+
+		if err := tx.Save(&order).Error; err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	if err != nil {
 		return nil, false, err
 	}
-	return &order, true, nil
+	return &order, changed, nil
 }

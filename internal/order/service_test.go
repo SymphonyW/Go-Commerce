@@ -62,6 +62,24 @@ func (p *recordingPublisher) Publish(ctx context.Context, routingKey string, eve
 	return p.err
 }
 
+type scheduledTimeout struct {
+	event events.OrderTimeoutCheckEvent
+	delay time.Duration
+}
+
+type recordingTimeoutScheduler struct {
+	events []scheduledTimeout
+	err    error
+}
+
+func (s *recordingTimeoutScheduler) Schedule(ctx context.Context, event events.OrderTimeoutCheckEvent, delay time.Duration) error {
+	s.events = append(s.events, scheduledTimeout{
+		event: event,
+		delay: delay,
+	})
+	return s.err
+}
+
 func newTestServiceWithPublisher(t *testing.T, publisher mq.Publisher) (*Service, *gorm.DB) {
 	t.Helper()
 
@@ -79,6 +97,25 @@ func newTestServiceWithPublisher(t *testing.T, publisher mq.Publisher) (*Service
 	}
 
 	return NewService(db, publisher), db
+}
+
+func newTestServiceWithTimeout(t *testing.T, publisher mq.Publisher, scheduler TimeoutScheduler, timeout time.Duration) (*Service, *gorm.DB) {
+	t.Helper()
+
+	dsn := fmt.Sprintf(
+		"file:%s?mode=memory&cache=shared",
+		strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()),
+	)
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open test database: %v", err)
+	}
+
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}); err != nil {
+		t.Fatalf("failed to migrate test database: %v", err)
+	}
+
+	return NewServiceWithTimeout(db, publisher, scheduler, timeout), db
 }
 
 func newConcurrentTestService(t *testing.T) (*Service, *gorm.DB) {
@@ -246,6 +283,56 @@ func TestCreateOrderPublishesCommittedOrderCreatedEvent(t *testing.T) {
 	}
 	if got, want := len(event.Items), 1; got != want {
 		t.Fatalf("unexpected event item count: got %d want %d", got, want)
+	}
+}
+
+func TestCreateOrderSchedulesTimeoutCheckAfterCommit(t *testing.T) {
+	publisher := &recordingPublisher{}
+	scheduler := &recordingTimeoutScheduler{}
+	service, db := newTestServiceWithTimeout(t, publisher, scheduler, 30*time.Second)
+	item := createTestProduct(t, db, "超时调度商品", 20, 5)
+
+	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
+		UserId: 9,
+		Items: []*pb.CreateOrderItem{
+			{ProductId: int64(item.ID), Quantity: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder returned error: %v", err)
+	}
+
+	if len(scheduler.events) != 1 {
+		t.Fatalf("unexpected scheduled timeout count: got %d want 1", len(scheduler.events))
+	}
+
+	scheduled := scheduler.events[0]
+	if got, want := scheduled.delay, 30*time.Second; got != want {
+		t.Fatalf("unexpected timeout delay: got %v want %v", got, want)
+	}
+	if got, want := scheduled.event.EventType, events.OrderTimeoutCheckType; got != want {
+		t.Fatalf("unexpected timeout event type: got %q want %q", got, want)
+	}
+	if got, want := scheduled.event.OrderID, resp.Order.Id; got != want {
+		t.Fatalf("unexpected timeout event order id: got %d want %d", got, want)
+	}
+	if got, want := scheduled.event.UserID, int64(9); got != want {
+		t.Fatalf("unexpected timeout event user id: got %d want %d", got, want)
+	}
+	if got, want := scheduled.event.TimeoutMinutes, 0.5; got != want {
+		t.Fatalf("unexpected timeout minutes: got %.2f want %.2f", got, want)
+	}
+
+	createdAt, err := time.Parse(time.RFC3339Nano, scheduled.event.CreatedAt)
+	if err != nil {
+		t.Fatalf("failed to parse timeout created_at: %v", err)
+	}
+	expireAt, err := time.Parse(time.RFC3339Nano, scheduled.event.ExpireAt)
+	if err != nil {
+		t.Fatalf("failed to parse timeout expire_at: %v", err)
+	}
+	if got, want := expireAt.Sub(createdAt), 30*time.Second; got != want {
+		t.Fatalf("unexpected timeout window: got %v want %v", got, want)
 	}
 }
 
@@ -586,6 +673,55 @@ func TestCancelOrderPublishesOrderCancelledEvent(t *testing.T) {
 	}
 	if got, want := event.OrderID, resp.Order.Id; got != want {
 		t.Fatalf("unexpected order id: got %d want %d", got, want)
+	}
+}
+
+func TestCancelOrderPersistsUserCancelReason(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "取消原因商品", 10, 5)
+
+	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
+		UserId: 1,
+		Items: []*pb.CreateOrderItem{
+			{ProductId: int64(item.ID), Quantity: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder returned error: %v", err)
+	}
+
+	cancelResp, err := service.CancelOrder(context.Background(), &pb.CancelOrderRequest{
+		Id:     resp.Order.Id,
+		UserId: 1,
+	})
+	if err != nil {
+		t.Fatalf("CancelOrder returned error: %v", err)
+	}
+	if !cancelResp.Success {
+		t.Fatalf("expected cancellation to succeed, got message %q", cancelResp.Message)
+	}
+
+	var latest Order
+	if err := db.First(&latest, resp.Order.Id).Error; err != nil {
+		t.Fatalf("failed to reload order: %v", err)
+	}
+	if got, want := latest.CancelReason, OrderCancelReasonUserCancelled; got != want {
+		t.Fatalf("unexpected cancel reason: got %q want %q", got, want)
+	}
+}
+
+func TestConvertToPBOrderIncludesCancelReason(t *testing.T) {
+	order := &Order{
+		UserID:       1,
+		TotalAmount:  10,
+		Status:       OrderStatusCancelled,
+		CancelReason: OrderCancelReasonPaymentTimeout,
+		OrderDate:    time.Now(),
+	}
+
+	converted := convertToPBOrder(order, nil)
+	if got, want := converted.CancelReason, OrderCancelReasonPaymentTimeout; got != want {
+		t.Fatalf("unexpected cancel reason: got %q want %q", got, want)
 	}
 }
 

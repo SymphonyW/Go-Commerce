@@ -11,11 +11,12 @@ import (
 // 用于存储订单的基本信息
 // 对应数据库中的orders表
 type Order struct {
-	gorm.Model            // 嵌入GORM基础模型
-	UserID      uint      `gorm:"not null"`                   // 用户ID，非空，关联到用户表
-	TotalAmount float64   `gorm:"not null"`                   // 订单总金额，非空
-	Status      string    `gorm:"not null;default:'pending'"` // 订单状态，非空，默认值为'pending'
-	OrderDate   time.Time `gorm:"not null"`                   // 订单日期，非空
+	gorm.Model             // 嵌入GORM基础模型
+	UserID       uint      `gorm:"not null"`                   // 用户ID，非空，关联到用户表
+	TotalAmount  float64   `gorm:"not null"`                   // 订单总金额，非空
+	Status       string    `gorm:"not null;default:'pending'"` // 订单状态，非空，默认值为'pending'
+	CancelReason string    `gorm:"size:64"`                    // 取消原因，便于区分人工取消和支付超时
+	OrderDate    time.Time `gorm:"not null"`                   // 订单日期，非空
 }
 
 // OrderItem 订单项模型

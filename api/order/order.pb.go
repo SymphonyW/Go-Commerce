@@ -149,6 +149,7 @@ type Order struct {
 	TotalAmount   float32                `protobuf:"fixed32,4,opt,name=total_amount,json=totalAmount,proto3" json:"total_amount,omitempty"`
 	Status        string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"` // "pending", "paid", "shipped", "completed", "cancelled"
 	CreatedAt     string                 `protobuf:"bytes,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	CancelReason  string                 `protobuf:"bytes,7,opt,name=cancel_reason,json=cancelReason,proto3" json:"cancel_reason,omitempty"` // "user_cancelled", "payment_timeout"
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -221,6 +222,13 @@ func (x *Order) GetStatus() string {
 func (x *Order) GetCreatedAt() string {
 	if x != nil {
 		return x.CreatedAt
+	}
+	return ""
+}
+
+func (x *Order) GetCancelReason() string {
+	if x != nil {
+		return x.CancelReason
 	}
 	return ""
 }
@@ -855,7 +863,7 @@ const file_api_order_order_proto_rawDesc = "" +
 	"\x0fCreateOrderItem\x12\x1d\n" +
 	"\n" +
 	"product_id\x18\x01 \x01(\x03R\tproductId\x12\x1a\n" +
-	"\bquantity\x18\x02 \x01(\x05R\bquantity\"\xb2\x01\n" +
+	"\bquantity\x18\x02 \x01(\x05R\bquantity\"\xd7\x01\n" +
 	"\x05Order\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\x03R\x06userId\x12&\n" +
@@ -863,7 +871,8 @@ const file_api_order_order_proto_rawDesc = "" +
 	"\ftotal_amount\x18\x04 \x01(\x02R\vtotalAmount\x12\x16\n" +
 	"\x06status\x18\x05 \x01(\tR\x06status\x12\x1d\n" +
 	"\n" +
-	"created_at\x18\x06 \x01(\tR\tcreatedAt\"[\n" +
+	"created_at\x18\x06 \x01(\tR\tcreatedAt\x12#\n" +
+	"\rcancel_reason\x18\a \x01(\tR\fcancelReason\"[\n" +
 	"\x12CreateOrderRequest\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\x03R\x06userId\x12,\n" +
 	"\x05items\x18\x02 \x03(\v2\x16.order.CreateOrderItemR\x05items\"9\n" +

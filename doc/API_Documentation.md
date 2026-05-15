@@ -226,7 +226,8 @@
       ],
       "total_amount": 99.99,
       "status": "pending",
-      "created_at": "2026-03-24T00:00:00Z"
+      "created_at": "2026-03-24T00:00:00Z",
+      "cancel_reason": ""
     }
   }
   ```
@@ -253,7 +254,8 @@
       ],
       "total_amount": 99.99,
       "status": "pending",
-      "created_at": "2026-03-24T00:00:00Z"
+      "created_at": "2026-03-24T00:00:00Z",
+      "cancel_reason": ""
     }
   }
   ```
@@ -270,13 +272,15 @@
         "id": 1,
         "status": "pending",
         "total_amount": 99.99,
-        "created_at": "2026-03-24T00:00:00Z"
+        "created_at": "2026-03-24T00:00:00Z",
+        "cancel_reason": ""
       },
       {
         "id": 2,
         "status": "completed",
         "total_amount": 199.98,
-        "created_at": "2026-03-23T00:00:00Z"
+        "created_at": "2026-03-23T00:00:00Z",
+        "cancel_reason": ""
       }
     ]
   }

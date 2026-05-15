@@ -23,6 +23,7 @@ message Order {
   float total_amount = 4;
   string status = 5; // "pending", "paid", "shipped", "completed", "cancelled"
   string created_at = 6;
+  string cancel_reason = 7; // "user_cancelled", "payment_timeout"
 }
 
 message CreateOrderRequest {

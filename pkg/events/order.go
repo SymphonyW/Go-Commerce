@@ -8,12 +8,14 @@ import (
 )
 
 const (
-	OrderCreatedType     = "order.created"
-	OrderPaidType        = "order.paid"
-	OrderShippedType     = "order.shipped"
-	OrderCompletedType   = "order.completed"
-	OrderCancelledType   = "order.cancelled"
-	PaymentSucceededType = "payment.succeeded"
+	OrderCreatedType          = "order.created"
+	OrderPaidType             = "order.paid"
+	OrderShippedType          = "order.shipped"
+	OrderCompletedType        = "order.completed"
+	OrderCancelledType        = "order.cancelled"
+	OrderTimeoutCheckType     = "order.timeout.check"
+	OrderTimeoutCancelledType = "order.timeout.cancelled"
+	PaymentSucceededType      = "payment.succeeded"
 )
 
 // BaseEvent 为所有领域事件提供统一元数据，消费者无需依赖 routing key 也能识别消息类型。
@@ -52,6 +54,24 @@ type OrderCancelledEvent struct {
 	OrderID int64  `json:"order_id"`
 	UserID  int64  `json:"user_id"`
 	Reason  string `json:"reason,omitempty"`
+}
+
+// OrderTimeoutCheckEvent 表示订单到期时需要执行的一次延迟检查。
+type OrderTimeoutCheckEvent struct {
+	BaseEvent
+	OrderID        int64   `json:"order_id"`
+	UserID         int64   `json:"user_id"`
+	CreatedAt      string  `json:"created_at"`
+	ExpireAt       string  `json:"expire_at"`
+	TimeoutMinutes float64 `json:"timeout_minutes"`
+}
+
+// OrderTimeoutCancelledEvent 表示某个订单因为支付超时而被自动关闭。
+type OrderTimeoutCancelledEvent struct {
+	BaseEvent
+	OrderID int64  `json:"order_id"`
+	UserID  int64  `json:"user_id"`
+	Reason  string `json:"reason"`
 }
 
 // OrderStatusChangedEvent 表示订单主状态发生了一次合法迁移。

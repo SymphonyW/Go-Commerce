@@ -16,6 +16,7 @@ Go Commerce是一个基于微服务架构的电子商务系统，使用Go语言�
 - **商家管理**：支持商家注册、商品管理（增删操作）
 - **用户下单**：支持用户下单，后端按真实商品价格计算金额并保存下单快照
 - **事件驱动**：订单与支付服务向 RabbitMQ 统一事件交换机发布领域事件，通知服务与订单服务按需异步消费
+- **订单超时关闭**：基于 RabbitMQ TTL + DLX 自动取消超时未支付订单，并幂等回补库存
 - **响应式前端**：使用React构建的现代化用户界面
 
 ## 快速启动
@@ -139,6 +140,7 @@ npm run dev
 - **Redis地址**：`REDIS_ADDR` - Redis服务地址
 - **RabbitMQ地址**：`RABBITMQ_URL` - RabbitMQ服务地址
 - **事件交换机**：`EVENT_EXCHANGE` - RabbitMQ 统一事件交换机名称，默认 `ecommerce.events`
+- **订单支付超时**：`ORDER_PAYMENT_TIMEOUT_MINUTES` - 支持整数或小数分钟，默认 `15`；本地演示可设为 `0.5`
 - **服务地址**：各服务间通信的地址配置（例如`AUTH_SERVICE_ADDR`）
 
 ### 故障排除
@@ -152,11 +154,12 @@ npm run dev
 ## RabbitMQ 事件链路
 
 - 统一交换机：`ecommerce.events`（topic）
-- 当前事件：`order.created`、`order.paid`、`order.shipped`、`order.completed`、`order.cancelled`、`payment.succeeded`
+- 当前事件：`order.created`、`order.paid`、`order.shipped`、`order.completed`、`order.cancelled`、`order.timeout.check`、`order.timeout.cancelled`、`payment.succeeded`
 - 生产者：`order-service`、`payment-service`
 - 消费者：
   - `notification-service` 绑定队列 `notification.order.created`，消费 `order.created` 后打印“发送下单成功通知”日志
   - `order-service` 绑定队列 `order.payment.succeeded`，消费 `payment.succeeded` 后把订单从 `pending` 更新为 `paid`
+  - `order-service` 同时监听 `order.timeout.cancel.queue`，当延迟消息经 DLX 到达后，仅对仍为 `pending` 的订单执行自动取消
 
 当前阶段先采用“数据库事务提交成功后再发布消息”的弱一致方案：如果 RabbitMQ 不可用，订单创建/取消仍会成功，支付记录也可能已经成功，但事件会记录 `event_publish_failed` 日志且存在丢失风险。后续如需更强一致，应继续演进为本地消息表 / Outbox 方案。
 
@@ -173,7 +176,7 @@ docker-compose logs -f notification-service
 # http://localhost:15672  guest / guest
 ```
 
-验证要点：创建订单后可在管理界面看到 `ecommerce.events` 与 `notification.order.created`，通知服务会打印 `order.created` 对应日志；支付成功后会出现 `order.payment.succeeded` 队列并把订单状态改为 `paid`；取消订单时，`order.cancelled` 会发布到同一交换机。
+验证要点：创建订单后可在管理界面看到 `ecommerce.events` 与 `notification.order.created`，通知服务会打印 `order.created` 对应日志；支付成功后会出现 `order.payment.succeeded` 队列并把订单状态改为 `paid`；未支付订单会先进入 `order.timeout.delay.queue`，TTL 到期后经 `order.timeout.dlx` 转入 `order.timeout.cancel.queue`，随后自动变为 `cancelled` 并回补库存。
 
 ## 使用示例
 

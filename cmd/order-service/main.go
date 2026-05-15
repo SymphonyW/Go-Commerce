@@ -60,9 +60,16 @@ func main() {
 		exchangeName = mq.DefaultExchangeName
 	}
 
+	paymentTimeout, err := order.ParseOrderPaymentTimeoutMinutes(os.Getenv("ORDER_PAYMENT_TIMEOUT_MINUTES"))
+	if err != nil {
+		log.Fatalf("invalid ORDER_PAYMENT_TIMEOUT_MINUTES: %v", err)
+	}
+
 	// 当前阶段采用弱一致策略：RabbitMQ 暂不可用时主交易链路继续运行，但事件会丢失并记录告警。
 	var publisher mq.Publisher = mq.NopPublisher{}
-	var consumerChannel *amqp.Channel
+	var timeoutScheduler order.TimeoutScheduler = order.NopTimeoutScheduler{}
+	var paymentConsumerChannel *amqp.Channel
+	var timeoutConsumerChannel *amqp.Channel
 	conn, err := amqp.Dial(rabbitmqURL)
 	if err != nil {
 		log.Printf("rabbitmq_connection_failed exchange=%s error=%v", exchangeName, err)
@@ -77,11 +84,30 @@ func main() {
 			publisher = mq.NewRabbitMQPublisher(ch, exchangeName)
 		}
 
-		consumerChannel, channelErr = conn.Channel()
+		paymentConsumerChannel, channelErr = conn.Channel()
 		if channelErr != nil {
-			log.Printf("rabbitmq_consumer_channel_open_failed exchange=%s error=%v", exchangeName, channelErr)
+			log.Printf("rabbitmq_payment_consumer_channel_open_failed exchange=%s error=%v", exchangeName, channelErr)
 		} else {
-			defer consumerChannel.Close()
+			defer paymentConsumerChannel.Close()
+		}
+
+		timeoutSchedulerChannel, channelErr := conn.Channel()
+		if channelErr != nil {
+			log.Printf("rabbitmq_timeout_scheduler_channel_open_failed error=%v", channelErr)
+		} else {
+			defer timeoutSchedulerChannel.Close()
+			if err := declareOrderTimeoutTopology(timeoutSchedulerChannel); err != nil {
+				log.Printf("rabbitmq_timeout_topology_declare_failed error=%v", err)
+			} else {
+				timeoutScheduler = order.NewRabbitMQTimeoutScheduler(timeoutSchedulerChannel, order.OrderTimeoutDelayExchange)
+			}
+		}
+
+		timeoutConsumerChannel, channelErr = conn.Channel()
+		if channelErr != nil {
+			log.Printf("rabbitmq_timeout_consumer_channel_open_failed error=%v", channelErr)
+		} else {
+			defer timeoutConsumerChannel.Close()
 		}
 	}
 
@@ -98,10 +124,13 @@ func main() {
 	// 注册订单服务
 	// 将order.NewService(db, publisher)创建的服务实例注册到gRPC服务器
 	// 传入数据库连接和事件发布器
-	pb.RegisterOrderServiceServer(s, order.NewService(db, publisher))
+	pb.RegisterOrderServiceServer(s, order.NewServiceWithTimeout(db, publisher, timeoutScheduler, paymentTimeout))
 
-	if consumerChannel != nil {
-		go consumePaymentSucceededEvents(consumerChannel, exchangeName, db, publisher)
+	if paymentConsumerChannel != nil {
+		go consumePaymentSucceededEvents(paymentConsumerChannel, exchangeName, db, publisher)
+	}
+	if timeoutConsumerChannel != nil {
+		go consumeOrderTimeoutEvents(timeoutConsumerChannel, db, publisher)
 	}
 
 	// 启动服务
@@ -111,6 +140,38 @@ func main() {
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
 	}
+}
+
+func declareOrderTimeoutTopology(ch *amqp.Channel) error {
+	if err := ch.ExchangeDeclare(order.OrderTimeoutDelayExchange, "direct", true, false, false, false, nil); err != nil {
+		return err
+	}
+	if err := ch.ExchangeDeclare(order.OrderTimeoutDLX, "direct", true, false, false, false, nil); err != nil {
+		return err
+	}
+	delayQueue, err := ch.QueueDeclare(
+		order.OrderTimeoutDelayQueue,
+		true,
+		false,
+		false,
+		false,
+		amqp.Table{
+			"x-dead-letter-exchange":    order.OrderTimeoutDLX,
+			"x-dead-letter-routing-key": events.OrderTimeoutCheckType,
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if err := ch.QueueBind(delayQueue.Name, events.OrderTimeoutCheckType, order.OrderTimeoutDelayExchange, false, nil); err != nil {
+		return err
+	}
+
+	cancelQueue, err := ch.QueueDeclare(order.OrderTimeoutCancelQueue, true, false, false, false, nil)
+	if err != nil {
+		return err
+	}
+	return ch.QueueBind(cancelQueue.Name, events.OrderTimeoutCheckType, order.OrderTimeoutDLX, false, nil)
 }
 
 func consumePaymentSucceededEvents(ch *amqp.Channel, exchangeName string, db *gorm.DB, publisher mq.Publisher) {
@@ -138,6 +199,32 @@ func consumePaymentSucceededEvents(ch *amqp.Channel, exchangeName string, db *go
 	for delivery := range deliveries {
 		if err := consumer.HandleDelivery(delivery); err != nil {
 			log.Printf("payment_event_handle_failed error=%v", err)
+		}
+	}
+}
+
+func consumeOrderTimeoutEvents(ch *amqp.Channel, db *gorm.DB, publisher mq.Publisher) {
+	if err := declareOrderTimeoutTopology(ch); err != nil {
+		log.Printf("rabbitmq_timeout_topology_declare_failed error=%v", err)
+		return
+	}
+	deliveries, err := ch.Consume(order.OrderTimeoutCancelQueue, "", false, false, false, false, nil)
+	if err != nil {
+		log.Printf("rabbitmq_consume_failed queue=%s error=%v", order.OrderTimeoutCancelQueue, err)
+		return
+	}
+
+	consumer := order.NewOrderTimeoutConsumer(db, publisher, log.Default())
+	log.Printf(
+		"order_timeout_consumer_started delay_exchange=%s dlx=%s queue=%s routing_key=%s",
+		order.OrderTimeoutDelayExchange,
+		order.OrderTimeoutDLX,
+		order.OrderTimeoutCancelQueue,
+		events.OrderTimeoutCheckType,
+	)
+	for delivery := range deliveries {
+		if err := consumer.HandleDelivery(delivery); err != nil {
+			log.Printf("order_timeout_event_handle_failed error=%v", err)
 		}
 	}
 }

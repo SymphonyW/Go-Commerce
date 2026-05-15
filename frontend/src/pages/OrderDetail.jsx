@@ -164,6 +164,13 @@ const OrderDetail = () => {
     return <div className="error-message">{error || '订单不存在'}</div>;
   }
 
+  const displayStatus = order.status === 'pending' ? '待支付' :
+    order.status === 'paid' ? '已支付' :
+    order.status === 'shipped' ? '已发货' :
+    order.status === 'completed' ? '已完成' :
+    order.status === 'cancelled' && order.cancel_reason === 'payment_timeout' ? '已取消（支付超时）' :
+    order.status === 'cancelled' ? '已取消' : order.status;
+
   // 渲染订单详情
   return (
     <div className="order-detail">
@@ -175,11 +182,7 @@ const OrderDetail = () => {
           <div className="order-detail-status-container">
             {/* 订单状态 */}
             <div className={`order-detail-status ${order.status}`}>
-              {order.status === 'pending' ? '待支付' :
-               order.status === 'paid' ? '已支付' :
-               order.status === 'shipped' ? '已发货' :
-               order.status === 'completed' ? '已完成' :
-               order.status === 'cancelled' ? '已取消' : order.status}
+              {displayStatus}
             </div>
             {/* 取消订单按钮（仅当订单状态为待处理时显示） */}
             {order.status === 'pending' && (
@@ -249,6 +252,10 @@ const OrderDetail = () => {
 
         {order.status === 'completed' && (
           <div className="payment-actions">订单已完成</div>
+        )}
+
+        {order.status === 'cancelled' && order.cancel_reason === 'payment_timeout' && (
+          <div className="payment-actions">该订单因支付超时已自动取消</div>
         )}
         
         {/* 订单商品列表 */}

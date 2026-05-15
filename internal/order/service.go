@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 	// GORM：ORM框架，用于数据库操作
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	// 导入订单服务的protobuf生成代码
 	pb "go-commerce/api/order"
@@ -32,6 +33,8 @@ type Service struct {
 	pb.UnimplementedOrderServiceServer          // 嵌入未实现的OrderServiceServer，以保持向后兼容性
 	db                                 *gorm.DB // 数据库连接
 	publisher                          mq.Publisher
+	timeoutScheduler                   TimeoutScheduler
+	paymentTimeout                     time.Duration
 }
 
 // NewService 创建订单服务实例
@@ -44,10 +47,26 @@ type Service struct {
 //
 //	*Service: 订单服务实例
 func NewService(db *gorm.DB, publisher mq.Publisher) *Service {
+	return NewServiceWithTimeout(db, publisher, nil, DefaultOrderPaymentTimeout)
+}
+
+// NewServiceWithTimeout 允许在测试和启动阶段注入超时调度器及支付窗口。
+func NewServiceWithTimeout(db *gorm.DB, publisher mq.Publisher, scheduler TimeoutScheduler, paymentTimeout time.Duration) *Service {
 	if publisher == nil {
 		publisher = mq.NopPublisher{}
 	}
-	return &Service{db: db, publisher: publisher}
+	if scheduler == nil {
+		scheduler = NopTimeoutScheduler{}
+	}
+	if paymentTimeout <= 0 {
+		paymentTimeout = DefaultOrderPaymentTimeout
+	}
+	return &Service{
+		db:               db,
+		publisher:        publisher,
+		timeoutScheduler: scheduler,
+		paymentTimeout:   paymentTimeout,
+	}
 }
 
 // CreateOrder 创建订单：创建新订单并发送订单事件
@@ -124,6 +143,19 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 		)
 	}
 
+	// 超时消息同样在事务提交后再发，避免订单未真正落库时被提前消费。
+	timeoutEvent := newOrderTimeoutCheckEvent(&order, req.UserId, s.paymentTimeout)
+	if err := s.timeoutScheduler.Schedule(ctx, timeoutEvent, s.paymentTimeout); err != nil {
+		log.Printf(
+			"timeout_schedule_failed event_type=%s event_id=%s order_id=%d user_id=%d error=%v",
+			timeoutEvent.EventType,
+			timeoutEvent.EventID,
+			order.ID,
+			req.UserId,
+			err,
+		)
+	}
+
 	// 返回创建订单响应
 	return &pb.CreateOrderResponse{
 		Order: convertToPBOrder(&order, orderItems),
@@ -148,6 +180,18 @@ func newOrderCreatedEvent(order *Order, userID int64, totalAmount float64, items
 		UserID:      userID,
 		TotalAmount: totalAmount,
 		Items:       eventItems,
+	}
+}
+
+func newOrderTimeoutCheckEvent(order *Order, userID int64, timeout time.Duration) events.OrderTimeoutCheckEvent {
+	createdAt := order.OrderDate.UTC()
+	return events.OrderTimeoutCheckEvent{
+		BaseEvent:      events.NewBaseEvent(events.OrderTimeoutCheckType, time.Now()),
+		OrderID:        int64(order.ID),
+		UserID:         userID,
+		CreatedAt:      createdAt.Format(time.RFC3339Nano),
+		ExpireAt:       createdAt.Add(timeout).Format(time.RFC3339Nano),
+		TimeoutMinutes: timeout.Minutes(),
 	}
 }
 
@@ -258,12 +302,13 @@ func convertToPBOrder(order *Order, items []OrderItem) *pb.Order {
 	}
 
 	return &pb.Order{
-		Id:          int64(order.ID),                      // 订单ID
-		UserId:      int64(order.UserID),                  // 用户ID
-		Items:       pbItems,                              // 订单商品列表
-		TotalAmount: float32(order.TotalAmount),           // 订单总金额
-		Status:      order.Status,                         // 订单状态
-		CreatedAt:   order.OrderDate.Format(time.RFC3339), // 订单创建时间
+		Id:           int64(order.ID),                      // 订单ID
+		UserId:       int64(order.UserID),                  // 用户ID
+		Items:        pbItems,                              // 订单商品列表
+		TotalAmount:  float32(order.TotalAmount),           // 订单总金额
+		Status:       order.Status,                         // 订单状态
+		CreatedAt:    order.OrderDate.Format(time.RFC3339), // 订单创建时间
+		CancelReason: order.CancelReason,                   // 取消原因
 	}
 }
 
@@ -366,79 +411,30 @@ func (s *Service) GetOrder(ctx context.Context, req *pb.GetOrderRequest) (*pb.Ge
 //	*pb.CancelOrderResponse: 取消订单响应，包含取消结果和消息
 //	error: 错误信息
 func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (*pb.CancelOrderResponse, error) {
-	// 查询订单
-	var order Order
-	if err := s.db.Where("id = ? AND user_id = ?", req.Id, req.UserId).First(&order).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
+	order, changed, err := cancelOrderWithReason(s.db, req.Id, req.UserId, OrderCancelReasonUserCancelled)
+	if err != nil {
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
 			return &pb.CancelOrderResponse{
 				Success: false,
 				Message: "订单不存在",
 			}, nil
-		}
-		return &pb.CancelOrderResponse{
-			Success: false,
-			Message: "获取订单失败",
-		}, nil
-	}
-
-	// 取消订单也必须经过统一状态机，避免后续状态扩展时出现旁路。
-	if err := ValidateTransition(order.Status, OrderStatusCancelled); err != nil {
-		return &pb.CancelOrderResponse{
-			Success: false,
-			Message: err.Error(),
-		}, nil
-	}
-
-	// 开始数据库事务
-	tx := s.db.Begin()
-	defer func() {
-		if r := recover(); r != nil {
-			tx.Rollback()
-		}
-	}()
-
-	// 查询订单项
-	var orderItems []OrderItem
-	if err := tx.Where("order_id = ?", order.ID).Find(&orderItems).Error; err != nil {
-		tx.Rollback()
-		return &pb.CancelOrderResponse{
-			Success: false,
-			Message: "获取订单项失败",
-		}, nil
-	}
-
-	// 使用原子自增恢复库存，避免取消链路再走“先查后改”。
-	for _, item := range orderItems {
-		if err := product.RestoreStock(tx, item.ProductID, item.Quantity); err != nil {
-			tx.Rollback()
+		case errors.Is(err, ErrInvalidOrderTransition):
 			return &pb.CancelOrderResponse{
 				Success: false,
-				Message: "恢复库存失败",
+				Message: err.Error(),
+			}, nil
+		default:
+			return &pb.CancelOrderResponse{
+				Success: false,
+				Message: "取消订单失败",
 			}, nil
 		}
 	}
-
-	// 更新订单状态
-	if err := TransitionTo(&order, OrderStatusCancelled); err != nil {
-		tx.Rollback()
+	if !changed {
 		return &pb.CancelOrderResponse{
 			Success: false,
-			Message: err.Error(),
-		}, nil
-	}
-	if err := tx.Save(&order).Error; err != nil {
-		tx.Rollback()
-		return &pb.CancelOrderResponse{
-			Success: false,
-			Message: "更新订单状态失败",
-		}, nil
-	}
-
-	// 提交事务
-	if err := tx.Commit().Error; err != nil {
-		return &pb.CancelOrderResponse{
-			Success: false,
-			Message: "提交取消订单事务失败",
+			Message: "订单已取消",
 		}, nil
 	}
 
@@ -447,7 +443,7 @@ func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (
 		BaseEvent: events.NewBaseEvent(events.OrderCancelledType, time.Now()),
 		OrderID:   int64(order.ID),
 		UserID:    req.UserId,
-		Reason:    "user_cancelled",
+		Reason:    OrderCancelReasonUserCancelled,
 	}
 	if err := s.publisher.Publish(ctx, events.OrderCancelledType, orderEvent); err != nil {
 		log.Printf(
@@ -465,6 +461,58 @@ func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (
 		Success: true,
 		Message: "订单取消成功",
 	}, nil
+}
+
+const (
+	OrderCancelReasonUserCancelled  = "user_cancelled"
+	OrderCancelReasonPaymentTimeout = "payment_timeout"
+)
+
+// cancelOrderWithReason 是人工取消与超时取消共用的核心路径。
+// 只有首次把 pending 推进到 cancelled 时才会回补库存，因此天然支持重复消息幂等。
+func cancelOrderWithReason(db *gorm.DB, orderID, userID int64, reason string) (*Order, bool, error) {
+	var order Order
+	changed := false
+
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND user_id = ?", orderID, userID).
+			First(&order).Error; err != nil {
+			return err
+		}
+
+		if order.Status == OrderStatusCancelled {
+			return nil
+		}
+		if err := ValidateTransition(order.Status, OrderStatusCancelled); err != nil {
+			return err
+		}
+
+		var orderItems []OrderItem
+		if err := tx.Where("order_id = ?", order.ID).Find(&orderItems).Error; err != nil {
+			return err
+		}
+
+		for _, item := range orderItems {
+			if err := product.RestoreStock(tx, item.ProductID, item.Quantity); err != nil {
+				return err
+			}
+		}
+
+		if err := TransitionTo(&order, OrderStatusCancelled); err != nil {
+			return err
+		}
+		order.CancelReason = reason
+		if err := tx.Save(&order).Error; err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return &order, changed, nil
 }
 
 // ShipOrder 允许具备权限的商家或管理员把已支付订单推进到已发货。

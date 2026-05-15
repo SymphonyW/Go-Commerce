@@ -156,6 +156,7 @@ Go-Commerce/
 - 创建订单：基于商品真实信息创建订单，按后端价格计算总额
 - 商品快照：保存下单时的商品名称与价格，保证历史订单不受后续改价影响
 - 状态机：统一约束订单状态流转，阻止非法迁移
+- 支付超时：使用 RabbitMQ TTL + DLX 自动关闭长时间未支付订单
 - 订单列表：获取用户的订单列表
 - 订单详情：获取单个订单的详细信息
 
@@ -182,7 +183,7 @@ stateDiagram-v2
 ```
 
 - `pending -> paid`：支付成功事件驱动
-- `pending -> cancelled`：用户取消
+- `pending -> cancelled`：用户取消或支付超时
 - `paid -> shipped`：商家或管理员发货
 - `shipped -> completed`：用户确认收货
 - `cancelled -> paid`、`paid -> completed`、`completed -> cancelled` 等非法流转都会被统一拦截
@@ -194,6 +195,42 @@ stateDiagram-v2
 - 订单主表、订单项与库存扣减处于同一事务中；任一环节失败，库存变化会随事务一并回滚。
 - 取消订单时统一走原子回补：`UPDATE products SET stock = stock + ? WHERE id = ?`。
 - 可通过 `go test ./internal/order -run TestCreateOrderConcurrentRequestsDoNotOversell -v` 快速验证并发防超卖行为。
+
+**延迟取消订单设计**：
+
+```text
+CreateOrder 提交成功
+        |
+        v
+发送 order.timeout.check
+        |
+        v
+order.timeout.delay.queue
+        |
+        |  TTL 到期
+        v
+order.timeout.dlx
+        |
+        v
+order.timeout.cancel.queue
+        |
+        v
+order-service timeout consumer
+        |
+        +-- 非 pending：ACK，跳过
+        |
+        +-- 仍为 pending：统一取消流程
+                          -> status = cancelled
+                          -> cancel_reason = payment_timeout
+                          -> 回补库存
+                          -> 发布 order.cancelled / order.timeout.cancelled
+```
+
+- 当前选择 **TTL + DLX**，因为它不依赖额外 RabbitMQ 插件，部署通用性更好。
+- 超时消费者暂时放在 `order-service` 内部，而不是拆成独立 worker：订单状态机、库存回补和数据库事务都已归属于订单服务，当前规模下放在同一服务里更省边界成本；未来若异步任务需要独立扩缩容，再平移成单独 worker 也很自然。
+- 订单新增 `cancel_reason`，人工取消记为 `user_cancelled`，支付超时记为 `payment_timeout`，前端可据此展示“支付超时自动取消”。
+- 人工取消和超时取消共用同一事务函数；只有首次 `pending -> cancelled` 才会回补库存，因此重复消费不会造成二次回补。
+- 订单事务仍然先提交、后发送延迟消息；这保持了当前项目的弱一致策略。若未来要追求更高可靠性，应继续演进到本地消息表 / Outbox。
 
 ### 4.5 支付服务
 
@@ -299,6 +336,8 @@ stateDiagram-v2
 | `order.shipped` | `order-service` | 暂无 | 商家或管理员发货后发布 |
 | `order.completed` | `order-service` | 暂无 | 用户确认收货后发布 |
 | `order.cancelled` | `order-service` | 暂无 | 当前先完成发布，为后续库存、营销、风控扩展预留 |
+| `order.timeout.check` | `order-service` | `order-service` | 订单创建后发送到 TTL 队列，过期后触发超时检查 |
+| `order.timeout.cancelled` | `order-service` | 暂无 | 订单因支付超时被自动关闭后发布 |
 | `payment.succeeded` | `payment-service` | `order-service` | 支付成功后异步把订单推进为 `paid` |
 
 统一交换机使用 `ecommerce.events`（topic）。生产者通过 `pkg/mq.Publisher` 抽象发布能力，RabbitMQ 细节封装在 `pkg/mq`；事件结构定义在 `pkg/events`。这让各服务只关心“发布什么事件”，而不是“怎样调用 AMQP SDK”。

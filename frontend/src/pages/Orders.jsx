@@ -34,6 +34,16 @@ const Orders = () => {
     return <div className="loading">加载中...</div>;
   }
 
+  const getDisplayStatus = (order) => {
+    if (order.status === 'pending') return '待支付';
+    if (order.status === 'paid') return '已支付';
+    if (order.status === 'shipped') return '已发货';
+    if (order.status === 'completed') return '已完成';
+    if (order.status === 'cancelled' && order.cancel_reason === 'payment_timeout') return '已取消（支付超时）';
+    if (order.status === 'cancelled') return '已取消';
+    return order.status;
+  };
+
   return (
     <div className="orders-container">
       <h1>我的订单</h1>
@@ -52,11 +62,7 @@ const Orders = () => {
               <div className="order-header">
                 <div className="order-id">订单号: {order.id}</div>
                 <div className={`order-status ${order.status}`}>
-                  {order.status === 'pending' ? '待支付' :
-                   order.status === 'paid' ? '已支付' :
-                   order.status === 'shipped' ? '已发货' :
-                   order.status === 'completed' ? '已完成' :
-                   order.status === 'cancelled' ? '已取消' : order.status}
+                  {getDisplayStatus(order)}
                 </div>
               </div>
               <div className="order-info">

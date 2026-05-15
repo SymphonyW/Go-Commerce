@@ -88,6 +88,7 @@ services:
       DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
       EVENT_EXCHANGE: "ecommerce.events"
+      ORDER_PAYMENT_TIMEOUT_MINUTES: "15"
 
   payment-service:
     build:
