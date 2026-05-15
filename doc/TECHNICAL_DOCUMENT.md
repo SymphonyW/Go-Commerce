@@ -27,6 +27,7 @@
 4. **订单服务**：处理订单创建和管理
 5. **购物车服务**：管理用户购物车
 6. **商户服务**：管理商户信息和商户产品
+7. **通知服务**：异步消费订单事件并执行通知动作
 
 各服务之间通过gRPC进行通信，数据存储使用MySQL和Redis，消息传递使用RabbitMQ。前端通过API网关与后端服务交互。
 
@@ -72,6 +73,7 @@ Go-Commerce/
 │   ├── auth-service/   # 认证服务
 │   ├── cart-service/   # 购物车服务
 │   ├── merchant-service/ # 商户服务
+│   ├── notification-service/ # 通知服务
 │   ├── order-service/  # 订单服务
 │   └── product-service/ # 产品服务
 ├── doc/                # 项目文档
@@ -83,6 +85,7 @@ Go-Commerce/
 │   ├── auth/           # 认证服务内部实现
 │   ├── cart/           # 购物车服务内部实现
 │   ├── merchant/       # 商户服务内部实现
+│   ├── notification/   # 通知消费逻辑
 │   ├── order/          # 订单服务内部实现
 │   └── product/        # 产品服务内部实现
 ├── pkg/                # 公共包
@@ -155,6 +158,11 @@ Go-Commerce/
 - `internal/order/service.go`：订单服务实现
 - `internal/order/model.go`：订单模型定义
 
+**事件发布设计**：
+- 订单事务提交成功后，订单服务通过统一事件交换机发布 `order.created` 与 `order.cancelled`。
+- 事件体统一包含 `event_id`、`event_type`、`occurred_at`，业务侧无需依赖 routing key 才能识别事件。
+- 当前阶段采用弱一致：消息发布失败只记录结构化日志，不回滚已经成功提交的订单事务。
+
 **库存一致性设计**：
 - 创建订单时先在服务端合并重复 `product_id`，再基于真实商品信息生成订单快照。
 - 扣减库存统一走条件更新：`UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?`，通过 `RowsAffected` 判断是否成功，避免并发下出现超卖或负库存。
@@ -204,7 +212,21 @@ Go-Commerce/
 - 商户服务再基于数据库中的真实角色和 `owner_user_id` 做最终授权，避免只信任前端传入的 `merchant_id`
 - 为兼容历史商户数据，`owner_user_id` 先允许为空；旧数据回填完成后，再考虑收紧为非空约束
 
-### 4.7 前端应用
+### 4.7 通知服务
+
+**职责**：异步消费订单事件，演示订单服务与后续业务服务之间的解耦。
+
+**核心功能**：
+- 声明并监听队列 `notification.order.created`
+- 绑定统一交换机 `ecommerce.events` 的 `order.created` routing key
+- 成功反序列化后打印“发送下单成功通知”日志并 ACK
+- 遇到格式错误消息时 NACK 且不重回队列，避免坏消息无限循环
+
+**主要文件**：
+- `cmd/notification-service/main.go`：通知服务入口
+- `internal/notification/consumer.go`：消息处理逻辑
+
+### 4.8 前端应用
 
 **职责**：提供用户界面，与API网关交互。
 
@@ -220,3 +242,15 @@ Go-Commerce/
 - `frontend/src/components/Navbar.jsx`：导航组件
 - `frontend/src/pages/`：各页面组件，包括新增的Merchants.jsx
 - `frontend/src/services/api.js`：API调用服务，包含商户相关API
+
+
+## 5. 事件驱动设计
+
+| 事件 | 生产者 | 消费者 | 说明 |
+|------|--------|--------|------|
+| `order.created` | `order-service` | `notification-service` | 下单成功后异步触发通知 |
+| `order.cancelled` | `order-service` | 暂无 | 当前先完成发布，为后续库存、营销、风控扩展预留 |
+
+统一交换机使用 `ecommerce.events`（topic）。生产者通过 `pkg/mq.Publisher` 抽象发布能力，RabbitMQ 细节封装在 `pkg/mq`；事件结构定义在 `pkg/events`。这让订单服务只关心“发布什么事件”，而不是“怎样调用 AMQP SDK”。
+
+当前消息链路是弱一致模型：数据库事务先提交，RabbitMQ 发布随后执行。若 RabbitMQ 暂时不可用，订单主流程继续成功，但会输出 `event_publish_failed` 日志，事件可能丢失。若未来要把“订单落库”和“事件必达”绑得更紧，需要继续引入本地消息表 / Outbox、重试与死信队列。

@@ -87,6 +87,7 @@ services:
     environment:
       DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+      EVENT_EXCHANGE: "ecommerce.events"
 
   cart-service:
     build:
@@ -118,6 +119,19 @@ services:
     environment:
       DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+
+  notification-service:
+    build:
+      context: .
+      dockerfile: ./cmd/notification-service/Dockerfile
+      pull: false
+    container_name: ecommerce-notification-service
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+      EVENT_EXCHANGE: "ecommerce.events"
 
   api-gateway:
     build:

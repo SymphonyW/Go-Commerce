@@ -9,8 +9,6 @@ import (
 	"math"
 	"time"
 
-	// RabbitMQ客户端：用于消息队列操作
-	"github.com/streadway/amqp"
 	// gRPC状态码：用于返回标准化的错误信息
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -21,28 +19,33 @@ import (
 	pb "go-commerce/api/order"
 	// 导入产品模型：用于库存检查和更新
 	"go-commerce/internal/product"
+	"go-commerce/pkg/events"
+	"go-commerce/pkg/mq"
 )
 
 // Service 订单服务结构体
 // 实现了OrderServiceServer接口
 
 type Service struct {
-	pb.UnimplementedOrderServiceServer               // 嵌入未实现的OrderServiceServer，以保持向后兼容性
-	db                                 *gorm.DB      // 数据库连接
-	ch                                 *amqp.Channel // RabbitMQ通道，用于发布订单事件
+	pb.UnimplementedOrderServiceServer          // 嵌入未实现的OrderServiceServer，以保持向后兼容性
+	db                                 *gorm.DB // 数据库连接
+	publisher                          mq.Publisher
 }
 
 // NewService 创建订单服务实例
 // 参数：
 //
 //	db: 数据库连接
-//	ch: RabbitMQ通道
+//	publisher: 订单事件发布器
 //
 // 返回值：
 //
 //	*Service: 订单服务实例
-func NewService(db *gorm.DB, ch *amqp.Channel) *Service {
-	return &Service{db: db, ch: ch}
+func NewService(db *gorm.DB, publisher mq.Publisher) *Service {
+	if publisher == nil {
+		publisher = mq.NopPublisher{}
+	}
+	return &Service{db: db, publisher: publisher}
 }
 
 // CreateOrder 创建订单：创建新订单并发送订单事件
@@ -101,26 +104,48 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 		return nil, status.Errorf(codes.Internal, "failed to create order items: %v", err)
 	}
 
-	// 发布订单创建事件
-	orderEvent := map[string]interface{}{
-		"order_id":   order.ID,
-		"user_id":    req.UserId,
-		"total":      totalAmount,
-		"created_at": time.Now().Format(time.RFC3339),
-	}
-	if err := publishEvent(s.ch, "order.created", orderEvent); err != nil {
-		log.Printf("failed to publish order event: %v", err)
-	}
-
 	// 提交事务
 	if err := tx.Commit().Error; err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to commit order transaction: %v", err)
+	}
+
+	// 先提交交易事务，再发布事件；当前阶段采用弱一致，避免消息先于数据库提交对外可见。
+	orderEvent := newOrderCreatedEvent(&order, req.UserId, totalAmount, orderItems)
+	if err := s.publisher.Publish(ctx, events.OrderCreatedType, orderEvent); err != nil {
+		log.Printf(
+			"event_publish_failed event_type=%s event_id=%s order_id=%d user_id=%d error=%v",
+			orderEvent.EventType,
+			orderEvent.EventID,
+			order.ID,
+			req.UserId,
+			err,
+		)
 	}
 
 	// 返回创建订单响应
 	return &pb.CreateOrderResponse{
 		Order: convertToPBOrder(&order, orderItems),
 	}, nil
+}
+
+func newOrderCreatedEvent(order *Order, userID int64, totalAmount float64, items []OrderItem) events.OrderCreatedEvent {
+	eventItems := make([]events.OrderItemSnapshot, len(items))
+	for i, item := range items {
+		eventItems[i] = events.OrderItemSnapshot{
+			ProductID:   item.ProductID,
+			ProductName: item.ProductName,
+			Price:       item.Price,
+			Quantity:    item.Quantity,
+		}
+	}
+
+	return events.OrderCreatedEvent{
+		BaseEvent:   events.NewBaseEvent(events.OrderCreatedType, time.Now()),
+		OrderID:     int64(order.ID),
+		UserID:      userID,
+		TotalAmount: totalAmount,
+		Items:       eventItems,
+	}
 }
 
 // aggregatedCreateOrderItem 表示同一商品在一次下单请求中的合并结果。
@@ -236,21 +261,6 @@ func convertToPBOrder(order *Order, items []OrderItem) *pb.Order {
 		Status:      order.Status,                         // 订单状态
 		CreatedAt:   order.OrderDate.Format(time.RFC3339), // 订单创建时间
 	}
-}
-
-// publishEvent 发布事件到RabbitMQ
-// 参数：
-//
-//	ch: RabbitMQ通道
-//	exchange: 交换机名称
-//	event: 事件数据
-//
-// 返回值：
-//
-//	error: 错误信息
-func publishEvent(ch *amqp.Channel, exchange string, event interface{}) error {
-	// 实际实现会将事件发布到RabbitMQ
-	return nil
 }
 
 // ListOrders 获取用户订单列表
@@ -414,19 +424,31 @@ func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (
 		}, nil
 	}
 
-	// 发布订单取消事件
-	orderEvent := map[string]interface{}{
-		"order_id":     order.ID,
-		"user_id":      req.UserId,
-		"status":       "cancelled",
-		"cancelled_at": time.Now().Format(time.RFC3339),
-	}
-	if err := publishEvent(s.ch, "order.cancelled", orderEvent); err != nil {
-		log.Printf("failed to publish order event: %v", err)
+	// 提交事务
+	if err := tx.Commit().Error; err != nil {
+		return &pb.CancelOrderResponse{
+			Success: false,
+			Message: "提交取消订单事务失败",
+		}, nil
 	}
 
-	// 提交事务
-	tx.Commit()
+	// 取消成功后再发布领域事件；发布失败不回滚订单，只记录日志等待后续可靠消息机制补强。
+	orderEvent := events.OrderCancelledEvent{
+		BaseEvent: events.NewBaseEvent(events.OrderCancelledType, time.Now()),
+		OrderID:   int64(order.ID),
+		UserID:    req.UserId,
+		Reason:    "user_cancelled",
+	}
+	if err := s.publisher.Publish(ctx, events.OrderCancelledType, orderEvent); err != nil {
+		log.Printf(
+			"event_publish_failed event_type=%s event_id=%s order_id=%d user_id=%d error=%v",
+			orderEvent.EventType,
+			orderEvent.EventID,
+			order.ID,
+			req.UserId,
+			err,
+		)
+	}
 
 	// 返回取消订单响应
 	return &pb.CancelOrderResponse{

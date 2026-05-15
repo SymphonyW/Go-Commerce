@@ -21,6 +21,7 @@ import (
 	"go-commerce/internal/order"
 	// 导入订单服务的protobuf生成代码
 	pb "go-commerce/api/order"
+	"go-commerce/pkg/mq"
 )
 
 // main 函数是order-service服务的入口点
@@ -32,7 +33,7 @@ func main() {
 		// 默认值，用于本地开发
 		dsn = "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
 	}
-	
+
 	// 连接数据库
 	// 使用GORM打开数据库连接
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
@@ -53,35 +54,26 @@ func main() {
 		rabbitmqURL = "amqp://guest:guest@localhost:5672/"
 	}
 
-	// 连接RabbitMQ
-	// 使用默认的guest账号连接本地RabbitMQ服务器
+	exchangeName := os.Getenv("EVENT_EXCHANGE")
+	if exchangeName == "" {
+		exchangeName = mq.DefaultExchangeName
+	}
+
+	// 当前阶段采用弱一致策略：RabbitMQ 暂不可用时主交易链路继续运行，但事件会丢失并记录告警。
+	var publisher mq.Publisher = mq.NopPublisher{}
 	conn, err := amqp.Dial(rabbitmqURL)
 	if err != nil {
-		log.Fatalf("failed to connect to RabbitMQ: %v", err)
-	}
-	defer conn.Close()
+		log.Printf("rabbitmq_connection_failed exchange=%s error=%v", exchangeName, err)
+	} else {
+		defer conn.Close()
 
-	// 创建RabbitMQ通道
-	// 用于执行RabbitMQ操作
-	ch, err := conn.Channel()
-	if err != nil {
-		log.Fatalf("failed to open a channel: %v", err)
-	}
-	defer ch.Close()
-
-	// 声明RabbitMQ交换机
-	// 创建一个名为"ecommerce"的topic类型交换机
-	err = ch.ExchangeDeclare(
-		"ecommerce", // 交换机名称
-		"topic",     // 交换机类型
-		true,        // 持久化
-		false,       // 自动删除
-		false,       // 内部
-		false,       // 不等待
-		nil,         // 参数
-	)
-	if err != nil {
-		log.Fatalf("failed to declare an exchange: %v", err)
+		ch, channelErr := conn.Channel()
+		if channelErr != nil {
+			log.Printf("rabbitmq_channel_open_failed exchange=%s error=%v", exchangeName, channelErr)
+		} else {
+			defer ch.Close()
+			publisher = mq.NewRabbitMQPublisher(ch, exchangeName)
+		}
 	}
 
 	// 监听TCP端口
@@ -90,15 +82,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
-	
+
 	// 创建gRPC服务器
 	s := grpc.NewServer()
-	
+
 	// 注册订单服务
-	// 将order.NewService(db, ch)创建的服务实例注册到gRPC服务器
-	// 传入数据库连接和RabbitMQ通道
-	pb.RegisterOrderServiceServer(s, order.NewService(db, ch))
-	
+	// 将order.NewService(db, publisher)创建的服务实例注册到gRPC服务器
+	// 传入数据库连接和事件发布器
+	pb.RegisterOrderServiceServer(s, order.NewService(db, publisher))
+
 	// 启动服务
 	// 打印服务监听地址
 	log.Printf("order service listening at %v", lis.Addr())

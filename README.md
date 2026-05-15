@@ -14,6 +14,7 @@ Go Commerce是一个基于微服务架构的电子商务系统，使用Go语言�
 - **订单管理**：完整的订单创建和跟踪流程
 - **商家管理**：支持商家注册、商品管理（增删操作）
 - **用户下单**：支持用户下单，后端按真实商品价格计算金额并保存下单快照
+- **事件驱动**：订单服务向 RabbitMQ 统一事件交换机发布订单事件，通知服务异步消费下单成功消息
 - **响应式前端**：使用React构建的现代化用户界面
 
 ## 快速启动
@@ -90,6 +91,9 @@ go run ./cmd/product-service
 # 启动订单服务
 go run ./cmd/order-service
 
+# 启动通知服务
+go run ./cmd/notification-service
+
 # 启动购物车服务
 go run ./cmd/cart-service
 
@@ -114,7 +118,7 @@ npm run dev
 
 - **基础服务**：MySQL、Redis、RabbitMQ
 - **核心服务**：认证服务、产品服务、购物车服务
-- **依赖服务**：订单服务（依赖MySQL和RabbitMQ）、商家服务（依赖MySQL和RabbitMQ）
+- **依赖服务**：订单服务（依赖MySQL和RabbitMQ）、商家服务（依赖MySQL和RabbitMQ）、通知服务（依赖RabbitMQ）
 - **入口服务**：API网关（依赖所有其他服务）
 
 ### 访问应用
@@ -130,6 +134,7 @@ npm run dev
 - **数据库连接**：`DB_DSN` - MySQL数据库连接字符串
 - **Redis地址**：`REDIS_ADDR` - Redis服务地址
 - **RabbitMQ地址**：`RABBITMQ_URL` - RabbitMQ服务地址
+- **事件交换机**：`EVENT_EXCHANGE` - RabbitMQ 统一事件交换机名称，默认 `ecommerce.events`
 - **服务地址**：各服务间通信的地址配置（例如`AUTH_SERVICE_ADDR`）
 
 ### 故障排除
@@ -139,6 +144,30 @@ npm run dev
 3. **端口冲突**：如果端口已被占用，修改`docker-compose.yml`中的端口映射
 4. **依赖服务未就绪**：确保基础服务（MySQL、Redis、RabbitMQ）在启动应用服务前已就绪
 5. **前端无法访问API**：检查API网关服务是否正常运行，确认前端API配置中的地址是否正确
+
+## RabbitMQ 事件链路
+
+- 统一交换机：`ecommerce.events`（topic）
+- 当前事件：`order.created`、`order.cancelled`
+- 生产者：`order-service`
+- 消费者：`notification-service` 绑定队列 `notification.order.created`，消费 `order.created` 后打印“发送下单成功通知”日志
+
+当前阶段先采用“数据库事务提交成功后再发布消息”的弱一致方案：如果 RabbitMQ 不可用，订单创建/取消仍会成功，但 `order-service` 会记录 `event_publish_failed` 日志，当前事件可能丢失。后续如需强一致，应继续演进为本地消息表 / Outbox 方案。
+
+### 事件验证
+
+```bash
+# 启动 RabbitMQ、订单服务和通知服务
+docker-compose up -d rabbitmq order-service notification-service
+
+# 创建订单后观察消费者日志
+docker-compose logs -f notification-service
+
+# 进入 RabbitMQ 管理页检查 exchange / queue
+# http://localhost:15672  guest / guest
+```
+
+验证要点：创建订单后可在管理界面看到 `ecommerce.events` 与 `notification.order.created`，通知服务会打印 `order.created` 对应日志；取消订单时，`order.cancelled` 会发布到同一交换机。
 
 ## 使用示例
 

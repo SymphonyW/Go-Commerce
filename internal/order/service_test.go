@@ -2,6 +2,7 @@ package order
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,8 @@ import (
 
 	pb "go-commerce/api/order"
 	"go-commerce/internal/product"
+	"go-commerce/pkg/events"
+	"go-commerce/pkg/mq"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -36,6 +39,43 @@ func newTestService(t *testing.T) (*Service, *gorm.DB) {
 	}
 
 	return NewService(db, nil), db
+}
+
+type publishedEvent struct {
+	routingKey string
+	event      interface{}
+}
+
+type recordingPublisher struct {
+	events []publishedEvent
+	err    error
+}
+
+func (p *recordingPublisher) Publish(ctx context.Context, routingKey string, event interface{}) error {
+	p.events = append(p.events, publishedEvent{
+		routingKey: routingKey,
+		event:      event,
+	})
+	return p.err
+}
+
+func newTestServiceWithPublisher(t *testing.T, publisher mq.Publisher) (*Service, *gorm.DB) {
+	t.Helper()
+
+	dsn := fmt.Sprintf(
+		"file:%s?mode=memory&cache=shared",
+		strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()),
+	)
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open test database: %v", err)
+	}
+
+	if err := db.AutoMigrate(&product.Product{}, &Order{}, &OrderItem{}); err != nil {
+		t.Fatalf("failed to migrate test database: %v", err)
+	}
+
+	return NewService(db, publisher), db
 }
 
 func newConcurrentTestService(t *testing.T) (*Service, *gorm.DB) {
@@ -112,6 +152,72 @@ func TestCreateOrderUsesDatabaseSnapshot(t *testing.T) {
 	}
 	if got, want := saved.Price, 88.5; got != want {
 		t.Fatalf("unexpected saved snapshot price: got %.2f want %.2f", got, want)
+	}
+}
+
+func TestCreateOrderPublishesCommittedOrderCreatedEvent(t *testing.T) {
+	publisher := &recordingPublisher{}
+	service, db := newTestServiceWithPublisher(t, publisher)
+	item := createTestProduct(t, db, "事件商品", 88.5, 10)
+
+	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
+		UserId: 1,
+		Items: []*pb.CreateOrderItem{
+			{ProductId: int64(item.ID), Quantity: 2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder returned error: %v", err)
+	}
+	if len(publisher.events) != 1 {
+		t.Fatalf("unexpected published event count: got %d want 1", len(publisher.events))
+	}
+	if got, want := publisher.events[0].routingKey, events.OrderCreatedType; got != want {
+		t.Fatalf("unexpected routing key: got %q want %q", got, want)
+	}
+
+	event, ok := publisher.events[0].event.(events.OrderCreatedEvent)
+	if !ok {
+		t.Fatalf("unexpected event type: %T", publisher.events[0].event)
+	}
+	if event.EventID == "" {
+		t.Fatal("expected event id to be set")
+	}
+	if got, want := event.EventType, events.OrderCreatedType; got != want {
+		t.Fatalf("unexpected event type field: got %q want %q", got, want)
+	}
+	if got, want := event.OrderID, resp.Order.Id; got != want {
+		t.Fatalf("unexpected order id: got %d want %d", got, want)
+	}
+	if got, want := len(event.Items), 1; got != want {
+		t.Fatalf("unexpected event item count: got %d want %d", got, want)
+	}
+}
+
+func TestCreateOrderKeepsOrderWhenPublishFails(t *testing.T) {
+	publisher := &recordingPublisher{err: errors.New("rabbitmq unavailable")}
+	service, db := newTestServiceWithPublisher(t, publisher)
+	item := createTestProduct(t, db, "弱一致商品", 10, 5)
+
+	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
+		UserId: 1,
+		Items: []*pb.CreateOrderItem{
+			{ProductId: int64(item.ID), Quantity: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder returned error: %v", err)
+	}
+	if resp.Order.Id == 0 {
+		t.Fatal("expected order to be created")
+	}
+
+	var count int64
+	if err := db.Model(&Order{}).Count(&count).Error; err != nil {
+		t.Fatalf("failed to count orders: %v", err)
+	}
+	if got, want := count, int64(1); got != want {
+		t.Fatalf("unexpected order count: got %d want %d", got, want)
 	}
 }
 
@@ -239,7 +345,8 @@ func TestCreateOrderMergesDuplicateProducts(t *testing.T) {
 }
 
 func TestCreateOrderRollsBackStockWhenOrderInsertFails(t *testing.T) {
-	service, db := newTestService(t)
+	publisher := &recordingPublisher{}
+	service, db := newTestServiceWithPublisher(t, publisher)
 	item := createTestProduct(t, db, "回滚商品", 10, 5)
 
 	if err := db.Exec(`
@@ -268,6 +375,9 @@ func TestCreateOrderRollsBackStockWhenOrderInsertFails(t *testing.T) {
 	}
 	if got, want := latest.Stock, int32(5); got != want {
 		t.Fatalf("unexpected stock after rollback: got %d want %d", got, want)
+	}
+	if got := len(publisher.events); got != 0 {
+		t.Fatalf("unexpected published events after rollback: got %d want 0", got)
 	}
 }
 
@@ -379,5 +489,47 @@ func TestCancelOrderRestoresStockAtomically(t *testing.T) {
 	}
 	if got, want := latest.Stock, int32(5); got != want {
 		t.Fatalf("unexpected restored stock: got %d want %d", got, want)
+	}
+}
+
+func TestCancelOrderPublishesOrderCancelledEvent(t *testing.T) {
+	publisher := &recordingPublisher{}
+	service, db := newTestServiceWithPublisher(t, publisher)
+	item := createTestProduct(t, db, "取消事件商品", 10, 5)
+
+	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
+		UserId: 1,
+		Items: []*pb.CreateOrderItem{
+			{ProductId: int64(item.ID), Quantity: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder returned error: %v", err)
+	}
+	publisher.events = nil
+
+	cancelResp, err := service.CancelOrder(context.Background(), &pb.CancelOrderRequest{
+		Id:     resp.Order.Id,
+		UserId: 1,
+	})
+	if err != nil {
+		t.Fatalf("CancelOrder returned error: %v", err)
+	}
+	if !cancelResp.Success {
+		t.Fatalf("expected cancellation to succeed, got message %q", cancelResp.Message)
+	}
+	if len(publisher.events) != 1 {
+		t.Fatalf("unexpected published event count: got %d want 1", len(publisher.events))
+	}
+	if got, want := publisher.events[0].routingKey, events.OrderCancelledType; got != want {
+		t.Fatalf("unexpected routing key: got %q want %q", got, want)
+	}
+
+	event, ok := publisher.events[0].event.(events.OrderCancelledEvent)
+	if !ok {
+		t.Fatalf("unexpected event type: %T", publisher.events[0].event)
+	}
+	if got, want := event.OrderID, resp.Order.Id; got != want {
+		t.Fatalf("unexpected order id: got %d want %d", got, want)
 	}
 }
