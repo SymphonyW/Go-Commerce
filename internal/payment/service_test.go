@@ -2,6 +2,7 @@ package payment
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	pbOrder "go-commerce/api/order"
 	"go-commerce/internal/idempotency"
 	orderdomain "go-commerce/internal/order"
+	"go-commerce/internal/outbox"
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
 
@@ -75,7 +77,7 @@ func newTestService(t *testing.T, orderClient pbOrder.OrderServiceClient, publis
 	if err != nil {
 		t.Fatalf("failed to open test database: %v", err)
 	}
-	if err := db.AutoMigrate(&Payment{}, &idempotency.Record{}); err != nil {
+	if err := db.AutoMigrate(&Payment{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
 
@@ -152,9 +154,9 @@ func TestCreatePaymentRejectsNonPendingOrders(t *testing.T) {
 	}
 }
 
-func TestSucceedPaymentPublishesEvent(t *testing.T) {
+func TestSucceedPaymentStoresEventInOutbox(t *testing.T) {
 	publisher := &recordingPublisher{}
-	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
+	service, db := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
 		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
 	}}, publisher)
 
@@ -169,15 +171,21 @@ func TestSucceedPaymentPublishesEvent(t *testing.T) {
 	if got, want := updated.Status, PaymentStatusSucceeded; got != want {
 		t.Fatalf("unexpected status: got %q want %q", got, want)
 	}
-	if got, want := len(publisher.events), 1; got != want {
-		t.Fatalf("unexpected published event count: got %d want %d", got, want)
+	if got := len(publisher.events); got != 0 {
+		t.Fatalf("unexpected direct publish count: got %d want 0", got)
 	}
-	if got, want := publisher.events[0].routingKey, events.PaymentSucceededType; got != want {
-		t.Fatalf("unexpected routing key: got %q want %q", got, want)
+
+	var saved outbox.Event
+	if err := db.Where("event_type = ?", events.PaymentSucceededType).First(&saved).Error; err != nil {
+		t.Fatalf("failed to load outbox event: %v", err)
 	}
-	event, ok := publisher.events[0].event.(events.PaymentSucceededEvent)
-	if !ok {
-		t.Fatalf("unexpected event type: %T", publisher.events[0].event)
+	if got, want := saved.Status, outbox.StatusPending; got != want {
+		t.Fatalf("unexpected outbox status: got %q want %q", got, want)
+	}
+
+	var event events.PaymentSucceededEvent
+	if err := json.Unmarshal([]byte(saved.Payload), &event); err != nil {
+		t.Fatalf("failed to decode outbox payload: %v", err)
 	}
 	if got, want := event.OrderID, int64(1); got != want {
 		t.Fatalf("unexpected order id: got %d want %d", got, want)

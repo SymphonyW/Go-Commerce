@@ -107,3 +107,22 @@ func TestRabbitMQPublisherReturnsChannelErrors(t *testing.T) {
 		}
 	})
 }
+
+func TestRabbitMQPublisherPreservesRawOutboxPayload(t *testing.T) {
+	channel := &fakeChannel{}
+	publisher := NewRabbitMQPublisher(channel, "ecommerce.events")
+	raw := RawEvent{
+		EventID: "evt-raw-1",
+		Body:    json.RawMessage(`{"event_id":"evt-raw-1","event_type":"order.created","order_id":88}`),
+	}
+
+	if err := publisher.Publish(context.Background(), events.OrderCreatedType, raw); err != nil {
+		t.Fatalf("Publish returned error: %v", err)
+	}
+	if got, want := channel.publishedMessage.MessageId, "evt-raw-1"; got != want {
+		t.Fatalf("unexpected raw message id: got %q want %q", got, want)
+	}
+	if got, want := string(channel.publishedMessage.Body), string(raw.Body); got != want {
+		t.Fatalf("unexpected raw body: got %s want %s", got, want)
+	}
+}

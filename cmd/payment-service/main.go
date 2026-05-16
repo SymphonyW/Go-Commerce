@@ -13,6 +13,7 @@ import (
 
 	pbOrder "go-commerce/api/order"
 	pbPayment "go-commerce/api/payment"
+	"go-commerce/internal/outbox"
 	"go-commerce/internal/payment"
 	"go-commerce/pkg/mq"
 )
@@ -26,7 +27,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to connect database: %v", err)
 	}
-	if err := db.AutoMigrate(&payment.Payment{}); err != nil {
+	if err := db.AutoMigrate(&payment.Payment{}, &outbox.Event{}); err != nil {
 		log.Fatalf("failed to migrate database: %v", err)
 	}
 

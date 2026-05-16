@@ -82,8 +82,6 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
     environment:
       DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
@@ -101,8 +99,6 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
       order-service:
         condition: service_started
     environment:
@@ -110,6 +106,26 @@ services:
       ORDER_SERVICE_ADDR: "order-service:50053"
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
       EVENT_EXCHANGE: "ecommerce.events"
+
+  outbox-worker:
+    build:
+      context: .
+      dockerfile: ./cmd/outbox-worker/Dockerfile
+      pull: false
+    container_name: ecommerce-outbox-worker
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+      EVENT_EXCHANGE: "ecommerce.events"
+      OUTBOX_POLL_INTERVAL: "5s"
+      OUTBOX_BATCH_SIZE: "100"
+      OUTBOX_MAX_RETRY: "5"
+      OUTBOX_RETRY_BASE_DELAY: "1s"
 
   cart-service:
     build:

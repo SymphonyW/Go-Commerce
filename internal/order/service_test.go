@@ -2,6 +2,7 @@ package order
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"go-commerce/internal/auth"
 	"go-commerce/internal/idempotency"
 	"go-commerce/internal/merchant"
+	"go-commerce/internal/outbox"
 	"go-commerce/internal/product"
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
@@ -38,7 +40,7 @@ func newTestService(t *testing.T) (*Service, *gorm.DB) {
 		t.Fatalf("failed to open test database: %v", err)
 	}
 
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
 
@@ -93,7 +95,7 @@ func newTestServiceWithPublisher(t *testing.T, publisher mq.Publisher) (*Service
 		t.Fatalf("failed to open test database: %v", err)
 	}
 
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
 
@@ -112,7 +114,7 @@ func newTestServiceWithTimeout(t *testing.T, publisher mq.Publisher, scheduler T
 		t.Fatalf("failed to open test database: %v", err)
 	}
 
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
 
@@ -127,7 +129,7 @@ func newConcurrentTestService(t *testing.T) (*Service, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("failed to open concurrent test database: %v", err)
 	}
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
 		t.Fatalf("failed to migrate concurrent test database: %v", err)
 	}
 
@@ -293,7 +295,7 @@ func TestCreateOrderUsesDatabaseSnapshot(t *testing.T) {
 	item := createTestProduct(t, db, "真实商品", 88.5, 10)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
@@ -333,7 +335,7 @@ func TestCreateOrderStartsPending(t *testing.T) {
 	item := createTestProduct(t, db, "默认状态商品", 10, 5)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
@@ -347,13 +349,13 @@ func TestCreateOrderStartsPending(t *testing.T) {
 	}
 }
 
-func TestCreateOrderPublishesCommittedOrderCreatedEvent(t *testing.T) {
+func TestCreateOrderStoresCommittedOrderCreatedEventInOutbox(t *testing.T) {
 	publisher := &recordingPublisher{}
 	service, db := newTestServiceWithPublisher(t, publisher)
 	item := createTestProduct(t, db, "事件商品", 88.5, 10)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
@@ -362,16 +364,21 @@ func TestCreateOrderPublishesCommittedOrderCreatedEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateOrder returned error: %v", err)
 	}
-	if len(publisher.events) != 1 {
-		t.Fatalf("unexpected published event count: got %d want 1", len(publisher.events))
-	}
-	if got, want := publisher.events[0].routingKey, events.OrderCreatedType; got != want {
-		t.Fatalf("unexpected routing key: got %q want %q", got, want)
+	if got := len(publisher.events); got != 0 {
+		t.Fatalf("unexpected direct publish count: got %d want 0", got)
 	}
 
-	event, ok := publisher.events[0].event.(events.OrderCreatedEvent)
-	if !ok {
-		t.Fatalf("unexpected event type: %T", publisher.events[0].event)
+	var saved outbox.Event
+	if err := db.Where("event_type = ?", events.OrderCreatedType).First(&saved).Error; err != nil {
+		t.Fatalf("failed to load outbox event: %v", err)
+	}
+	if got, want := saved.Status, outbox.StatusPending; got != want {
+		t.Fatalf("unexpected outbox status: got %q want %q", got, want)
+	}
+
+	var event events.OrderCreatedEvent
+	if err := json.Unmarshal([]byte(saved.Payload), &event); err != nil {
+		t.Fatalf("failed to decode outbox payload: %v", err)
 	}
 	if event.EventID == "" {
 		t.Fatal("expected event id to be set")
@@ -394,7 +401,7 @@ func TestCreateOrderSchedulesTimeoutCheckAfterCommit(t *testing.T) {
 	item := createTestProduct(t, db, "超时调度商品", 20, 5)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 9,
+		UserId:         9,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
@@ -438,13 +445,13 @@ func TestCreateOrderSchedulesTimeoutCheckAfterCommit(t *testing.T) {
 	}
 }
 
-func TestCreateOrderKeepsOrderWhenPublishFails(t *testing.T) {
+func TestCreateOrderKeepsPendingOutboxEventWhenPublisherUnavailable(t *testing.T) {
 	publisher := &recordingPublisher{err: errors.New("rabbitmq unavailable")}
 	service, db := newTestServiceWithPublisher(t, publisher)
 	item := createTestProduct(t, db, "弱一致商品", 10, 5)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
@@ -464,13 +471,21 @@ func TestCreateOrderKeepsOrderWhenPublishFails(t *testing.T) {
 	if got, want := count, int64(1); got != want {
 		t.Fatalf("unexpected order count: got %d want %d", got, want)
 	}
+
+	var saved outbox.Event
+	if err := db.Where("event_type = ?", events.OrderCreatedType).First(&saved).Error; err != nil {
+		t.Fatalf("failed to load outbox event: %v", err)
+	}
+	if got, want := saved.Status, outbox.StatusPending; got != want {
+		t.Fatalf("unexpected outbox status: got %q want %q", got, want)
+	}
 }
 
 func TestCreateOrderRejectsMissingProduct(t *testing.T) {
 	service, _ := newTestService(t)
 
 	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: 999, Quantity: 1},
@@ -486,7 +501,7 @@ func TestCreateOrderRejectsInsufficientStock(t *testing.T) {
 	item := createTestProduct(t, db, "库存商品", 12, 1)
 
 	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
@@ -512,8 +527,8 @@ func TestCreateOrderRejectsInvalidQuantity(t *testing.T) {
 			item := createTestProduct(t, db, "数量商品", 10, 5)
 
 			_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-				UserId: 1,
-		IdempotencyKey: "test-key",
+				UserId:         1,
+				IdempotencyKey: "test-key",
 				Items: []*pb.CreateOrderItem{
 					{ProductId: int64(item.ID), Quantity: tc.quantity},
 				},
@@ -529,9 +544,9 @@ func TestCreateOrderRejectsEmptyItems(t *testing.T) {
 	service, _ := newTestService(t)
 
 	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
-		Items:  nil,
+		Items:          nil,
 	})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.InvalidArgument)
@@ -544,7 +559,7 @@ func TestCreateOrderCalculatesTotalAcrossProducts(t *testing.T) {
 	second := createTestProduct(t, db, "商品B", 20.5, 10)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(first.ID), Quantity: 2},
@@ -565,7 +580,7 @@ func TestCreateOrderMergesDuplicateProducts(t *testing.T) {
 	item := createTestProduct(t, db, "重复商品", 15, 10)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
@@ -611,7 +626,7 @@ func TestCreateOrderRollsBackStockWhenOrderInsertFails(t *testing.T) {
 	}
 
 	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
@@ -628,8 +643,12 @@ func TestCreateOrderRollsBackStockWhenOrderInsertFails(t *testing.T) {
 	if got, want := latest.Stock, int32(5); got != want {
 		t.Fatalf("unexpected stock after rollback: got %d want %d", got, want)
 	}
-	if got := len(publisher.events); got != 0 {
-		t.Fatalf("unexpected published events after rollback: got %d want 0", got)
+	var outboxCount int64
+	if err := db.Model(&outbox.Event{}).Count(&outboxCount).Error; err != nil {
+		t.Fatalf("failed to count outbox events after rollback: %v", err)
+	}
+	if got, want := outboxCount, int64(0); got != want {
+		t.Fatalf("unexpected outbox count after rollback: got %d want %d", got, want)
 	}
 }
 
@@ -648,7 +667,7 @@ func TestCreateOrderRollsBackStockWhenOrderItemInsertFails(t *testing.T) {
 	}
 
 	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
@@ -683,8 +702,8 @@ func TestCreateOrderConcurrentRequestsDoNotOversell(t *testing.T) {
 			<-start
 
 			if _, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-				UserId: userID,
-		IdempotencyKey: "test-key",
+				UserId:         userID,
+				IdempotencyKey: "test-key",
 				Items: []*pb.CreateOrderItem{
 					{ProductId: int64(item.ID), Quantity: 1},
 				},
@@ -717,7 +736,7 @@ func TestCancelOrderRestoresStockAtomically(t *testing.T) {
 	item := createTestProduct(t, db, "取消回补商品", 10, 5)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
@@ -747,13 +766,13 @@ func TestCancelOrderRestoresStockAtomically(t *testing.T) {
 	}
 }
 
-func TestCancelOrderPublishesOrderCancelledEvent(t *testing.T) {
+func TestCancelOrderStoresOrderCancelledEventInOutbox(t *testing.T) {
 	publisher := &recordingPublisher{}
 	service, db := newTestServiceWithPublisher(t, publisher)
 	item := createTestProduct(t, db, "取消事件商品", 10, 5)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
@@ -762,8 +781,6 @@ func TestCancelOrderPublishesOrderCancelledEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateOrder returned error: %v", err)
 	}
-	publisher.events = nil
-
 	cancelResp, err := service.CancelOrder(context.Background(), &pb.CancelOrderRequest{
 		Id:     resp.Order.Id,
 		UserId: 1,
@@ -774,16 +791,17 @@ func TestCancelOrderPublishesOrderCancelledEvent(t *testing.T) {
 	if !cancelResp.Success {
 		t.Fatalf("expected cancellation to succeed, got message %q", cancelResp.Message)
 	}
-	if len(publisher.events) != 1 {
-		t.Fatalf("unexpected published event count: got %d want 1", len(publisher.events))
-	}
-	if got, want := publisher.events[0].routingKey, events.OrderCancelledType; got != want {
-		t.Fatalf("unexpected routing key: got %q want %q", got, want)
+	if got := len(publisher.events); got != 0 {
+		t.Fatalf("unexpected direct publish count: got %d want 0", got)
 	}
 
-	event, ok := publisher.events[0].event.(events.OrderCancelledEvent)
-	if !ok {
-		t.Fatalf("unexpected event type: %T", publisher.events[0].event)
+	var saved outbox.Event
+	if err := db.Where("event_type = ?", events.OrderCancelledType).Order("id DESC").First(&saved).Error; err != nil {
+		t.Fatalf("failed to load outbox event: %v", err)
+	}
+	var event events.OrderCancelledEvent
+	if err := json.Unmarshal([]byte(saved.Payload), &event); err != nil {
+		t.Fatalf("failed to decode outbox payload: %v", err)
 	}
 	if got, want := event.OrderID, resp.Order.Id; got != want {
 		t.Fatalf("unexpected order id: got %d want %d", got, want)
@@ -795,7 +813,7 @@ func TestCancelOrderPersistsUserCancelReason(t *testing.T) {
 	item := createTestProduct(t, db, "取消原因商品", 10, 5)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
@@ -903,11 +921,12 @@ func TestShipOrderTransitionsPaidToShipped(t *testing.T) {
 	if got, want := latest.Status, OrderStatusShipped; got != want {
 		t.Fatalf("unexpected order status: got %q want %q", got, want)
 	}
-	if len(publisher.events) != 1 {
-		t.Fatalf("unexpected published event count: got %d want 1", len(publisher.events))
+	if got := len(publisher.events); got != 0 {
+		t.Fatalf("unexpected direct publish count: got %d want 0", got)
 	}
-	if got, want := publisher.events[0].routingKey, events.OrderShippedType; got != want {
-		t.Fatalf("unexpected routing key: got %q want %q", got, want)
+	var saved outbox.Event
+	if err := db.Where("event_type = ?", events.OrderShippedType).First(&saved).Error; err != nil {
+		t.Fatalf("failed to load shipped outbox event: %v", err)
 	}
 }
 
@@ -991,11 +1010,12 @@ func TestCompleteOrderTransitionsShippedToCompleted(t *testing.T) {
 	if got, want := latest.Status, OrderStatusCompleted; got != want {
 		t.Fatalf("unexpected order status: got %q want %q", got, want)
 	}
-	if len(publisher.events) != 1 {
-		t.Fatalf("unexpected published event count: got %d want 1", len(publisher.events))
+	if got := len(publisher.events); got != 0 {
+		t.Fatalf("unexpected direct publish count: got %d want 0", got)
 	}
-	if got, want := publisher.events[0].routingKey, events.OrderCompletedType; got != want {
-		t.Fatalf("unexpected routing key: got %q want %q", got, want)
+	var saved outbox.Event
+	if err := db.Where("event_type = ?", events.OrderCompletedType).First(&saved).Error; err != nil {
+		t.Fatalf("failed to load completed outbox event: %v", err)
 	}
 }
 

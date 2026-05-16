@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	// gRPC状态码：用于返回标准化的错误信息
@@ -23,6 +24,7 @@ import (
 	"go-commerce/internal/auth"
 	"go-commerce/internal/idempotency"
 	"go-commerce/internal/merchant"
+	"go-commerce/internal/outbox"
 	// 导入产品模型：用于库存检查和更新
 	"go-commerce/internal/product"
 	"go-commerce/pkg/events"
@@ -39,6 +41,7 @@ type Service struct {
 	timeoutScheduler                   TimeoutScheduler
 	paymentTimeout                     time.Duration
 	idempotency                        *idempotency.Service
+	outboxRepo                         outbox.EventRepository
 }
 
 // NewService 创建订单服务实例
@@ -71,6 +74,7 @@ func NewServiceWithTimeout(db *gorm.DB, publisher mq.Publisher, scheduler Timeou
 		timeoutScheduler: scheduler,
 		paymentTimeout:   paymentTimeout,
 		idempotency:      idempotency.NewService(db, 24*time.Hour),
+		outboxRepo:       outbox.NewRepository(db),
 	}
 }
 
@@ -160,22 +164,22 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 		return nil, status.Errorf(codes.Internal, "failed to create order items: %v", err)
 	}
 
+	// 订单事件与订单、订单项、库存扣减同事务提交，避免业务成功后事件丢失。
+	orderEvent := newOrderCreatedEvent(&order, req.UserId, totalAmount, orderItems)
+	if _, err := s.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
+		AggregateType: "order",
+		AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
+		EventType:     events.OrderCreatedType,
+		Payload:       orderEvent,
+	}); err != nil {
+		tx.Rollback()
+		_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
+		return nil, status.Errorf(codes.Internal, "failed to create order outbox event: %v", err)
+	}
+
 	if err := tx.Commit().Error; err != nil {
 		_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 		return nil, status.Errorf(codes.Internal, "failed to commit order transaction: %v", err)
-	}
-
-	// ????????????????????????????????????????
-	orderEvent := newOrderCreatedEvent(&order, req.UserId, totalAmount, orderItems)
-	if err := s.publisher.Publish(ctx, events.OrderCreatedType, orderEvent); err != nil {
-		log.Printf(
-			"event_publish_failed event_type=%s event_id=%s order_id=%d user_id=%d error=%v",
-			orderEvent.EventType,
-			orderEvent.EventID,
-			order.ID,
-			req.UserId,
-			err,
-		)
 	}
 
 	// ???????????????????????????????
@@ -473,7 +477,21 @@ func (s *Service) GetOrder(ctx context.Context, req *pb.GetOrderRequest) (*pb.Ge
 //	*pb.CancelOrderResponse: 取消订单响应，包含取消结果和消息
 //	error: 错误信息
 func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (*pb.CancelOrderResponse, error) {
-	order, changed, err := cancelOrderWithReason(s.db, req.Id, req.UserId, OrderCancelReasonUserCancelled)
+	_, changed, err := cancelOrderWithReason(s.db, req.Id, req.UserId, OrderCancelReasonUserCancelled, func(tx *gorm.DB, order *Order) error {
+		event := events.OrderCancelledEvent{
+			BaseEvent: events.NewBaseEvent(events.OrderCancelledType, time.Now()),
+			OrderID:   int64(order.ID),
+			UserID:    req.UserId,
+			Reason:    OrderCancelReasonUserCancelled,
+		}
+		_, err := s.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
+			AggregateType: "order",
+			AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
+			EventType:     events.OrderCancelledType,
+			Payload:       event,
+		})
+		return err
+	})
 	if err != nil {
 		switch {
 		case errors.Is(err, gorm.ErrRecordNotFound):
@@ -501,23 +519,6 @@ func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (
 	}
 
 	// 取消成功后再发布领域事件；发布失败不回滚订单，只记录日志等待后续可靠消息机制补强。
-	orderEvent := events.OrderCancelledEvent{
-		BaseEvent: events.NewBaseEvent(events.OrderCancelledType, time.Now()),
-		OrderID:   int64(order.ID),
-		UserID:    req.UserId,
-		Reason:    OrderCancelReasonUserCancelled,
-	}
-	if err := s.publisher.Publish(ctx, events.OrderCancelledType, orderEvent); err != nil {
-		log.Printf(
-			"event_publish_failed event_type=%s event_id=%s order_id=%d user_id=%d error=%v",
-			orderEvent.EventType,
-			orderEvent.EventID,
-			order.ID,
-			req.UserId,
-			err,
-		)
-	}
-
 	// 返回取消订单响应
 	return &pb.CancelOrderResponse{
 		Success: true,
@@ -532,7 +533,7 @@ const (
 
 // cancelOrderWithReason 是人工取消与超时取消共用的核心路径。
 // 只有首次把 pending 推进到 cancelled 时才会回补库存，因此天然支持重复消息幂等。
-func cancelOrderWithReason(db *gorm.DB, orderID, userID int64, reason string) (*Order, bool, error) {
+func cancelOrderWithReason(db *gorm.DB, orderID, userID int64, reason string, afterChange func(tx *gorm.DB, order *Order) error) (*Order, bool, error) {
 	var order Order
 	changed := false
 
@@ -568,6 +569,11 @@ func cancelOrderWithReason(db *gorm.DB, orderID, userID int64, reason string) (*
 		if err := tx.Save(&order).Error; err != nil {
 			return err
 		}
+		if afterChange != nil {
+			if err := afterChange(tx, &order); err != nil {
+				return err
+			}
+		}
 		changed = true
 		return nil
 	})
@@ -599,11 +605,22 @@ func (s *Service) ShipOrder(ctx context.Context, req *pb.ShipOrderRequest) (*pb.
 	if err := TransitionTo(&order, OrderStatusShipped); err != nil {
 		return nil, orderStatusError(err)
 	}
-	if err := s.db.Save(&order).Error; err != nil {
+	statusEvent := newOrderStatusChangedEvent(events.OrderShippedType, &order, fromStatus, OrderStatusShipped)
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(&order).Error; err != nil {
+			return err
+		}
+		_, err := s.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
+			AggregateType: "order",
+			AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
+			EventType:     events.OrderShippedType,
+			Payload:       statusEvent,
+		})
+		return err
+	}); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to update order status: %v", err)
 	}
 
-	s.publishOrderStatusChanged(ctx, events.OrderShippedType, &order, fromStatus, OrderStatusShipped)
 	return &pb.ShipOrderResponse{Success: true, Message: "订单已发货"}, nil
 }
 
@@ -621,11 +638,22 @@ func (s *Service) CompleteOrder(ctx context.Context, req *pb.CompleteOrderReques
 	if err := TransitionTo(&order, OrderStatusCompleted); err != nil {
 		return nil, orderStatusError(err)
 	}
-	if err := s.db.Save(&order).Error; err != nil {
+	statusEvent := newOrderStatusChangedEvent(events.OrderCompletedType, &order, fromStatus, OrderStatusCompleted)
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(&order).Error; err != nil {
+			return err
+		}
+		_, err := s.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
+			AggregateType: "order",
+			AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
+			EventType:     events.OrderCompletedType,
+			Payload:       statusEvent,
+		})
+		return err
+	}); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to update order status: %v", err)
 	}
 
-	s.publishOrderStatusChanged(ctx, events.OrderCompletedType, &order, fromStatus, OrderStatusCompleted)
 	return &pb.CompleteOrderResponse{Success: true, Message: "订单已完成"}, nil
 }
 

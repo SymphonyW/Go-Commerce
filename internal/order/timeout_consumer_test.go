@@ -8,6 +8,7 @@ import (
 	"github.com/streadway/amqp"
 
 	pb "go-commerce/api/order"
+	"go-commerce/internal/outbox"
 	"go-commerce/internal/product"
 	"go-commerce/pkg/events"
 )
@@ -18,7 +19,7 @@ func TestOrderTimeoutConsumerCancelsPendingOrderRestoresStockAndPublishesEvents(
 	item := createTestProduct(t, db, "超时取消商品", 10, 5)
 
 	resp, err := service.CreateOrder(t.Context(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
@@ -56,14 +57,23 @@ func TestOrderTimeoutConsumerCancelsPendingOrderRestoresStockAndPublishesEvents(
 	if !ack.acked {
 		t.Fatal("expected timeout event to be acked")
 	}
-	if got, want := len(publisher.events), 2; got != want {
-		t.Fatalf("unexpected published event count: got %d want %d", got, want)
+	if got := len(publisher.events); got != 0 {
+		t.Fatalf("unexpected direct publish count: got %d want 0", got)
 	}
-	if got, want := publisher.events[0].routingKey, events.OrderCancelledType; got != want {
-		t.Fatalf("unexpected first routing key: got %q want %q", got, want)
+	var saved []outbox.Event
+	if err := db.Where("event_type IN ?", []string{events.OrderCancelledType, events.OrderTimeoutCancelledType}).
+		Order("id ASC").
+		Find(&saved).Error; err != nil {
+		t.Fatalf("failed to load timeout outbox events: %v", err)
 	}
-	if got, want := publisher.events[1].routingKey, events.OrderTimeoutCancelledType; got != want {
-		t.Fatalf("unexpected second routing key: got %q want %q", got, want)
+	if got, want := len(saved), 2; got != want {
+		t.Fatalf("unexpected outbox event count: got %d want %d", got, want)
+	}
+	if got, want := saved[0].EventType, events.OrderCancelledType; got != want {
+		t.Fatalf("unexpected first outbox event type: got %q want %q", got, want)
+	}
+	if got, want := saved[1].EventType, events.OrderTimeoutCancelledType; got != want {
+		t.Fatalf("unexpected second outbox event type: got %q want %q", got, want)
 	}
 }
 
@@ -73,7 +83,7 @@ func TestOrderTimeoutConsumerSkipsPaidOrder(t *testing.T) {
 	item := createTestProduct(t, db, "已支付商品", 10, 5)
 
 	resp, err := service.CreateOrder(t.Context(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
@@ -82,7 +92,7 @@ func TestOrderTimeoutConsumerSkipsPaidOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateOrder returned error: %v", err)
 	}
-	if _, _, err := MarkOrderPaid(db, resp.Order.Id, 1, 10); err != nil {
+	if _, _, err := MarkOrderPaid(db, resp.Order.Id, 1, 10, nil); err != nil {
 		t.Fatalf("MarkOrderPaid returned error: %v", err)
 	}
 	publisher.events = nil
@@ -122,7 +132,7 @@ func TestOrderTimeoutConsumerIsIdempotentForRepeatedMessages(t *testing.T) {
 	item := createTestProduct(t, db, "重复超时商品", 10, 5)
 
 	resp, err := service.CreateOrder(t.Context(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
@@ -148,8 +158,12 @@ func TestOrderTimeoutConsumerIsIdempotentForRepeatedMessages(t *testing.T) {
 	if got, want := latestProduct.Stock, int32(5); got != want {
 		t.Fatalf("unexpected restored stock after duplicate timeout: got %d want %d", got, want)
 	}
-	if got, want := len(publisher.events), 2; got != want {
-		t.Fatalf("unexpected published event count: got %d want %d", got, want)
+	var saved []outbox.Event
+	if err := db.Where("event_type IN ?", []string{events.OrderCancelledType, events.OrderTimeoutCancelledType}).Find(&saved).Error; err != nil {
+		t.Fatalf("failed to load outbox events: %v", err)
+	}
+	if got, want := len(saved), 2; got != want {
+		t.Fatalf("unexpected outbox event count after duplicate timeout: got %d want %d", got, want)
 	}
 }
 
@@ -159,7 +173,7 @@ func TestOrderTimeoutConsumerSkipsAlreadyCancelledOrder(t *testing.T) {
 	item := createTestProduct(t, db, "已取消商品", 10, 5)
 
 	resp, err := service.CreateOrder(t.Context(), &pb.CreateOrderRequest{
-		UserId: 1,
+		UserId:         1,
 		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},

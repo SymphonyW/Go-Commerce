@@ -19,6 +19,7 @@ import (
 
 	// 导入订单服务的业务逻辑
 	"go-commerce/internal/order"
+	"go-commerce/internal/outbox"
 	// 导入订单服务的protobuf生成代码
 	pb "go-commerce/api/order"
 	"go-commerce/pkg/events"
@@ -44,7 +45,7 @@ func main() {
 
 	// 自动迁移数据库表结构
 	// 会根据order.Order和order.OrderItem结构体自动创建或更新数据库表
-	if err := db.AutoMigrate(&order.Order{}, &order.OrderItem{}); err != nil {
+	if err := db.AutoMigrate(&order.Order{}, &order.OrderItem{}, &outbox.Event{}); err != nil {
 		log.Fatalf("failed to migrate database: %v", err)
 	}
 

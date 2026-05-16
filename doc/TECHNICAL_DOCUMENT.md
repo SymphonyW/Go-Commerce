@@ -343,3 +343,77 @@ order-service timeout consumer
 统一交换机使用 `ecommerce.events`（topic）。生产者通过 `pkg/mq.Publisher` 抽象发布能力，RabbitMQ 细节封装在 `pkg/mq`；事件结构定义在 `pkg/events`。这让各服务只关心“发布什么事件”，而不是“怎样调用 AMQP SDK”。
 
 当前消息链路是弱一致模型：数据库事务先提交，RabbitMQ 发布随后执行。若 RabbitMQ 暂时不可用，订单创建、取消或支付主流程仍可成功，但会输出 `event_publish_failed` 日志，事件可能丢失。若未来要把“业务落库”和“事件必达”绑得更紧，需要继续引入本地消息表 / Outbox、重试与死信队列。
+
+## 6. Outbox Pattern / 本地消息表
+
+### 6.1 为什么需要 Outbox
+
+凡是与数据库状态变更绑定的领域事件都已经改成 **Outbox Pattern**，当前包括 `order.created`、`order.paid`、`order.shipped`、`order.completed`、`order.cancelled`、`order.timeout.cancelled`、`payment.succeeded`：
+
+1. 业务事务内先完成库存、订单 / 支付记录更新；
+2. 同一事务内向 `outbox_events` 写入领域事件；
+3. 事务提交成功后，由独立的 `outbox-worker` 异步扫描并投递 RabbitMQ。
+
+这样可以保证：只要业务事务提交成功，事件就一定已经进入数据库，不会再出现“订单已落库，但消息在网络层丢失”的裂缝。
+
+### 6.2 表结构
+
+| 字段 | 说明 |
+|------|------|
+| `event_id` | 全局唯一事件 ID，消费者幂等键 |
+| `aggregate_type` / `aggregate_id` | 事件归属对象，例如 `order / 1001` |
+| `event_type` | 领域事件类型，例如 `order.created` |
+| `payload` | 已序列化的 JSON 事件体 |
+| `status` | `pending` / `published` / `failed` |
+| `retry_count` | 当前重试次数 |
+| `next_retry_at` | 下次允许投递的时间 |
+| `created_at` / `published_at` | 入表与成功投递时间 |
+
+### 6.3 处理流程与架构图
+
+```mermaid
+flowchart LR
+    A["order-service / payment-service"] --> B["MySQL local transaction"]
+    B --> C["business tables"]
+    B --> D["outbox_events"]
+    D --> E["outbox-worker"]
+    E --> F["RabbitMQ topic exchange"]
+    F --> G["downstream consumers"]
+```
+
+```text
+业务事务提交
+   |
+   +-- orders / order_items / payments
+   |
+   +-- outbox_events(status=pending)
+                    |
+                    v
+             outbox-worker
+                    |
+          +---------+---------+
+          |                   |
+      publish ok          publish failed
+          |                   |
+status=published      retry_count + 1
+published_at=now      next_retry_at=退避后时间
+                              |
+                    超过上限 -> status=failed
+```
+
+当前退避阶梯采用 `1s -> 5s -> 30s -> 1m -> 5m`，并通过以下环境变量控制：
+
+- `OUTBOX_POLL_INTERVAL`
+- `OUTBOX_BATCH_SIZE`
+- `OUTBOX_MAX_RETRY`
+- `OUTBOX_RETRY_BASE_DELAY`
+
+### 6.4 幂等与消费侧约束
+
+- 每条事件都带唯一 `event_id`，worker 重试时不会重写事件身份；
+- 当前订单域消费者已经通过状态机实现语义幂等：重复 `payment.succeeded` 不会把订单重复推进，重复超时取消也不会重复回补库存；
+- 对会产生外部副作用的消费者（例如真实通知、积分、营销），推荐新增 `event_consumptions(event_id unique, consumer_name, consumed_at)`，先按 `event_id` 去重再执行业务动作。
+
+### 6.5 当前并发假设
+
+当前实现按 **单实例 `outbox-worker`** 运行设计，因此不会出现多个 worker 同时抢同一条事件的问题。若未来需要水平扩容，应在仓储层增加“领取 / lease”机制或数据库行锁策略，再放开多实例部署。

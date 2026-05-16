@@ -30,6 +30,20 @@ type identifiedEvent interface {
 	GetEventID() string
 }
 
+// RawEvent 让 Outbox worker 复用现有 Publisher 的同时，保留已经落库的原始 JSON 负载和 event_id。
+type RawEvent struct {
+	EventID string
+	Body    json.RawMessage
+}
+
+func (e RawEvent) GetEventID() string {
+	return e.EventID
+}
+
+func (e RawEvent) MarshalJSON() ([]byte, error) {
+	return e.Body.MarshalJSON()
+}
+
 // RabbitMQPublisher 使用 topic exchange 将领域事件写入 RabbitMQ。
 type RabbitMQPublisher struct {
 	channel  Channel

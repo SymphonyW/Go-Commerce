@@ -7,6 +7,7 @@ import (
 
 	"github.com/streadway/amqp"
 
+	"go-commerce/internal/outbox"
 	"go-commerce/pkg/events"
 )
 
@@ -70,11 +71,12 @@ func TestPaymentSucceededConsumerMarksOrderPaid(t *testing.T) {
 	if !ack.acked {
 		t.Fatal("expected event to be acked")
 	}
-	if len(publisher.events) != 1 {
-		t.Fatalf("unexpected published event count: got %d want 1", len(publisher.events))
+	if got := len(publisher.events); got != 0 {
+		t.Fatalf("unexpected direct publish count: got %d want 0", got)
 	}
-	if got, want := publisher.events[0].routingKey, events.OrderPaidType; got != want {
-		t.Fatalf("unexpected routing key: got %q want %q", got, want)
+	var saved outbox.Event
+	if err := db.Where("event_type = ?", events.OrderPaidType).First(&saved).Error; err != nil {
+		t.Fatalf("failed to load outbox event: %v", err)
 	}
 }
 
@@ -90,7 +92,7 @@ func TestMarkOrderPaidRejectsCancelledOrder(t *testing.T) {
 		t.Fatalf("failed to create order: %v", err)
 	}
 
-	_, _, err := MarkOrderPaid(db, int64(order.ID), 1, 99)
+	_, _, err := MarkOrderPaid(db, int64(order.ID), 1, 99, nil)
 	if err == nil {
 		t.Fatal("expected cancelled order to reject payment")
 	}

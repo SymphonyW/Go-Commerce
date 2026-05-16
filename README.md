@@ -96,6 +96,9 @@ go run ./cmd/order-service
 # 启动支付服务
 go run ./cmd/payment-service
 
+# 启动 Outbox Worker
+go run ./cmd/outbox-worker
+
 # 启动通知服务
 go run ./cmd/notification-service
 
@@ -123,7 +126,7 @@ npm run dev
 
 - **基础服务**：MySQL、Redis、RabbitMQ
 - **核心服务**：认证服务、产品服务、购物车服务
-- **依赖服务**：订单服务（依赖MySQL和RabbitMQ）、支付服务（依赖MySQL、RabbitMQ和订单服务）、商家服务（依赖MySQL和RabbitMQ）、通知服务（依赖RabbitMQ）
+- **依赖服务**：订单服务（核心交易依赖MySQL，RabbitMQ用于异步链路）、支付服务（核心交易依赖MySQL和订单服务，RabbitMQ用于异步链路）、Outbox Worker（依赖MySQL和RabbitMQ）、商家服务（依赖MySQL和RabbitMQ）、通知服务（依赖RabbitMQ）
 - **入口服务**：API网关（依赖所有其他服务）
 
 ### 访问应用
@@ -140,6 +143,10 @@ npm run dev
 - **Redis地址**：`REDIS_ADDR` - Redis服务地址
 - **RabbitMQ地址**：`RABBITMQ_URL` - RabbitMQ服务地址
 - **事件交换机**：`EVENT_EXCHANGE` - RabbitMQ 统一事件交换机名称，默认 `ecommerce.events`
+- **Outbox 扫描间隔**：`OUTBOX_POLL_INTERVAL` - worker 轮询间隔，默认 `5s`
+- **Outbox 批量大小**：`OUTBOX_BATCH_SIZE` - 每次最多扫描条数，默认 `100`
+- **Outbox 最大重试**：`OUTBOX_MAX_RETRY` - 单条事件最大重试次数，默认 `5`
+- **Outbox 基础退避**：`OUTBOX_RETRY_BASE_DELAY` - 指数退避基准值，默认 `1s`
 - **订单支付超时**：`ORDER_PAYMENT_TIMEOUT_MINUTES` - 支持整数或小数分钟，默认 `15`；本地演示可设为 `0.5`
 - **服务地址**：各服务间通信的地址配置（例如`AUTH_SERVICE_ADDR`）
 
@@ -161,7 +168,11 @@ npm run dev
   - `order-service` 绑定队列 `order.payment.succeeded`，消费 `payment.succeeded` 后把订单从 `pending` 更新为 `paid`
   - `order-service` 同时监听 `order.timeout.cancel.queue`，当延迟消息经 DLX 到达后，仅对仍为 `pending` 的订单执行自动取消
 
-当前阶段先采用“数据库事务提交成功后再发布消息”的弱一致方案：如果 RabbitMQ 不可用，订单创建/取消仍会成功，支付记录也可能已经成功，但事件会记录 `event_publish_failed` 日志且存在丢失风险。后续如需更强一致，应继续演进为本地消息表 / Outbox 方案。
+当前所有与数据库状态变更绑定的领域事件都已经采用 **Outbox Pattern**：`order.created`、`order.paid`、`order.shipped`、`order.completed`、`order.cancelled`、`order.timeout.cancelled`、`payment.succeeded` 会与业务数据在同一个数据库事务内写入 `outbox_events`，随后由独立 `outbox-worker` 异步发布到 RabbitMQ。即使 RabbitMQ 暂时不可用，核心交易也能先提交，事件会保留在本地消息表中等待后台重试。
+
+```text
+业务事务 -> outbox_events(pending) -> outbox-worker -> RabbitMQ
+```
 
 ### 事件验证
 

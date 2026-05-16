@@ -6,11 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
+	"strconv"
 	"time"
 
 	pbOrder "go-commerce/api/order"
 	orderdomain "go-commerce/internal/order"
+	"go-commerce/internal/outbox"
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
 
@@ -33,6 +34,7 @@ type Service struct {
 	db          *gorm.DB
 	orderClient pbOrder.OrderServiceClient
 	publisher   mq.Publisher
+	outboxRepo  outbox.EventRepository
 }
 
 func NewService(db *gorm.DB, orderClient pbOrder.OrderServiceClient, publisher mq.Publisher) *Service {
@@ -43,6 +45,7 @@ func NewService(db *gorm.DB, orderClient pbOrder.OrderServiceClient, publisher m
 		db:          db,
 		orderClient: orderClient,
 		publisher:   publisher,
+		outboxRepo:  outbox.NewRepository(db),
 	}
 }
 
@@ -112,10 +115,6 @@ func (s *Service) SucceedPayment(ctx context.Context, userID, paymentID uint) (*
 	}
 
 	payment.Status = PaymentStatusSucceeded
-	if err := s.db.Save(payment).Error; err != nil {
-		return nil, err
-	}
-
 	event := events.PaymentSucceededEvent{
 		BaseEvent: events.NewBaseEvent(events.PaymentSucceededType, time.Now()),
 		PaymentID: int64(payment.ID),
@@ -124,16 +123,19 @@ func (s *Service) SucceedPayment(ctx context.Context, userID, paymentID uint) (*
 		UserID:    int64(payment.UserID),
 		Amount:    payment.Amount,
 	}
-	if err := s.publisher.Publish(ctx, events.PaymentSucceededType, event); err != nil {
-		log.Printf(
-			"event_publish_failed event_type=%s event_id=%s payment_id=%d order_id=%d user_id=%d error=%v",
-			event.EventType,
-			event.EventID,
-			payment.ID,
-			payment.OrderID,
-			payment.UserID,
-			err,
-		)
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(payment).Error; err != nil {
+			return err
+		}
+		_, err := s.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
+			AggregateType: "payment",
+			AggregateID:   strconv.FormatUint(uint64(payment.ID), 10),
+			EventType:     events.PaymentSucceededType,
+			Payload:       event,
+		})
+		return err
+	}); err != nil {
+		return nil, err
 	}
 
 	return payment, nil

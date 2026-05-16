@@ -1,25 +1,27 @@
 package order
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	"github.com/streadway/amqp"
 	"gorm.io/gorm"
 
+	"go-commerce/internal/outbox"
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
 )
 
 // OrderTimeoutConsumer 消费经 DLX 转发后的超时检查消息。
 type OrderTimeoutConsumer struct {
-	db        *gorm.DB
-	publisher mq.Publisher
-	logger    *log.Logger
+	db         *gorm.DB
+	publisher  mq.Publisher
+	logger     *log.Logger
+	outboxRepo outbox.EventRepository
 }
 
 func NewOrderTimeoutConsumer(db *gorm.DB, publisher mq.Publisher, logger *log.Logger) *OrderTimeoutConsumer {
@@ -29,7 +31,7 @@ func NewOrderTimeoutConsumer(db *gorm.DB, publisher mq.Publisher, logger *log.Lo
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &OrderTimeoutConsumer{db: db, publisher: publisher, logger: logger}
+	return &OrderTimeoutConsumer{db: db, publisher: publisher, logger: logger, outboxRepo: outbox.NewRepository(db)}
 }
 
 func (c *OrderTimeoutConsumer) HandleDelivery(delivery amqp.Delivery) error {
@@ -39,7 +41,36 @@ func (c *OrderTimeoutConsumer) HandleDelivery(delivery amqp.Delivery) error {
 		return fmt.Errorf("decode order timeout event: %w", err)
 	}
 
-	order, changed, err := cancelOrderWithReason(c.db, event.OrderID, event.UserID, OrderCancelReasonPaymentTimeout)
+	_, changed, err := cancelOrderWithReason(c.db, event.OrderID, event.UserID, OrderCancelReasonPaymentTimeout, func(tx *gorm.DB, order *Order) error {
+		cancelledEvent := events.OrderCancelledEvent{
+			BaseEvent: events.NewBaseEvent(events.OrderCancelledType, time.Now()),
+			OrderID:   int64(order.ID),
+			UserID:    int64(order.UserID),
+			Reason:    OrderCancelReasonPaymentTimeout,
+		}
+		if _, err := c.outboxRepo.Create(tx.Statement.Context, tx, outbox.NewEventInput{
+			AggregateType: "order",
+			AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
+			EventType:     events.OrderCancelledType,
+			Payload:       cancelledEvent,
+		}); err != nil {
+			return err
+		}
+
+		timeoutCancelledEvent := events.OrderTimeoutCancelledEvent{
+			BaseEvent: events.NewBaseEvent(events.OrderTimeoutCancelledType, time.Now()),
+			OrderID:   int64(order.ID),
+			UserID:    int64(order.UserID),
+			Reason:    OrderCancelReasonPaymentTimeout,
+		}
+		_, err := c.outboxRepo.Create(tx.Statement.Context, tx, outbox.NewEventInput{
+			AggregateType: "order",
+			AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
+			EventType:     events.OrderTimeoutCancelledType,
+			Payload:       timeoutCancelledEvent,
+		})
+		return err
+	})
 	if err != nil {
 		switch {
 		case errors.Is(err, gorm.ErrRecordNotFound):
@@ -81,7 +112,6 @@ func (c *OrderTimeoutConsumer) HandleDelivery(delivery amqp.Delivery) error {
 		return nil
 	}
 
-	c.publishTimeoutCancellationEvents(order)
 	c.logger.Printf(
 		"order_timeout_cancelled event_id=%s order_id=%d user_id=%d",
 		event.EventID,
@@ -93,40 +123,4 @@ func (c *OrderTimeoutConsumer) HandleDelivery(delivery amqp.Delivery) error {
 		return fmt.Errorf("ack order timeout event: %w", err)
 	}
 	return nil
-}
-
-func (c *OrderTimeoutConsumer) publishTimeoutCancellationEvents(order *Order) {
-	cancelledEvent := events.OrderCancelledEvent{
-		BaseEvent: events.NewBaseEvent(events.OrderCancelledType, time.Now()),
-		OrderID:   int64(order.ID),
-		UserID:    int64(order.UserID),
-		Reason:    OrderCancelReasonPaymentTimeout,
-	}
-	if err := c.publisher.Publish(context.Background(), events.OrderCancelledType, cancelledEvent); err != nil {
-		c.logger.Printf(
-			"event_publish_failed event_type=%s event_id=%s order_id=%d user_id=%d error=%v",
-			cancelledEvent.EventType,
-			cancelledEvent.EventID,
-			order.ID,
-			order.UserID,
-			err,
-		)
-	}
-
-	timeoutCancelledEvent := events.OrderTimeoutCancelledEvent{
-		BaseEvent: events.NewBaseEvent(events.OrderTimeoutCancelledType, time.Now()),
-		OrderID:   int64(order.ID),
-		UserID:    int64(order.UserID),
-		Reason:    OrderCancelReasonPaymentTimeout,
-	}
-	if err := c.publisher.Publish(context.Background(), events.OrderTimeoutCancelledType, timeoutCancelledEvent); err != nil {
-		c.logger.Printf(
-			"event_publish_failed event_type=%s event_id=%s order_id=%d user_id=%d error=%v",
-			timeoutCancelledEvent.EventType,
-			timeoutCancelledEvent.EventID,
-			order.ID,
-			order.UserID,
-			err,
-		)
-	}
 }
