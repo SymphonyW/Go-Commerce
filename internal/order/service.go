@@ -234,10 +234,7 @@ type createOrderFingerprintItem struct {
 func newCreateOrderFingerprint(userID int64, items []aggregatedCreateOrderItem) createOrderFingerprint {
 	fingerprintItems := make([]createOrderFingerprintItem, len(items))
 	for i, item := range items {
-		fingerprintItems[i] = createOrderFingerprintItem{
-			ProductID: item.ProductID,
-			Quantity:  item.Quantity,
-		}
+		fingerprintItems[i] = createOrderFingerprintItem(item)
 	}
 	sort.Slice(fingerprintItems, func(i, j int) bool {
 		return fingerprintItems[i].ProductID < fingerprintItems[j].ProductID
@@ -725,19 +722,6 @@ func uniqueMerchantIDs(orderItems []OrderItem) []uint {
 		merchantIDs = append(merchantIDs, item.MerchantID)
 	}
 	return merchantIDs
-}
-
-func (s *Service) publishOrderStatusChanged(ctx context.Context, eventType string, order *Order, fromStatus, toStatus string) {
-	event := newOrderStatusChangedEvent(ctx, eventType, order, fromStatus, toStatus)
-	if err := s.publisher.Publish(ctx, eventType, event); err != nil {
-		slog.ErrorContext(ctx, "event_publish_failed",
-			"event_type", event.EventType,
-			"event_id", event.EventID,
-			"order_id", order.ID,
-			"user_id", order.UserID,
-			"error", err,
-		)
-	}
 }
 
 func newOrderStatusChangedEvent(ctx context.Context, eventType string, order *Order, fromStatus, toStatus string) events.OrderStatusChangedEvent {

@@ -504,3 +504,53 @@ make test-e2e
 - `test-unit` 无需外部服务，适合每次提交快速反馈。
 - `test-integration` 先拉起基础设施容器，再验证真实依赖。
 - `test-e2e` 拉起完整 Compose 栈后执行交易主链路回归。
+
+## 8. 工程化与持续集成
+
+仓库通过 `.github/workflows/ci.yml` 维护统一 CI，触发范围覆盖：
+
+- 向 `main`、`master`、`dev` 分支执行 `push`
+- 所有 `pull_request`
+
+当前工作流拆分为四个职责清晰的 job：
+
+1. `backend-check`
+   - 执行 `go mod download`
+   - 用 `gofmt -l .` 做格式门禁
+   - 执行 `go vet ./...`
+   - 执行 `go test -coverprofile=coverage.out ./...`
+   - 执行 `go build ./...`
+   - 通过 `golangci-lint` 进行静态检查
+   - 上传覆盖率产物，便于后续追踪
+2. `frontend-check`
+   - 在 `frontend/` 中执行 `npm ci`
+   - 如果后续补充 `lint` 脚本，则自动执行 `npm run lint`
+   - 执行 `npm run build`
+3. `docker-build`
+   - 以 matrix 方式验证 `api-gateway`、`auth-service`、`product-service`、`order-service`、`cart-service`、`merchant-service`、`payment-service` 的 Dockerfile 都可构建
+4. `integration-test`
+   - 拉起 MySQL、Redis、RabbitMQ
+   - 等待依赖健康后执行 `go test -tags=integration -v ./...`
+   - 无论成功失败都执行 `docker compose down -v`，避免遗留容器和卷污染后续任务
+
+### 8.1 缓存与反馈速度
+
+- Go 侧使用 `actions/setup-go` 读取 `go.mod` 并缓存模块依赖
+- Node 侧使用 `actions/setup-node` 结合 `frontend/package-lock.json` 缓存 npm 依赖
+- Docker 构建被单独拆成 matrix，单个服务失败时可以直接定位到对应镜像
+
+### 8.2 质量门槛
+
+- PR 合并前建议在 GitHub 分支保护中把上述四个 job 都设为 required checks
+- `backend-check` 负责把格式、静态检查、测试、构建和覆盖率汇总成后端最小质量门禁
+- `frontend-check` 负责阻止依赖安装或前端打包问题流入主干
+- `integration-test` 负责尽早暴露真实依赖交互层面的回归
+
+### 8.3 后续扩展
+
+- 当前已在 workflow 中预留 release build 的 TODO
+- 若后续需要发布链路，可继续补充：
+  - tag 触发的 release workflow
+  - 构建并推送镜像到 GHCR
+  - 生成版本化发布说明
+- 当前未把 E2E 纳入默认 CI，原因是它需要完整服务栈、耗时和资源成本更高；当主链路稳定后，可考虑在夜间任务或 release gate 中追加

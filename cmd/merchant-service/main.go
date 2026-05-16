@@ -33,7 +33,7 @@ func main() {
 		// 默认值，用于本地开发
 		dsn = "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
 	}
-	
+
 	// 连接数据库
 	// 使用GORM打开数据库连接
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
@@ -83,7 +83,7 @@ func main() {
 
 	// 创建gRPC服务器
 	server := grpc.NewServer()
-	
+
 	// 注册商户服务
 	// 将merchantService注册到gRPC服务器
 	pb.RegisterMerchantServiceServer(server, merchantService)

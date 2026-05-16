@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - dev
+    # TODO: 后续如需发布镜像，可补充 tags 触发 release build。
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-check:
+    name: Backend check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Check gofmt
+        shell: bash
+        run: |
+          # gofmt 输出任何文件都表示格式需要修正，直接让 CI 明确失败。
+          unformatted="$(gofmt -l .)"
+          if [[ -n "${unformatted}" ]]; then
+            echo "The following Go files are not formatted:"
+            echo "${unformatted}"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run Go tests with coverage
+        run: go test -coverprofile=coverage.out ./...
+
+      - name: Show coverage summary
+        run: go tool cover -func=coverage.out | tee coverage.txt
+
+      - name: Verify Go build
+        run: go build ./...
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          args: --timeout=5m
+
+      - name: Upload backend coverage
+        uses: actions/upload-artifact@v5
+        with:
+          name: backend-coverage
+          path: |
+            coverage.out
+            coverage.txt
+
+  frontend-check:
+    name: Frontend check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend lint when available
+        shell: bash
+        run: |
+          # 当前项目没有 lint 脚本时跳过，未来一旦补上脚本即可自动纳入门禁。
+          if node -e "process.exit(require('./package.json').scripts?.lint ? 0 : 1)"; then
+            npm run lint
+          else
+            echo "No lint script configured; skipping."
+          fi
+
+      - name: Build frontend
+        run: npm run build
+
+  docker-build:
+    name: Docker build (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api-gateway
+          - auth-service
+          - product-service
+          - order-service
+          - cart-service
+          - merchant-service
+          - payment-service
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build service image
+        run: |
+          docker build \
+            --file "./cmd/${{ matrix.service }}/Dockerfile" \
+            --tag "go-commerce/${{ matrix.service }}:ci" \
+            .
+
+  integration-test:
+    name: Integration test
+    runs-on: ubuntu-latest
+    needs:
+      - backend-check
+    env:
+      INTEGRATION_DB_DSN: root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local
+      INTEGRATION_REDIS_ADDR: 127.0.0.1:6379
+      INTEGRATION_RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672/
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Start integration dependencies
+        run: docker compose up -d --wait mysql redis rabbitmq
+
+      - name: Show dependency status
+        run: docker compose ps
+
+      - name: Run integration tests
+        run: go test -tags=integration -v ./...
+
+      - name: Stop integration dependencies
+        if: always()
+        run: docker compose down -v

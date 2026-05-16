@@ -1,8 +1,21 @@
 # Go Commerce
 
+[![CI](https://github.com/SymphonyW/Go-Commerce/actions/workflows/ci.yml/badge.svg)](https://github.com/SymphonyW/Go-Commerce/actions/workflows/ci.yml)
+
 ## 项目简介
 
 Go Commerce是一个基于微服务架构的电子商务系统，使用Go语言开发后端服务，React开发前端应用，提供完整的购物体验。
+
+## 持续集成（CI）
+
+仓库已提供 GitHub Actions 工作流，会在 `main`、`master`、`dev` 分支的 `push` 以及所有 `pull_request` 时自动执行：
+
+- `backend-check`：下载依赖、执行 `gofmt` 检查、`go vet`、单元测试、覆盖率统计、构建验证与 `golangci-lint`
+- `frontend-check`：在 `frontend` 目录执行依赖安装、可选 lint 与前端构建
+- `docker-build`：逐个验证主要服务镜像可以成功构建
+- `integration-test`：启动 MySQL、Redis、RabbitMQ 后运行带 `integration` 标签的集成测试，并在结束后自动清理容器和卷
+
+PR 合并前建议以 CI 全绿为最低门槛，并在 GitHub 分支保护中将 `backend-check`、`frontend-check`、`docker-build`、`integration-test` 设为必需检查。
 
 ## 主要特性
 

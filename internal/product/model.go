@@ -11,11 +11,11 @@ import (
 // 对应数据库中的products表
 type Product struct {
 	gorm.Model          // 嵌入GORM基础模型
-	Name        string  `gorm:"not null"`        // 产品名称，非空
-	Description string                             // 产品描述
-	Price       float64 `gorm:"not null"`        // 产品价格，非空
+	Name        string  `gorm:"not null"` // 产品名称，非空
+	Description string  // 产品描述
+	Price       float64 `gorm:"not null"`           // 产品价格，非空
 	Stock       int32   `gorm:"not null;default:0"` // 产品库存，非空，默认值为0
-	Category    string  `gorm:"index"`           // 产品分类，创建索引以提高查询性能
-	ImageURL    string                             // 产品图片URL
-	MerchantID  uint    `gorm:"not null"`        // 商家ID，非空，关联到商家表
+	Category    string  `gorm:"index"`              // 产品分类，创建索引以提高查询性能
+	ImageURL    string  // 产品图片URL
+	MerchantID  uint    `gorm:"not null"` // 商家ID，非空，关联到商家表
 }

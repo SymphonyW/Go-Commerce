@@ -9,10 +9,10 @@ import (
 type Metrics struct {
 	service string
 
-	httpRequests             *prometheus.CounterVec
-	httpDuration             *prometheus.HistogramVec
-	grpcRequests             *prometheus.CounterVec
-	grpcDuration             *prometheus.HistogramVec
+	httpRequests            *prometheus.CounterVec
+	httpDuration            *prometheus.HistogramVec
+	grpcRequests            *prometheus.CounterVec
+	grpcDuration            *prometheus.HistogramVec
 	orderCreated            *prometheus.CounterVec
 	paymentResults          *prometheus.CounterVec
 	insufficientStock       prometheus.Counter
