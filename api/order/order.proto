@@ -29,6 +29,7 @@ message Order {
 message CreateOrderRequest {
   int64 user_id = 1;
   repeated CreateOrderItem items = 2;
+  string idempotency_key = 3;
 }
 
 message CreateOrderResponse {
@@ -58,6 +59,7 @@ message ListOrdersResponse {
 message CancelOrderRequest {
   int64 id = 1;
   int64 user_id = 2;
+  string idempotency_key = 3;
 }
 
 message CancelOrderResponse {

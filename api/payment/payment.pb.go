@@ -330,11 +330,12 @@ func (x *GetPaymentResponse) GetPayment() *Payment {
 }
 
 type PaymentActionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
-	UserId        int64                  `protobuf:"varint,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Id             int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	UserId         int64                  `protobuf:"varint,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	IdempotencyKey string                 `protobuf:"bytes,3,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *PaymentActionRequest) Reset() {
@@ -379,6 +380,13 @@ func (x *PaymentActionRequest) GetUserId() int64 {
 		return x.UserId
 	}
 	return 0
+}
+
+func (x *PaymentActionRequest) GetIdempotencyKey() string {
+	if x != nil {
+		return x.IdempotencyKey
+	}
+	return ""
 }
 
 type PaymentActionResponse struct {
@@ -453,10 +461,11 @@ const file_api_payment_payment_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\x03R\x06userId\"@\n" +
 	"\x12GetPaymentResponse\x12*\n" +
-	"\apayment\x18\x01 \x01(\v2\x10.payment.PaymentR\apayment\"?\n" +
+	"\apayment\x18\x01 \x01(\v2\x10.payment.PaymentR\apayment\"h\n" +
 	"\x14PaymentActionRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x17\n" +
-	"\auser_id\x18\x02 \x01(\x03R\x06userId\"C\n" +
+	"\auser_id\x18\x02 \x01(\x03R\x06userId\x12'\n" +
+	"\x0fidempotency_key\x18\x03 \x01(\tR\x0eidempotencyKey\"C\n" +
 	"\x15PaymentActionResponse\x12*\n" +
 	"\apayment\x18\x01 \x01(\v2\x10.payment.PaymentR\apayment2\xd2\x02\n" +
 	"\x0ePaymentService\x12N\n" +

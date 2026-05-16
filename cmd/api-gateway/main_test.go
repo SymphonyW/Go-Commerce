@@ -9,6 +9,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	pbMerchant "go-commerce/api/merchant"
 	pbOrder "go-commerce/api/order"
@@ -18,7 +20,12 @@ import (
 
 type fakeOrderClient struct {
 	lastCreateOrderReq *pbOrder.CreateOrderRequest
+	lastCancelOrderReq *pbOrder.CancelOrderRequest
 	lastShipOrderReq   *pbOrder.ShipOrderRequest
+}
+
+type conflictOrderClient struct {
+	fakeOrderClient
 }
 
 func (f *fakeOrderClient) CreateOrder(ctx context.Context, in *pbOrder.CreateOrderRequest, opts ...grpc.CallOption) (*pbOrder.CreateOrderResponse, error) {
@@ -48,7 +55,8 @@ func (f *fakeOrderClient) ListOrders(ctx context.Context, in *pbOrder.ListOrders
 }
 
 func (f *fakeOrderClient) CancelOrder(ctx context.Context, in *pbOrder.CancelOrderRequest, opts ...grpc.CallOption) (*pbOrder.CancelOrderResponse, error) {
-	return nil, nil
+	f.lastCancelOrderReq = in
+	return &pbOrder.CancelOrderResponse{Success: true}, nil
 }
 
 func (f *fakeOrderClient) ShipOrder(ctx context.Context, in *pbOrder.ShipOrderRequest, opts ...grpc.CallOption) (*pbOrder.ShipOrderResponse, error) {
@@ -58,6 +66,14 @@ func (f *fakeOrderClient) ShipOrder(ctx context.Context, in *pbOrder.ShipOrderRe
 
 func (f *fakeOrderClient) CompleteOrder(ctx context.Context, in *pbOrder.CompleteOrderRequest, opts ...grpc.CallOption) (*pbOrder.CompleteOrderResponse, error) {
 	return &pbOrder.CompleteOrderResponse{Success: true}, nil
+}
+
+func (f *conflictOrderClient) CreateOrder(context.Context, *pbOrder.CreateOrderRequest, ...grpc.CallOption) (*pbOrder.CreateOrderResponse, error) {
+	return nil, status.Error(codes.FailedPrecondition, "idempotency key conflict")
+}
+
+func (f *conflictOrderClient) CancelOrder(context.Context, *pbOrder.CancelOrderRequest, ...grpc.CallOption) (*pbOrder.CancelOrderResponse, error) {
+	return nil, status.Error(codes.FailedPrecondition, "idempotency key conflict")
 }
 
 func TestHandleCreateOrderIgnoresForgedClientFields(t *testing.T) {
@@ -77,6 +93,7 @@ func TestHandleCreateOrderIgnoresForgedClientFields(t *testing.T) {
 		strings.NewReader(`{"items":[{"product_id":1,"product_name":"伪造商品","price":0.01,"quantity":2}]}`),
 	)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "order-key")
 
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
@@ -98,12 +115,79 @@ func TestHandleCreateOrderIgnoresForgedClientFields(t *testing.T) {
 	}
 }
 
+func TestHandleCreateOrderRequiresIdempotencyKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	gateway := &APIGateway{orderClient: &fakeOrderClient{}}
+	router := gin.New()
+	router.POST("/api/orders", func(c *gin.Context) {
+		c.Set("user_id", int64(1))
+		gateway.handleCreateOrder(c)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/orders", strings.NewReader(`{"items":[{"product_id":1,"quantity":1}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusBadRequest; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+}
+
+func TestHandleCreateOrderForwardsIdempotencyKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	client := &fakeOrderClient{}
+	gateway := &APIGateway{orderClient: client}
+	router := gin.New()
+	router.POST("/api/orders", func(c *gin.Context) {
+		c.Set("user_id", int64(1))
+		gateway.handleCreateOrder(c)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/orders", strings.NewReader(`{"items":[{"product_id":1,"quantity":1}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "order-key")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusOK; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+	if got, want := client.lastCreateOrderReq.IdempotencyKey, "order-key"; got != want {
+		t.Fatalf("unexpected idempotency key: got %q want %q", got, want)
+	}
+}
+
+func TestHandleCreateOrderMapsIdempotencyConflictToHTTP409(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	gateway := &APIGateway{orderClient: &conflictOrderClient{}}
+	router := gin.New()
+	router.POST("/api/orders", func(c *gin.Context) {
+		c.Set("user_id", int64(1))
+		gateway.handleCreateOrder(c)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/orders", strings.NewReader(`{"items":[{"product_id":1,"quantity":1}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "order-key")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusConflict; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+}
+
 type fakeMerchantClient struct {
 	lastCreateMerchantReq *pbMerchant.CreateMerchantRequest
 }
 
 type fakePaymentClient struct {
 	lastCreatePaymentReq *pbPayment.CreatePaymentRequest
+	lastSucceededReq     *pbPayment.PaymentActionRequest
 }
 
 func (f *fakePaymentClient) CreatePayment(ctx context.Context, in *pbPayment.CreatePaymentRequest, opts ...grpc.CallOption) (*pbPayment.CreatePaymentResponse, error) {
@@ -123,7 +207,8 @@ func (f *fakePaymentClient) GetPayment(ctx context.Context, in *pbPayment.GetPay
 }
 
 func (f *fakePaymentClient) MarkPaymentSucceeded(ctx context.Context, in *pbPayment.PaymentActionRequest, opts ...grpc.CallOption) (*pbPayment.PaymentActionResponse, error) {
-	return nil, nil
+	f.lastSucceededReq = in
+	return &pbPayment.PaymentActionResponse{Payment: &pbPayment.Payment{Id: in.Id, UserId: in.UserId, Status: "succeeded"}}, nil
 }
 
 func (f *fakePaymentClient) MarkPaymentFailed(ctx context.Context, in *pbPayment.PaymentActionRequest, opts ...grpc.CallOption) (*pbPayment.PaymentActionResponse, error) {
@@ -273,6 +358,112 @@ func TestHandleCreatePaymentInjectsCurrentUser(t *testing.T) {
 	}
 	if got, want := client.lastCreatePaymentReq.UserId, int64(7); got != want {
 		t.Fatalf("unexpected user id: got %d want %d", got, want)
+	}
+}
+
+func TestHandleMarkPaymentSucceededRequiresIdempotencyKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	gateway := &APIGateway{paymentClient: &fakePaymentClient{}}
+	router := gin.New()
+	router.POST("/api/payments/:id/success", func(c *gin.Context) {
+		c.Set("user_id", int64(1))
+		gateway.handleMarkPaymentSucceeded(c)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/payments/1/success", nil)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusBadRequest; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+}
+
+func TestHandleMarkPaymentSucceededForwardsIdempotencyKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	client := &fakePaymentClient{}
+	gateway := &APIGateway{paymentClient: client}
+	router := gin.New()
+	router.POST("/api/payments/:id/success", func(c *gin.Context) {
+		c.Set("user_id", int64(1))
+		gateway.handleMarkPaymentSucceeded(c)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/payments/1/success", nil)
+	req.Header.Set("Idempotency-Key", "payment-key")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusOK; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+	if got, want := client.lastSucceededReq.IdempotencyKey, "payment-key"; got != want {
+		t.Fatalf("unexpected idempotency key: got %q want %q", got, want)
+	}
+}
+
+func TestHandleCancelOrderRequiresIdempotencyKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	gateway := &APIGateway{orderClient: &fakeOrderClient{}}
+	router := gin.New()
+	router.PUT("/api/orders/:id/cancel", func(c *gin.Context) {
+		c.Set("user_id", int64(1))
+		gateway.handleCancelOrder(c)
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "/api/orders/1/cancel", nil)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusBadRequest; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+}
+
+func TestHandleCancelOrderForwardsIdempotencyKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	client := &fakeOrderClient{}
+	gateway := &APIGateway{orderClient: client}
+	router := gin.New()
+	router.PUT("/api/orders/:id/cancel", func(c *gin.Context) {
+		c.Set("user_id", int64(1))
+		gateway.handleCancelOrder(c)
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "/api/orders/1/cancel", nil)
+	req.Header.Set("Idempotency-Key", "cancel-key")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusOK; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+	if got, want := client.lastCancelOrderReq.IdempotencyKey, "cancel-key"; got != want {
+		t.Fatalf("unexpected idempotency key: got %q want %q", got, want)
+	}
+}
+
+func TestHandleCancelOrderMapsIdempotencyConflictToHTTP409(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	gateway := &APIGateway{orderClient: &conflictOrderClient{}}
+	router := gin.New()
+	router.PUT("/api/orders/:id/cancel", func(c *gin.Context) {
+		c.Set("user_id", int64(1))
+		gateway.handleCancelOrder(c)
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "/api/orders/1/cancel", nil)
+	req.Header.Set("Idempotency-Key", "cancel-key")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusConflict; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
 	}
 }
 

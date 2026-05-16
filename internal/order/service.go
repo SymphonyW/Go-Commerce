@@ -7,6 +7,8 @@ import (
 	"errors"
 	"log"
 	"math"
+	"net/http"
+	"sort"
 	"time"
 
 	// gRPC状态码：用于返回标准化的错误信息
@@ -19,6 +21,7 @@ import (
 	// 导入订单服务的protobuf生成代码
 	pb "go-commerce/api/order"
 	"go-commerce/internal/auth"
+	"go-commerce/internal/idempotency"
 	"go-commerce/internal/merchant"
 	// 导入产品模型：用于库存检查和更新
 	"go-commerce/internal/product"
@@ -35,6 +38,7 @@ type Service struct {
 	publisher                          mq.Publisher
 	timeoutScheduler                   TimeoutScheduler
 	paymentTimeout                     time.Duration
+	idempotency                        *idempotency.Service
 }
 
 // NewService 创建订单服务实例
@@ -66,6 +70,7 @@ func NewServiceWithTimeout(db *gorm.DB, publisher mq.Publisher, scheduler Timeou
 		publisher:        publisher,
 		timeoutScheduler: scheduler,
 		paymentTimeout:   paymentTimeout,
+		idempotency:      idempotency.NewService(db, 24*time.Hour),
 	}
 }
 
@@ -81,56 +86,86 @@ func NewServiceWithTimeout(db *gorm.DB, publisher mq.Publisher, scheduler Timeou
 //	*pb.CreateOrderResponse: 订单创建响应，包含创建的订单信息
 //	error: 错误信息
 func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (*pb.CreateOrderResponse, error) {
+	if req.IdempotencyKey == "" {
+		return nil, status.Error(codes.InvalidArgument, "idempotency key required")
+	}
+
 	aggregatedItems, err := aggregateCreateOrderItems(req.Items)
 	if err != nil {
 		return nil, err
 	}
 
-	// 开启事务，确保商品快照、库存扣减和订单落库要么全部成功，要么全部回滚。
+	requestHash, err := idempotency.HashPayload(newCreateOrderFingerprint(req.UserId, aggregatedItems))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to hash create order request: %v", err)
+	}
+
+	idempotencyResult, err := s.idempotency.Begin(ctx, idempotency.BeginRequest{
+		UserID:         uint(req.UserId),
+		RequestPath:    createOrderRequestPath,
+		IdempotencyKey: req.IdempotencyKey,
+		RequestHash:    requestHash,
+	})
+	if err != nil {
+		return nil, orderIdempotencyError(err)
+	}
+	if idempotencyResult.Action == idempotency.ActionReplay {
+		var replay pb.CreateOrderResponse
+		if err := idempotency.ReplayInto(idempotencyResult.Record, &replay); err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to replay create order response: %v", err)
+		}
+		return &replay, nil
+	}
+
+	// ???????????????????????????????????
 	tx := s.db.Begin()
 	if tx.Error != nil {
+		_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 		return nil, status.Errorf(codes.Internal, "failed to start transaction: %v", tx.Error)
 	}
 	defer func() {
 		if r := recover(); r != nil {
 			tx.Rollback()
+			_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 		}
 	}()
 
-	// 订单金额和订单项快照必须以后端读取到的真实商品信息为准，不能信任客户端输入。
+	// ??????????????????????????????????????
 	orderItems, totalAmount, err := buildOrderSnapshots(tx, aggregatedItems)
 	if err != nil {
 		tx.Rollback()
+		_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 		return nil, err
 	}
 
-	// 创建订单记录
 	order := Order{
-		UserID:      uint(req.UserId), // 用户ID
-		TotalAmount: totalAmount,      // 订单总金额
+		UserID:      uint(req.UserId),
+		TotalAmount: totalAmount,
 		Status:      OrderStatusPending,
-		OrderDate:   time.Now(), // 订单日期
+		OrderDate:   time.Now(),
 	}
 	if err := tx.Create(&order).Error; err != nil {
 		tx.Rollback()
+		_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 		return nil, status.Errorf(codes.Internal, "failed to create order: %v", err)
 	}
 
-	// 订单项保存“下单时快照”，后续商品改价不会影响历史订单展示。
+	// ??????????????????????????????
 	for i := range orderItems {
 		orderItems[i].OrderID = order.ID
 	}
 	if err := tx.Create(&orderItems).Error; err != nil {
 		tx.Rollback()
+		_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 		return nil, status.Errorf(codes.Internal, "failed to create order items: %v", err)
 	}
 
-	// 提交事务
 	if err := tx.Commit().Error; err != nil {
+		_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 		return nil, status.Errorf(codes.Internal, "failed to commit order transaction: %v", err)
 	}
 
-	// 先提交交易事务，再发布事件；当前阶段采用弱一致，避免消息先于数据库提交对外可见。
+	// ????????????????????????????????????????
 	orderEvent := newOrderCreatedEvent(&order, req.UserId, totalAmount, orderItems)
 	if err := s.publisher.Publish(ctx, events.OrderCreatedType, orderEvent); err != nil {
 		log.Printf(
@@ -143,7 +178,7 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 		)
 	}
 
-	// 超时消息同样在事务提交后再发，避免订单未真正落库时被提前消费。
+	// ???????????????????????????????
 	timeoutEvent := newOrderTimeoutCheckEvent(&order, req.UserId, s.paymentTimeout)
 	if err := s.timeoutScheduler.Schedule(ctx, timeoutEvent, s.paymentTimeout); err != nil {
 		log.Printf(
@@ -156,10 +191,37 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 		)
 	}
 
-	// 返回创建订单响应
-	return &pb.CreateOrderResponse{
-		Order: convertToPBOrder(&order, orderItems),
-	}, nil
+	response := &pb.CreateOrderResponse{Order: convertToPBOrder(&order, orderItems)}
+	if err := s.idempotency.Complete(ctx, idempotencyResult.Record.ID, http.StatusOK, response); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to finalize create order idempotency record: %v", err)
+	}
+	return response, nil
+}
+
+const createOrderRequestPath = "/api/orders"
+
+type createOrderFingerprint struct {
+	UserID int64                        `json:"user_id"`
+	Items  []createOrderFingerprintItem `json:"items"`
+}
+
+type createOrderFingerprintItem struct {
+	ProductID int64 `json:"product_id"`
+	Quantity  int32 `json:"quantity"`
+}
+
+func newCreateOrderFingerprint(userID int64, items []aggregatedCreateOrderItem) createOrderFingerprint {
+	fingerprintItems := make([]createOrderFingerprintItem, len(items))
+	for i, item := range items {
+		fingerprintItems[i] = createOrderFingerprintItem{
+			ProductID: item.ProductID,
+			Quantity:  item.Quantity,
+		}
+	}
+	sort.Slice(fingerprintItems, func(i, j int) bool {
+		return fingerprintItems[i].ProductID < fingerprintItems[j].ProductID
+	})
+	return createOrderFingerprint{UserID: userID, Items: fingerprintItems}
 }
 
 func newOrderCreatedEvent(order *Order, userID int64, totalAmount float64, items []OrderItem) events.OrderCreatedEvent {
@@ -641,6 +703,17 @@ func newOrderStatusChangedEvent(eventType string, order *Order, fromStatus, toSt
 		UserID:     int64(order.UserID),
 		FromStatus: fromStatus,
 		ToStatus:   toStatus,
+	}
+}
+
+func orderIdempotencyError(err error) error {
+	switch {
+	case errors.Is(err, idempotency.ErrConflict):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, idempotency.ErrInProgress):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	default:
+		return status.Errorf(codes.Internal, "idempotency operation failed: %v", err)
 	}
 }
 

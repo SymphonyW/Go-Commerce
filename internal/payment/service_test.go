@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	pbOrder "go-commerce/api/order"
+	"go-commerce/internal/idempotency"
 	orderdomain "go-commerce/internal/order"
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
@@ -74,7 +75,7 @@ func newTestService(t *testing.T, orderClient pbOrder.OrderServiceClient, publis
 	if err != nil {
 		t.Fatalf("failed to open test database: %v", err)
 	}
-	if err := db.AutoMigrate(&Payment{}); err != nil {
+	if err := db.AutoMigrate(&Payment{}, &idempotency.Record{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
 

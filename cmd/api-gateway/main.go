@@ -139,7 +139,7 @@ func main() {
 	r.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, Idempotency-Key, accept, origin, Cache-Control, X-Requested-With")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
 
 		// 处理OPTIONS预检请求
@@ -268,6 +268,13 @@ func (g *APIGateway) handlePaymentAction(c *gin.Context, succeed bool) {
 	}
 
 	req := &pbPayment.PaymentActionRequest{Id: paymentID, UserId: userID.(int64)}
+	if succeed {
+		idempotencyKey, ok := readRequiredIdempotencyKey(c)
+		if !ok {
+			return
+		}
+		req.IdempotencyKey = idempotencyKey
+	}
 	var resp *pbPayment.PaymentActionResponse
 	if succeed {
 		resp, err = g.paymentClient.MarkPaymentSucceeded(context.Background(), req)
@@ -279,6 +286,16 @@ func (g *APIGateway) handlePaymentAction(c *gin.Context, succeed bool) {
 		return
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// readRequiredIdempotencyKey 统一校验写接口的幂等键，避免各路由分散实现。
+func readRequiredIdempotencyKey(c *gin.Context) (string, bool) {
+	key := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if key == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Idempotency-Key header required"})
+		return "", false
+	}
+	return key, true
 }
 
 func parsePathID(raw string) (int64, error) {
@@ -489,6 +506,11 @@ func (g *APIGateway) handleCreateOrder(c *gin.Context) {
 		return
 	}
 
+	idempotencyKey, ok := readRequiredIdempotencyKey(c)
+	if !ok {
+		return
+	}
+
 	// 定义请求结构体
 	var req struct {
 		Items []struct {
@@ -514,19 +536,12 @@ func (g *APIGateway) handleCreateOrder(c *gin.Context) {
 
 	// 调用订单服务的CreateOrder方法
 	resp, err := g.orderClient.CreateOrder(context.Background(), &pbOrder.CreateOrderRequest{
-		UserId: userID.(int64),
-		Items:  orderItems,
+		UserId:         userID.(int64),
+		Items:          orderItems,
+		IdempotencyKey: idempotencyKey,
 	})
 	if err != nil {
-		grpcStatus := status.Convert(err)
-		switch grpcStatus.Code() {
-		case codes.InvalidArgument:
-			c.JSON(http.StatusBadRequest, gin.H{"error": grpcStatus.Message()})
-		case codes.NotFound:
-			c.JSON(http.StatusNotFound, gin.H{"error": grpcStatus.Message()})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": grpcStatus.Message()})
-		}
+		writeGRPCError(c, err)
 		return
 	}
 
@@ -962,6 +977,11 @@ func (g *APIGateway) handleCancelOrder(c *gin.Context) {
 		return
 	}
 
+	idempotencyKey, ok := readRequiredIdempotencyKey(c)
+	if !ok {
+		return
+	}
+
 	// 从路径参数获取订单ID
 	id := c.Param("id")
 	orderId := int64(0)
@@ -974,11 +994,12 @@ func (g *APIGateway) handleCancelOrder(c *gin.Context) {
 
 	// 调用订单服务的CancelOrder方法
 	resp, err := g.orderClient.CancelOrder(context.Background(), &pbOrder.CancelOrderRequest{
-		Id:     orderId,
-		UserId: userID.(int64),
+		Id:             orderId,
+		UserId:         userID.(int64),
+		IdempotencyKey: idempotencyKey,
 	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeGRPCError(c, err)
 		return
 	}
 

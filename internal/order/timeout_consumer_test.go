@@ -19,6 +19,7 @@ func TestOrderTimeoutConsumerCancelsPendingOrderRestoresStockAndPublishesEvents(
 
 	resp, err := service.CreateOrder(t.Context(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
 		},
@@ -73,6 +74,7 @@ func TestOrderTimeoutConsumerSkipsPaidOrder(t *testing.T) {
 
 	resp, err := service.CreateOrder(t.Context(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
 		},
@@ -121,6 +123,7 @@ func TestOrderTimeoutConsumerIsIdempotentForRepeatedMessages(t *testing.T) {
 
 	resp, err := service.CreateOrder(t.Context(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
 		},
@@ -157,6 +160,7 @@ func TestOrderTimeoutConsumerSkipsAlreadyCancelledOrder(t *testing.T) {
 
 	resp, err := service.CreateOrder(t.Context(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
 		},

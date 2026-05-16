@@ -38,6 +38,7 @@ message GetPaymentResponse {
 message PaymentActionRequest {
   int64 id = 1;
   int64 user_id = 2;
+  string idempotency_key = 3;
 }
 
 message PaymentActionResponse {

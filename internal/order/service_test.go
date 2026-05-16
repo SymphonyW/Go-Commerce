@@ -13,6 +13,7 @@ import (
 
 	pb "go-commerce/api/order"
 	"go-commerce/internal/auth"
+	"go-commerce/internal/idempotency"
 	"go-commerce/internal/merchant"
 	"go-commerce/internal/product"
 	"go-commerce/pkg/events"
@@ -37,7 +38,7 @@ func newTestService(t *testing.T) (*Service, *gorm.DB) {
 		t.Fatalf("failed to open test database: %v", err)
 	}
 
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
 
@@ -92,7 +93,7 @@ func newTestServiceWithPublisher(t *testing.T, publisher mq.Publisher) (*Service
 		t.Fatalf("failed to open test database: %v", err)
 	}
 
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
 
@@ -111,7 +112,7 @@ func newTestServiceWithTimeout(t *testing.T, publisher mq.Publisher, scheduler T
 		t.Fatalf("failed to open test database: %v", err)
 	}
 
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
 
@@ -126,7 +127,7 @@ func newConcurrentTestService(t *testing.T) (*Service, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("failed to open concurrent test database: %v", err)
 	}
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}); err != nil {
 		t.Fatalf("failed to migrate concurrent test database: %v", err)
 	}
 
@@ -190,12 +191,110 @@ func createTestMerchant(t *testing.T, db *gorm.DB, ownerUserID uint) merchant.Me
 	return shop
 }
 
+func createOrderRequest(userID int64, key string, items ...*pb.CreateOrderItem) *pb.CreateOrderRequest {
+	return &pb.CreateOrderRequest{
+		UserId:         userID,
+		IdempotencyKey: key,
+		Items:          items,
+	}
+}
+
+func TestCreateOrderIsIdempotentForRepeatedRequests(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "幂等商品", 25, 5)
+	req := createOrderRequest(1, "repeat-create-order", &pb.CreateOrderItem{ProductId: int64(item.ID), Quantity: 2})
+
+	first, err := service.CreateOrder(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first CreateOrder returned error: %v", err)
+	}
+	second, err := service.CreateOrder(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second CreateOrder returned error: %v", err)
+	}
+
+	if got, want := second.Order.Id, first.Order.Id; got != want {
+		t.Fatalf("unexpected replayed order id: got %d want %d", got, want)
+	}
+	var orderCount int64
+	if err := db.Model(&Order{}).Count(&orderCount).Error; err != nil {
+		t.Fatalf("failed to count orders: %v", err)
+	}
+	if got, want := orderCount, int64(1); got != want {
+		t.Fatalf("unexpected order count: got %d want %d", got, want)
+	}
+
+	var latest product.Product
+	if err := db.First(&latest, item.ID).Error; err != nil {
+		t.Fatalf("failed to reload product: %v", err)
+	}
+	if got, want := latest.Stock, int32(3); got != want {
+		t.Fatalf("unexpected stock after replay: got %d want %d", got, want)
+	}
+}
+
+func TestCreateOrderRejectsSameKeyWithDifferentPayload(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "冲突商品", 25, 5)
+
+	if _, err := service.CreateOrder(context.Background(), createOrderRequest(
+		1,
+		"conflicting-create-order",
+		&pb.CreateOrderItem{ProductId: int64(item.ID), Quantity: 1},
+	)); err != nil {
+		t.Fatalf("first CreateOrder returned error: %v", err)
+	}
+
+	_, err := service.CreateOrder(context.Background(), createOrderRequest(
+		1,
+		"conflicting-create-order",
+		&pb.CreateOrderItem{ProductId: int64(item.ID), Quantity: 2},
+	))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.FailedPrecondition)
+	}
+}
+
+func TestCreateOrderConcurrentSameKeyCreatesOneOrder(t *testing.T) {
+	service, db := newConcurrentTestService(t)
+	item := createTestProduct(t, db, "并发幂等商品", 10, 20)
+
+	const requestCount = 20
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for i := 0; i < requestCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = service.CreateOrder(context.Background(), createOrderRequest(
+				1,
+				"concurrent-create-order",
+				&pb.CreateOrderItem{ProductId: int64(item.ID), Quantity: 1},
+			))
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	var orderCount int64
+	if err := db.Model(&Order{}).Count(&orderCount).Error; err != nil {
+		t.Fatalf("failed to count orders: %v", err)
+	}
+	if got, want := orderCount, int64(1); got != want {
+		t.Fatalf("unexpected order count: got %d want %d", got, want)
+	}
+}
+
 func TestCreateOrderUsesDatabaseSnapshot(t *testing.T) {
 	service, db := newTestService(t)
 	item := createTestProduct(t, db, "真实商品", 88.5, 10)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
 		},
@@ -235,6 +334,7 @@ func TestCreateOrderStartsPending(t *testing.T) {
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
 		},
@@ -254,6 +354,7 @@ func TestCreateOrderPublishesCommittedOrderCreatedEvent(t *testing.T) {
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
 		},
@@ -294,6 +395,7 @@ func TestCreateOrderSchedulesTimeoutCheckAfterCommit(t *testing.T) {
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 9,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
 		},
@@ -343,6 +445,7 @@ func TestCreateOrderKeepsOrderWhenPublishFails(t *testing.T) {
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
 		},
@@ -368,6 +471,7 @@ func TestCreateOrderRejectsMissingProduct(t *testing.T) {
 
 	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: 999, Quantity: 1},
 		},
@@ -383,6 +487,7 @@ func TestCreateOrderRejectsInsufficientStock(t *testing.T) {
 
 	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
 		},
@@ -408,6 +513,7 @@ func TestCreateOrderRejectsInvalidQuantity(t *testing.T) {
 
 			_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 				UserId: 1,
+		IdempotencyKey: "test-key",
 				Items: []*pb.CreateOrderItem{
 					{ProductId: int64(item.ID), Quantity: tc.quantity},
 				},
@@ -424,6 +530,7 @@ func TestCreateOrderRejectsEmptyItems(t *testing.T) {
 
 	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items:  nil,
 	})
 	if status.Code(err) != codes.InvalidArgument {
@@ -438,6 +545,7 @@ func TestCreateOrderCalculatesTotalAcrossProducts(t *testing.T) {
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(first.ID), Quantity: 2},
 			{ProductId: int64(second.ID), Quantity: 3},
@@ -458,6 +566,7 @@ func TestCreateOrderMergesDuplicateProducts(t *testing.T) {
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
 			{ProductId: int64(item.ID), Quantity: 2},
@@ -503,6 +612,7 @@ func TestCreateOrderRollsBackStockWhenOrderInsertFails(t *testing.T) {
 
 	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
 		},
@@ -539,6 +649,7 @@ func TestCreateOrderRollsBackStockWhenOrderItemInsertFails(t *testing.T) {
 
 	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
 		},
@@ -573,6 +684,7 @@ func TestCreateOrderConcurrentRequestsDoNotOversell(t *testing.T) {
 
 			if _, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 				UserId: userID,
+		IdempotencyKey: "test-key",
 				Items: []*pb.CreateOrderItem{
 					{ProductId: int64(item.ID), Quantity: 1},
 				},
@@ -606,6 +718,7 @@ func TestCancelOrderRestoresStockAtomically(t *testing.T) {
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 2},
 		},
@@ -641,6 +754,7 @@ func TestCancelOrderPublishesOrderCancelledEvent(t *testing.T) {
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
 		},
@@ -682,6 +796,7 @@ func TestCancelOrderPersistsUserCancelReason(t *testing.T) {
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId: 1,
+		IdempotencyKey: "test-key",
 		Items: []*pb.CreateOrderItem{
 			{ProductId: int64(item.ID), Quantity: 1},
 		},
