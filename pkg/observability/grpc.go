@@ -15,6 +15,22 @@ func UnaryClientInterceptor() grpc.UnaryClientInterceptor {
 	}
 }
 
+// UnaryClientTimeoutInterceptor 为未显式设置 deadline 的调用补上一层默认超时。
+// 这样可以避免网关或服务间调用因为下游异常而无限悬挂。
+func UnaryClientTimeoutInterceptor(timeout time.Duration) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		if timeout <= 0 {
+			return invoker(ctx, method, req, reply, cc, opts...)
+		}
+		if _, ok := ctx.Deadline(); ok {
+			return invoker(ctx, method, req, reply, cc, opts...)
+		}
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
+}
+
 func UnaryServerInterceptor(logger *slog.Logger, metrics *Metrics) grpc.UnaryServerInterceptor {
 	if logger == nil {
 		logger = slog.Default()

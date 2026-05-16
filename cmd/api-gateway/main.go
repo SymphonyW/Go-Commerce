@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	// Gin框架：用于处理HTTP请求和路由
 	"github.com/gin-gonic/gin"
@@ -18,7 +19,6 @@ import (
 	// gRPC客户端：用于与后端微服务通信
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
@@ -31,8 +31,10 @@ import (
 	pbProduct "go-commerce/api/product"
 
 	// JWT工具：用于验证用户令牌
+	"go-commerce/pkg/healthcheck"
 	"go-commerce/pkg/jwt"
 	"go-commerce/pkg/observability"
+	"go-commerce/pkg/serviceutil"
 )
 
 // getEnv 获取环境变量，如果不存在则返回默认值
@@ -68,6 +70,9 @@ type APIGateway struct {
 // main 函数是api-gateway服务的入口点
 // 负责初始化各个微服务客户端、设置路由和启动HTTP服务器
 func main() {
+	ctx, stop := serviceutil.SignalContext()
+	defer stop()
+
 	logger := observability.NewLogger("api-gateway")
 	slog.SetDefault(logger)
 	registry := prometheus.NewRegistry()
@@ -81,9 +86,14 @@ func main() {
 	cartServiceAddr := getEnv("CART_SERVICE_ADDR", "localhost:50054")
 	merchantServiceAddr := getEnv("MERCHANT_SERVICE_ADDR", "localhost:50055")
 	paymentServiceAddr := getEnv("PAYMENT_SERVICE_ADDR", "localhost:50056")
+	grpcTimeout := serviceutil.DurationEnv("GATEWAY_GRPC_TIMEOUT", 3*time.Second)
+	clientInterceptors := grpc.WithChainUnaryInterceptor(
+		observability.UnaryClientInterceptor(),
+		observability.UnaryClientTimeoutInterceptor(grpcTimeout),
+	)
 
 	// 连接认证服务
-	authConn, err := grpc.Dial(authServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithUnaryInterceptor(observability.UnaryClientInterceptor()))
+	authConn, err := grpc.Dial(authServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), clientInterceptors)
 	if err != nil {
 		logger.Error("grpc_dial_failed", "target", "auth-service", "error", err)
 		os.Exit(1)
@@ -92,7 +102,7 @@ func main() {
 	authClient := pbAuth.NewAuthServiceClient(authConn)
 
 	// 连接产品服务
-	productConn, err := grpc.Dial(productServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithUnaryInterceptor(observability.UnaryClientInterceptor()))
+	productConn, err := grpc.Dial(productServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), clientInterceptors)
 	if err != nil {
 		logger.Error("grpc_dial_failed", "target", "product-service", "error", err)
 		os.Exit(1)
@@ -101,7 +111,7 @@ func main() {
 	productClient := pbProduct.NewProductServiceClient(productConn)
 
 	// 连接订单服务
-	orderConn, err := grpc.Dial(orderServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithUnaryInterceptor(observability.UnaryClientInterceptor()))
+	orderConn, err := grpc.Dial(orderServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), clientInterceptors)
 	if err != nil {
 		logger.Error("grpc_dial_failed", "target", "order-service", "error", err)
 		os.Exit(1)
@@ -110,7 +120,7 @@ func main() {
 	orderClient := pbOrder.NewOrderServiceClient(orderConn)
 
 	// 连接支付服务
-	paymentConn, err := grpc.Dial(paymentServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithUnaryInterceptor(observability.UnaryClientInterceptor()))
+	paymentConn, err := grpc.Dial(paymentServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), clientInterceptors)
 	if err != nil {
 		logger.Error("grpc_dial_failed", "target", "payment-service", "error", err)
 		os.Exit(1)
@@ -119,7 +129,7 @@ func main() {
 	paymentClient := pbPayment.NewPaymentServiceClient(paymentConn)
 
 	// 连接商家服务
-	merchantConn, err := grpc.Dial(merchantServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithUnaryInterceptor(observability.UnaryClientInterceptor()))
+	merchantConn, err := grpc.Dial(merchantServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), clientInterceptors)
 	if err != nil {
 		logger.Error("grpc_dial_failed", "target", "merchant-service", "error", err)
 		os.Exit(1)
@@ -128,7 +138,7 @@ func main() {
 	merchantClient := pbMerchant.NewMerchantServiceClient(merchantConn)
 
 	// 连接购物车服务
-	cartConn, err := grpc.Dial(cartServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithUnaryInterceptor(observability.UnaryClientInterceptor()))
+	cartConn, err := grpc.Dial(cartServiceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), clientInterceptors)
 	if err != nil {
 		logger.Error("grpc_dial_failed", "target", "cart-service", "error", err)
 		os.Exit(1)
@@ -160,22 +170,14 @@ func main() {
 		c.String(http.StatusOK, "ok")
 	})
 	r.GET("/readyz", func(c *gin.Context) {
-		connections := map[string]*grpc.ClientConn{
-			"auth-service":     authConn,
-			"product-service":  productConn,
-			"order-service":    orderConn,
-			"payment-service":  paymentConn,
-			"merchant-service": merchantConn,
-			"cart-service":     cartConn,
-		}
-		for name, conn := range connections {
-			state := conn.GetState()
-			if state == connectivity.TransientFailure || state == connectivity.Shutdown {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready", "dependency": name, "state": state.String()})
-				return
-			}
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "ready"})
+		healthcheck.Handler(
+			healthcheck.Dependency{Name: "auth-service", Check: healthcheck.GRPCHealth(authConn, "")},
+			healthcheck.Dependency{Name: "product-service", Check: healthcheck.GRPCHealth(productConn, "")},
+			healthcheck.Dependency{Name: "order-service", Check: healthcheck.GRPCHealth(orderConn, "")},
+			healthcheck.Dependency{Name: "payment-service", Check: healthcheck.GRPCHealth(paymentConn, "")},
+			healthcheck.Dependency{Name: "merchant-service", Check: healthcheck.GRPCHealth(merchantConn, "")},
+			healthcheck.Dependency{Name: "cart-service", Check: healthcheck.GRPCHealth(cartConn, "")},
+		).ServeHTTP(c.Writer, c.Request)
 	})
 
 	// 添加CORS中间件
@@ -238,10 +240,30 @@ func main() {
 	}
 
 	// 启动HTTP服务器，监听8080端口
-	if err := r.Run(":8080"); err != nil {
-		logger.Error("http_server_failed", "addr", ":8080", "error", err)
-		os.Exit(1)
+	httpAddr := serviceutil.Env("HTTP_ADDR", ":8080")
+	httpServer := &http.Server{
+		Addr:              httpAddr,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
+	serveErr := make(chan error, 1)
+	go func() {
+		logger.Info("http_server_listening", "addr", httpAddr)
+		serveErr <- httpServer.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serveErr:
+		if err != nil && err != http.ErrServerClosed {
+			logger.Error("http_server_failed", "addr", httpAddr, "error", err)
+			os.Exit(1)
+		}
+	case <-ctx.Done():
+		logger.Info("shutdown_started", "signal", ctx.Err())
+	}
+
+	serviceutil.ShutdownHTTPServer(httpServer, 10*time.Second)
+	logger.Info("api_gateway_shutdown_completed")
 }
 
 func (g *APIGateway) handleCreatePayment(c *gin.Context) {

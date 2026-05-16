@@ -1,98 +1,80 @@
-// order-service 服务入口文件
-// 负责启动订单服务，处理订单的创建、查询和取消
-// 使用gRPC协议提供服务，并集成RabbitMQ进行消息传递
 package main
 
 import (
 	"log"
 	"net"
-	"os"
+	"time"
 
-	// RabbitMQ客户端：用于消息队列操作
 	"github.com/streadway/amqp"
-	// MySQL驱动：用于连接MySQL数据库
-	"gorm.io/driver/mysql"
-	// GORM：ORM框架，用于数据库操作
-	"gorm.io/gorm"
-	// gRPC服务器：用于提供gRPC服务
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health/grpc_health_v1"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 
-	// 导入订单服务的业务逻辑
+	pb "go-commerce/api/order"
 	"go-commerce/internal/order"
 	"go-commerce/internal/outbox"
-	// 导入订单服务的protobuf生成代码
-	pb "go-commerce/api/order"
 	"go-commerce/pkg/events"
+	"go-commerce/pkg/healthcheck"
 	"go-commerce/pkg/mq"
+	"go-commerce/pkg/serviceutil"
 )
 
-// main 函数是order-service服务的入口点
-// 负责初始化数据库连接、自动迁移表结构、连接RabbitMQ、启动gRPC服务器
 func main() {
-	// 从环境变量获取数据库连接字符串
-	dsn := os.Getenv("DB_DSN")
-	if dsn == "" {
-		// 默认值，用于本地开发
-		dsn = "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
-	}
+	ctx, stop := serviceutil.SignalContext()
+	defer stop()
 
-	// 连接数据库
-	// 使用GORM打开数据库连接
+	dsn := serviceutil.Env("DB_DSN", "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local")
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
-		log.Fatalf("failed to connect database: %v", err)
+		log.Fatalf("mysql_connect_failed error=%v", err)
 	}
-
-	// 自动迁移数据库表结构
-	// 会根据order.Order和order.OrderItem结构体自动创建或更新数据库表
-	if err := db.AutoMigrate(&order.Order{}, &order.OrderItem{}, &outbox.Event{}); err != nil {
-		log.Fatalf("failed to migrate database: %v", err)
-	}
-
-	// 从环境变量获取RabbitMQ连接地址
-	rabbitmqURL := os.Getenv("RABBITMQ_URL")
-	if rabbitmqURL == "" {
-		// 默认值，用于本地开发
-		rabbitmqURL = "amqp://guest:guest@localhost:5672/"
-	}
-
-	exchangeName := os.Getenv("EVENT_EXCHANGE")
-	if exchangeName == "" {
-		exchangeName = mq.DefaultExchangeName
-	}
-
-	paymentTimeout, err := order.ParseOrderPaymentTimeoutMinutes(os.Getenv("ORDER_PAYMENT_TIMEOUT_MINUTES"))
+	sqlDB, err := db.DB()
 	if err != nil {
-		log.Fatalf("invalid ORDER_PAYMENT_TIMEOUT_MINUTES: %v", err)
+		log.Fatalf("mysql_handle_failed error=%v", err)
+	}
+	defer sqlDB.Close()
+	log.Printf("mysql_connected")
+
+	if err := db.AutoMigrate(&order.Order{}, &order.OrderItem{}, &outbox.Event{}); err != nil {
+		log.Fatalf("mysql_migrate_failed error=%v", err)
 	}
 
-	// 当前阶段采用弱一致策略：RabbitMQ 暂不可用时主交易链路继续运行，但事件会丢失并记录告警。
+	paymentTimeout, err := order.ParseOrderPaymentTimeoutMinutes(serviceutil.Env("ORDER_PAYMENT_TIMEOUT_MINUTES", "15"))
+	if err != nil {
+		log.Fatalf("invalid_order_payment_timeout error=%v", err)
+	}
+
+	exchangeName := serviceutil.Env("EVENT_EXCHANGE", mq.DefaultExchangeName)
+	rabbitConn, err := amqp.Dial(serviceutil.Env("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"))
+	if err != nil {
+		log.Printf("rabbitmq_connection_failed exchange=%s error=%v", exchangeName, err)
+	}
+
 	var publisher mq.Publisher = mq.NopPublisher{}
 	var timeoutScheduler order.TimeoutScheduler = order.NopTimeoutScheduler{}
 	var paymentConsumerChannel *amqp.Channel
 	var timeoutConsumerChannel *amqp.Channel
-	conn, err := amqp.Dial(rabbitmqURL)
-	if err != nil {
-		log.Printf("rabbitmq_connection_failed exchange=%s error=%v", exchangeName, err)
-	} else {
-		defer conn.Close()
+	if rabbitConn != nil {
+		defer rabbitConn.Close()
+		log.Printf("rabbitmq_connected")
 
-		ch, channelErr := conn.Channel()
+		publisherChannel, channelErr := rabbitConn.Channel()
 		if channelErr != nil {
 			log.Printf("rabbitmq_channel_open_failed exchange=%s error=%v", exchangeName, channelErr)
 		} else {
-			defer ch.Close()
-			publisher = mq.NewRabbitMQPublisher(ch, exchangeName)
+			defer publisherChannel.Close()
+			publisher = mq.NewRabbitMQPublisher(publisherChannel, exchangeName)
 		}
 
-		paymentConsumerChannel, channelErr = conn.Channel()
+		paymentConsumerChannel, channelErr = rabbitConn.Channel()
 		if channelErr != nil {
 			log.Printf("rabbitmq_payment_consumer_channel_open_failed exchange=%s error=%v", exchangeName, channelErr)
 		} else {
 			defer paymentConsumerChannel.Close()
 		}
 
-		timeoutSchedulerChannel, channelErr := conn.Channel()
+		timeoutSchedulerChannel, channelErr := rabbitConn.Channel()
 		if channelErr != nil {
 			log.Printf("rabbitmq_timeout_scheduler_channel_open_failed error=%v", channelErr)
 		} else {
@@ -104,7 +86,7 @@ func main() {
 			}
 		}
 
-		timeoutConsumerChannel, channelErr = conn.Channel()
+		timeoutConsumerChannel, channelErr = rabbitConn.Channel()
 		if channelErr != nil {
 			log.Printf("rabbitmq_timeout_consumer_channel_open_failed error=%v", channelErr)
 		} else {
@@ -112,20 +94,23 @@ func main() {
 		}
 	}
 
-	// 监听TCP端口
-	// 监听50053端口，用于gRPC服务
-	lis, err := net.Listen("tcp", ":50053")
+	healthServer := serviceutil.StartHTTPServer(
+		"order health server",
+		serviceutil.Env("ORDER_HEALTH_ADDR", ":8083"),
+		healthcheck.Handler(
+			healthcheck.Dependency{Name: "mysql", Check: healthcheck.SQL(sqlDB)},
+			healthcheck.Dependency{Name: "rabbitmq", Check: healthcheck.AMQP(rabbitConn)},
+		),
+	)
+
+	grpcAddr := serviceutil.Env("ORDER_GRPC_ADDR", ":50053")
+	listener, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		log.Fatalf("grpc_listen_failed addr=%s error=%v", grpcAddr, err)
 	}
-
-	// 创建gRPC服务器
-	s := grpc.NewServer()
-
-	// 注册订单服务
-	// 将order.NewService(db, publisher)创建的服务实例注册到gRPC服务器
-	// 传入数据库连接和事件发布器
-	pb.RegisterOrderServiceServer(s, order.NewServiceWithTimeout(db, publisher, timeoutScheduler, paymentTimeout))
+	server := grpc.NewServer()
+	pb.RegisterOrderServiceServer(server, order.NewServiceWithTimeout(db, publisher, timeoutScheduler, paymentTimeout))
+	grpcHealth := healthcheck.RegisterGRPC(server)
 
 	if paymentConsumerChannel != nil {
 		go consumePaymentSucceededEvents(paymentConsumerChannel, exchangeName, db, publisher)
@@ -134,13 +119,25 @@ func main() {
 		go consumeOrderTimeoutEvents(timeoutConsumerChannel, db, publisher)
 	}
 
-	// 启动服务
-	// 打印服务监听地址
-	log.Printf("order service listening at %v", lis.Addr())
-	// 启动gRPC服务器，开始接受请求
-	if err := s.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
+	serveErr := make(chan error, 1)
+	go func() {
+		log.Printf("order service listening at %s", grpcAddr)
+		serveErr <- server.Serve(listener)
+	}()
+
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			log.Fatalf("grpc_server_failed error=%v", err)
+		}
+	case <-ctx.Done():
+		log.Printf("shutdown_started signal=%v", ctx.Err())
 	}
+
+	grpcHealth.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+	serviceutil.ShutdownHTTPServer(healthServer, 5*time.Second)
+	serviceutil.ShutdownGRPCServer(server, 10*time.Second)
+	log.Printf("order service shutdown completed")
 }
 
 func declareOrderTimeoutTopology(ch *amqp.Channel) error {

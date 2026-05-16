@@ -9,10 +9,11 @@ COPY . .
 RUN go build -o payment-service ./cmd/payment-service
 
 FROM alpine:latest
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates wget
 
 WORKDIR /root/
 COPY --from=builder /app/payment-service .
 
 EXPOSE 50056
+EXPOSE 8086
 CMD ["./payment-service"]

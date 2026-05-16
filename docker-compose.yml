@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   mysql:
@@ -15,7 +15,7 @@ services:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 5
 
   redis:
     image: redis:7-alpine
@@ -26,7 +26,7 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 5
 
   rabbitmq:
     image: rabbitmq:3-management
@@ -41,7 +41,7 @@ services:
       test: ["CMD", "rabbitmqctl", "status"]
       interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 5
 
   auth-service:
     build:
@@ -51,11 +51,20 @@ services:
     container_name: ecommerce-auth-service
     ports:
       - "50051:50051"
+      - "8081:8081"
     depends_on:
       mysql:
         condition: service_healthy
     environment:
+      AUTH_GRPC_ADDR: ":50051"
+      AUTH_HEALTH_ADDR: ":8081"
       DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   product-service:
     build:
@@ -65,11 +74,20 @@ services:
     container_name: ecommerce-product-service
     ports:
       - "50052:50052"
+      - "8082:8082"
     depends_on:
       mysql:
         condition: service_healthy
     environment:
+      PRODUCT_GRPC_ADDR: ":50052"
+      PRODUCT_HEALTH_ADDR: ":8082"
       DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   order-service:
     build:
@@ -79,14 +97,25 @@ services:
     container_name: ecommerce-order-service
     ports:
       - "50053:50053"
+      - "8083:8083"
     depends_on:
       mysql:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
+      ORDER_GRPC_ADDR: ":50053"
+      ORDER_HEALTH_ADDR: ":8083"
       DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
       EVENT_EXCHANGE: "ecommerce.events"
       ORDER_PAYMENT_TIMEOUT_MINUTES: "15"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   payment-service:
     build:
@@ -96,16 +125,28 @@ services:
     container_name: ecommerce-payment-service
     ports:
       - "50056:50056"
+      - "8086:8086"
     depends_on:
       mysql:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
       order-service:
-        condition: service_started
+        condition: service_healthy
     environment:
+      PAYMENT_GRPC_ADDR: ":50056"
+      PAYMENT_HEALTH_ADDR: ":8086"
       DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
       ORDER_SERVICE_ADDR: "order-service:50053"
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
       EVENT_EXCHANGE: "ecommerce.events"
+      SERVICE_GRPC_TIMEOUT: "3s"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8086/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   outbox-worker:
     build:
@@ -113,12 +154,15 @@ services:
       dockerfile: ./cmd/outbox-worker/Dockerfile
       pull: false
     container_name: ecommerce-outbox-worker
+    ports:
+      - "8088:8088"
     depends_on:
       mysql:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
     environment:
+      OUTBOX_HEALTH_ADDR: ":8088"
       DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
       EVENT_EXCHANGE: "ecommerce.events"
@@ -126,6 +170,12 @@ services:
       OUTBOX_BATCH_SIZE: "100"
       OUTBOX_MAX_RETRY: "5"
       OUTBOX_RETRY_BASE_DELAY: "1s"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8088/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   cart-service:
     build:
@@ -135,11 +185,24 @@ services:
     container_name: ecommerce-cart-service
     ports:
       - "50054:50054"
+      - "8084:8084"
     depends_on:
       redis:
         condition: service_healthy
+      product-service:
+        condition: service_healthy
     environment:
+      CART_GRPC_ADDR: ":50054"
+      CART_HEALTH_ADDR: ":8084"
       REDIS_ADDR: "redis:6379"
+      PRODUCT_SERVICE_ADDR: "product-service:50052"
+      SERVICE_GRPC_TIMEOUT: "3s"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8084/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   merchant-service:
     build:
@@ -149,14 +212,23 @@ services:
     container_name: ecommerce-merchant-service
     ports:
       - "50055:50055"
+      - "8085:8085"
     depends_on:
       mysql:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
     environment:
+      MERCHANT_GRPC_ADDR: ":50055"
+      MERCHANT_HEALTH_ADDR: ":8085"
       DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8085/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   notification-service:
     build:
@@ -164,12 +236,21 @@ services:
       dockerfile: ./cmd/notification-service/Dockerfile
       pull: false
     container_name: ecommerce-notification-service
+    ports:
+      - "8087:8087"
     depends_on:
       rabbitmq:
         condition: service_healthy
     environment:
+      NOTIFICATION_HEALTH_ADDR: ":8087"
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
       EVENT_EXCHANGE: "ecommerce.events"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8087/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   api-gateway:
     build:
@@ -181,22 +262,32 @@ services:
       - "8080:8080"
     depends_on:
       auth-service:
-        condition: service_started
+        condition: service_healthy
       product-service:
-        condition: service_started
+        condition: service_healthy
       order-service:
-        condition: service_started
+        condition: service_healthy
       payment-service:
-        condition: service_started
+        condition: service_healthy
       cart-service:
-        condition: service_started
+        condition: service_healthy
+      merchant-service:
+        condition: service_healthy
     environment:
+      HTTP_ADDR: ":8080"
       AUTH_SERVICE_ADDR: "auth-service:50051"
       PRODUCT_SERVICE_ADDR: "product-service:50052"
       ORDER_SERVICE_ADDR: "order-service:50053"
       CART_SERVICE_ADDR: "cart-service:50054"
       MERCHANT_SERVICE_ADDR: "merchant-service:50055"
       PAYMENT_SERVICE_ADDR: "payment-service:50056"
+      GATEWAY_GRPC_TIMEOUT: "3s"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   mysql_data:

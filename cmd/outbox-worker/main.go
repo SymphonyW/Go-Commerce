@@ -3,71 +3,77 @@ package main
 import (
 	"context"
 	"log"
-	"os"
-	"os/signal"
-	"syscall"
+	"time"
 
 	"github.com/streadway/amqp"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 
 	"go-commerce/internal/outbox"
+	"go-commerce/pkg/healthcheck"
 	"go-commerce/pkg/mq"
+	"go-commerce/pkg/serviceutil"
 )
 
 func main() {
-	dsn := os.Getenv("DB_DSN")
-	if dsn == "" {
-		dsn = "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
-	}
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
-	if err != nil {
-		log.Fatalf("failed to connect database: %v", err)
-	}
-	if err := db.AutoMigrate(&outbox.Event{}); err != nil {
-		log.Fatalf("failed to migrate outbox table: %v", err)
-	}
-
-	config, err := outbox.LoadConfigFromEnv()
-	if err != nil {
-		log.Fatalf("invalid outbox config: %v", err)
-	}
-
-	rabbitmqURL := os.Getenv("RABBITMQ_URL")
-	if rabbitmqURL == "" {
-		rabbitmqURL = "amqp://guest:guest@localhost:5672/"
-	}
-	exchangeName := os.Getenv("EVENT_EXCHANGE")
-	if exchangeName == "" {
-		exchangeName = mq.DefaultExchangeName
-	}
-
-	conn, err := amqp.Dial(rabbitmqURL)
-	if err != nil {
-		log.Fatalf("failed to connect rabbitmq: %v", err)
-	}
-	defer conn.Close()
-
-	ch, err := conn.Channel()
-	if err != nil {
-		log.Fatalf("failed to open rabbitmq channel: %v", err)
-	}
-	defer ch.Close()
-
-	repo := outbox.NewRepository(db)
-	worker := outbox.NewWorker(repo, mq.NewRabbitMQPublisher(ch, exchangeName), config, log.Default())
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := serviceutil.SignalContext()
 	defer stop()
 
+	dsn := serviceutil.Env("DB_DSN", "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local")
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	if err != nil {
+		log.Fatalf("mysql_connect_failed error=%v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatalf("mysql_handle_failed error=%v", err)
+	}
+	defer sqlDB.Close()
+	log.Printf("mysql_connected")
+
+	if err := db.AutoMigrate(&outbox.Event{}); err != nil {
+		log.Fatalf("mysql_migrate_failed error=%v", err)
+	}
+	config, err := outbox.LoadConfigFromEnv()
+	if err != nil {
+		log.Fatalf("invalid_outbox_config error=%v", err)
+	}
+
+	exchangeName := serviceutil.Env("EVENT_EXCHANGE", mq.DefaultExchangeName)
+	conn, err := amqp.Dial(serviceutil.Env("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"))
+	if err != nil {
+		log.Fatalf("rabbitmq_connect_failed error=%v", err)
+	}
+	defer conn.Close()
+	log.Printf("rabbitmq_connected")
+
+	channel, err := conn.Channel()
+	if err != nil {
+		log.Fatalf("rabbitmq_channel_open_failed error=%v", err)
+	}
+	defer channel.Close()
+
+	healthServer := serviceutil.StartHTTPServer(
+		"outbox health server",
+		serviceutil.Env("OUTBOX_HEALTH_ADDR", ":8088"),
+		healthcheck.Handler(
+			healthcheck.Dependency{Name: "mysql", Check: healthcheck.SQL(sqlDB)},
+			healthcheck.Dependency{Name: "rabbitmq", Check: healthcheck.AMQP(conn)},
+		),
+	)
+	defer serviceutil.ShutdownHTTPServer(healthServer, 5*time.Second)
+
+	repo := outbox.NewRepository(db)
+	worker := outbox.NewWorker(repo, mq.NewRabbitMQPublisher(channel, exchangeName), config, log.Default())
 	log.Printf(
-		"outbox_worker_started poll_interval=%s batch_size=%d max_retry=%d retry_base_delay=%s",
+		"outbox worker started poll_interval=%s batch_size=%d max_retry=%d retry_base_delay=%s",
 		config.PollInterval,
 		config.BatchSize,
 		config.MaxRetry,
 		config.RetryBaseDelay,
 	)
 	if err := worker.Run(ctx); err != nil && err != context.Canceled {
-		log.Fatalf("outbox worker stopped unexpectedly: %v", err)
+		log.Fatalf("outbox_worker_stopped_unexpectedly error=%v", err)
 	}
+	log.Printf("outbox worker shutdown completed")
 }

@@ -9,10 +9,11 @@ COPY . .
 RUN go build -o cart-service ./cmd/cart-service
 
 FROM alpine:latest
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates wget
 
 WORKDIR /root/
 COPY --from=builder /app/cart-service .
 
 EXPOSE 50054
+EXPOSE 8084
 CMD ["./cart-service"]

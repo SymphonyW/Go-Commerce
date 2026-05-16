@@ -9,10 +9,11 @@ COPY . .
 RUN go build -o merchant-service ./cmd/merchant-service
 
 FROM alpine:latest
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates wget
 
 WORKDIR /root/
 COPY --from=builder /app/merchant-service .
 
 EXPOSE 50055
+EXPOSE 8085
 CMD ["./merchant-service"]

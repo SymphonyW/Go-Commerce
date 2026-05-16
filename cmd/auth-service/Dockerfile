@@ -9,10 +9,11 @@ COPY . .
 RUN go build -o auth-service ./cmd/auth-service
 
 FROM alpine:latest
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates wget
 
 WORKDIR /root/
 COPY --from=builder /app/auth-service .
 
 EXPOSE 50051
+EXPOSE 8081
 CMD ["./auth-service"]

@@ -9,10 +9,11 @@ COPY . .
 RUN go build -o product-service ./cmd/product-service
 
 FROM alpine:latest
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates wget
 
 WORKDIR /root/
 COPY --from=builder /app/product-service .
 
 EXPOSE 50052
+EXPOSE 8082
 CMD ["./product-service"]

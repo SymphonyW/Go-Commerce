@@ -9,9 +9,10 @@ COPY . .
 RUN go build -o notification-service ./cmd/notification-service
 
 FROM alpine:latest
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates wget
 
 WORKDIR /root/
 COPY --from=builder /app/notification-service .
 
+EXPOSE 8087
 CMD ["./notification-service"]

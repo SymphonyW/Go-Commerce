@@ -9,7 +9,7 @@ COPY . .
 RUN go build -o api-gateway ./cmd/api-gateway
 
 FROM alpine:latest
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates wget
 
 WORKDIR /root/
 COPY --from=builder /app/api-gateway .

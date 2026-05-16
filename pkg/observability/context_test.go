@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -33,6 +34,21 @@ func TestUnaryClientInterceptorPropagatesRequestMetadata(t *testing.T) {
 	}
 	if got, want := captured.Get(UserIDMetadataKey), []string{"42"}; len(got) != 1 || got[0] != want[0] {
 		t.Fatalf("unexpected user id metadata: got %v want %v", got, want)
+	}
+}
+
+func TestUnaryClientTimeoutInterceptorAddsDeadlineWhenMissing(t *testing.T) {
+	var sawDeadline bool
+	invoker := func(ctx context.Context, _ string, _, _ any, _ *grpc.ClientConn, _ ...grpc.CallOption) error {
+		_, sawDeadline = ctx.Deadline()
+		return nil
+	}
+
+	if err := UnaryClientTimeoutInterceptor(time.Second)(context.Background(), "/demo.Service/Call", nil, nil, nil, invoker); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !sawDeadline {
+		t.Fatal("expected interceptor to add a deadline")
 	}
 }
 

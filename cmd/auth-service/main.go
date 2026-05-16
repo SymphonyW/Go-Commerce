@@ -1,68 +1,73 @@
-// auth-service 服务入口文件
-// 负责启动认证服务，处理用户注册、登录等认证相关功能
-// 使用gRPC协议提供服务
 package main
 
 import (
 	"log"
 	"net"
-	"os"
+	"time"
 
-	// gRPC服务器：用于提供gRPC服务
 	"google.golang.org/grpc"
-	// MySQL驱动：用于连接MySQL数据库
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"gorm.io/driver/mysql"
-	// GORM：ORM框架，用于数据库操作
 	"gorm.io/gorm"
 
-	// 导入认证服务的protobuf生成代码
 	pb "go-commerce/api/auth"
-	// 导入认证服务的业务逻辑
 	"go-commerce/internal/auth"
+	"go-commerce/pkg/healthcheck"
+	"go-commerce/pkg/serviceutil"
 )
 
-// main 函数是auth-service服务的入口点
-// 负责初始化数据库连接、自动迁移表结构、启动gRPC服务器
 func main() {
-	// 从环境变量获取数据库连接字符串
-	dsn := os.Getenv("DB_DSN")
-	if dsn == "" {
-		// 默认值，用于本地开发
-		dsn = "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
-	}
+	ctx, stop := serviceutil.SignalContext()
+	defer stop()
 
-	// 连接数据库
-	// 使用GORM打开数据库连接
+	dsn := serviceutil.Env("DB_DSN", "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local")
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
-		log.Fatalf("failed to connect database: %v", err)
+		log.Fatalf("mysql_connect_failed error=%v", err)
 	}
-
-	// 自动迁移数据库表结构
-	// 会根据auth.User结构体自动创建或更新数据库表
-	if err := db.AutoMigrate(&auth.User{}); err != nil {
-		log.Fatalf("failed to migrate database: %v", err)
-	}
-
-	// 监听TCP端口
-	// 监听50051端口，用于gRPC服务
-	lis, err := net.Listen("tcp", ":50051")
+	sqlDB, err := db.DB()
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		log.Fatalf("mysql_handle_failed error=%v", err)
+	}
+	defer sqlDB.Close()
+	log.Printf("mysql_connected")
+
+	if err := db.AutoMigrate(&auth.User{}); err != nil {
+		log.Fatalf("mysql_migrate_failed error=%v", err)
 	}
 
-	// 创建gRPC服务器
-	s := grpc.NewServer()
+	healthServer := serviceutil.StartHTTPServer(
+		"auth health server",
+		serviceutil.Env("AUTH_HEALTH_ADDR", ":8081"),
+		healthcheck.Handler(healthcheck.Dependency{Name: "mysql", Check: healthcheck.SQL(sqlDB)}),
+	)
 
-	// 注册认证服务
-	// 将auth.NewService(db)创建的服务实例注册到gRPC服务器
-	pb.RegisterAuthServiceServer(s, auth.NewService(db))
-
-	// 启动服务
-	// 打印服务监听地址
-	log.Printf("auth service listening at %v", lis.Addr())
-	// 启动gRPC服务器，开始接受请求
-	if err := s.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
+	grpcAddr := serviceutil.Env("AUTH_GRPC_ADDR", ":50051")
+	listener, err := net.Listen("tcp", grpcAddr)
+	if err != nil {
+		log.Fatalf("grpc_listen_failed addr=%s error=%v", grpcAddr, err)
 	}
+	server := grpc.NewServer()
+	pb.RegisterAuthServiceServer(server, auth.NewService(db))
+	grpcHealth := healthcheck.RegisterGRPC(server)
+
+	serveErr := make(chan error, 1)
+	go func() {
+		log.Printf("auth service listening at %s", grpcAddr)
+		serveErr <- server.Serve(listener)
+	}()
+
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			log.Fatalf("grpc_server_failed error=%v", err)
+		}
+	case <-ctx.Done():
+		log.Printf("shutdown_started signal=%v", ctx.Err())
+	}
+
+	grpcHealth.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+	serviceutil.ShutdownHTTPServer(healthServer, 5*time.Second)
+	serviceutil.ShutdownGRPCServer(server, 10*time.Second)
+	log.Printf("auth service shutdown completed")
 }
