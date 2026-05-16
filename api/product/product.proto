@@ -41,6 +41,11 @@ message ListProductsRequest {
   int32 page = 1;
   int32 page_size = 2;
   string category = 3;
+  string keyword = 4;
+  string sort_by = 5;
+  string order = 6;
+  optional float min_price = 7;
+  optional float max_price = 8;
 }
 
 message ListProductsResponse {

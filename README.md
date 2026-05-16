@@ -215,6 +215,12 @@ curl -X POST http://localhost:8081/api/login \
 curl http://localhost:8081/api/products
 ```
 
+也可以直接组合分页、分类、搜索、排序与价格区间：
+
+```bash
+curl "http://localhost:8081/api/products?page=2&page_size=20&category=book&keyword=Go&sort_by=price&order=asc&min_price=50&max_price=120"
+```
+
 ### 创建商家
 
 ```bash

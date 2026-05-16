@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	// Gin框架：用于处理HTTP请求和路由
@@ -454,10 +455,26 @@ func (g *APIGateway) handleLogin(c *gin.Context) {
 //
 //	c: Gin上下文，包含请求和响应信息
 func (g *APIGateway) handleListProducts(c *gin.Context) {
-	// 调用产品服务的ListProducts方法
+	page := parseProductPage(c.Query("page"))
+	pageSize := parseProductPageSize(c.Query("page_size"))
+	sortBy, order := normalizeProductSortQuery(c.Query("sort_by"), c.Query("order"))
+	minPrice, hasMinPrice := parseProductPriceQuery(c.Query("min_price"))
+	maxPrice, hasMaxPrice := parseProductPriceQuery(c.Query("max_price"))
+	if hasMinPrice && hasMaxPrice && minPrice > maxPrice {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "min_price must be less than or equal to max_price"})
+		return
+	}
+
+	// 网关先做 HTTP 层输入清洗，再把可用条件完整透传给商品服务。
 	resp, err := g.productClient.ListProducts(context.Background(), &pbProduct.ListProductsRequest{
-		Page:     1,  // 默认页码
-		PageSize: 10, // 默认每页数量
+		Page:     page,
+		PageSize: pageSize,
+		Category: strings.TrimSpace(c.Query("category")),
+		Keyword:  strings.TrimSpace(c.Query("keyword")),
+		SortBy:   sortBy,
+		Order:    order,
+		MinPrice: optionalProductPrice(minPrice, hasMinPrice),
+		MaxPrice: optionalProductPrice(maxPrice, hasMaxPrice),
 	})
 	if err != nil {
 		log.Printf("Error calling product service: %v", err)
@@ -466,6 +483,66 @@ func (g *APIGateway) handleListProducts(c *gin.Context) {
 	}
 	// 返回产品列表
 	c.JSON(http.StatusOK, resp)
+}
+
+func parseProductPage(raw string) int32 {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return 1
+	}
+	return int32(value)
+}
+
+func parseProductPageSize(raw string) int32 {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return 10
+	}
+	if value > 100 {
+		return 100
+	}
+	return int32(value)
+}
+
+func normalizeProductSortQuery(sortBy, order string) (string, string) {
+	invalidSortBy := false
+	switch strings.TrimSpace(sortBy) {
+	case "created_at", "price", "stock":
+		sortBy = strings.TrimSpace(sortBy)
+	default:
+		sortBy = "created_at"
+		invalidSortBy = true
+	}
+
+	if invalidSortBy {
+		return sortBy, "desc"
+	}
+
+	switch strings.ToLower(strings.TrimSpace(order)) {
+	case "asc":
+		order = "asc"
+	case "desc":
+		order = "desc"
+	default:
+		order = "desc"
+	}
+
+	return sortBy, order
+}
+
+func parseProductPriceQuery(raw string) (float32, bool) {
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 32)
+	if err != nil || value < 0 {
+		return 0, false
+	}
+	return float32(value), true
+}
+
+func optionalProductPrice(value float32, present bool) *float32 {
+	if !present {
+		return nil
+	}
+	return &value
 }
 
 // handleGetProduct 处理获取单个产品详情请求

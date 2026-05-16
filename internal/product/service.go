@@ -4,6 +4,7 @@ package product
 
 import (
 	"context"
+	"strings"
 	// gRPC状态码：用于返回标准化的错误信息
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -18,15 +19,18 @@ import (
 // 实现了ProductServiceServer接口
 
 type Service struct {
-	pb.UnimplementedProductServiceServer // 嵌入未实现的ProductServiceServer，以保持向后兼容性
-	db *gorm.DB                         // 数据库连接
+	pb.UnimplementedProductServiceServer          // 嵌入未实现的ProductServiceServer，以保持向后兼容性
+	db                                   *gorm.DB // 数据库连接
 }
 
 // NewService 创建产品服务实例
 // 参数：
-//   db: 数据库连接
+//
+//	db: 数据库连接
+//
 // 返回值：
-//   *Service: 产品服务实例
+//
+//	*Service: 产品服务实例
 func NewService(db *gorm.DB) *Service {
 	return &Service{db: db}
 }
@@ -34,20 +38,23 @@ func NewService(db *gorm.DB) *Service {
 // CreateProduct 创建产品：创建新的产品记录
 // 功能：创建新产品，设置商品归属商家
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 产品创建请求，包含产品的详细信息
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 产品创建请求，包含产品的详细信息
+//
 // 返回值：
-//   *pb.CreateProductResponse: 产品创建响应，包含创建的产品信息
-//   error: 错误信息
+//
+//	*pb.CreateProductResponse: 产品创建响应，包含创建的产品信息
+//	error: 错误信息
 func (s *Service) CreateProduct(ctx context.Context, req *pb.CreateProductRequest) (*pb.CreateProductResponse, error) {
 	// 构建产品对象
 	product := Product{
-		Name:        req.Name,        // 产品名称
-		Description: req.Description, // 产品描述
-		Price:       float64(req.Price), // 产品价格
-		Stock:       req.Stock,       // 产品库存
-		Category:    req.Category,    // 产品分类
-		ImageURL:    req.ImageUrl,    // 产品图片URL
+		Name:        req.Name,             // 产品名称
+		Description: req.Description,      // 产品描述
+		Price:       float64(req.Price),   // 产品价格
+		Stock:       req.Stock,            // 产品库存
+		Category:    req.Category,         // 产品分类
+		ImageURL:    req.ImageUrl,         // 产品图片URL
 		MerchantID:  uint(req.MerchantId), // 设置商家ID
 	}
 
@@ -64,11 +71,14 @@ func (s *Service) CreateProduct(ctx context.Context, req *pb.CreateProductReques
 
 // GetProduct 获取产品：根据ID获取产品详情
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 获取产品请求，包含产品ID
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 获取产品请求，包含产品ID
+//
 // 返回值：
-//   *pb.GetProductResponse: 获取产品响应，包含产品详情
-//   error: 错误信息
+//
+//	*pb.GetProductResponse: 获取产品响应，包含产品详情
+//	error: 错误信息
 func (s *Service) GetProduct(ctx context.Context, req *pb.GetProductRequest) (*pb.GetProductResponse, error) {
 	// 查找产品
 	var product Product
@@ -85,29 +95,47 @@ func (s *Service) GetProduct(ctx context.Context, req *pb.GetProductRequest) (*p
 	}, nil
 }
 
-// ListProducts 列出产品：获取产品列表，支持分页和分类筛选
+// ListProducts 列出产品：获取产品列表，支持分页、分类、关键词、价格区间和排序
 // 参数：
-//   ctx: 上下文，用于控制请求的生命周期
-//   req: 列出产品请求，包含页码、每页数量和可选的分类筛选
+//
+//	ctx: 上下文，用于控制请求的生命周期
+//	req: 列出产品请求，包含分页、过滤与排序参数
+//
 // 返回值：
-//   *pb.ListProductsResponse: 列出产品响应，包含产品列表和总数
-//   error: 错误信息
+//
+//	*pb.ListProductsResponse: 列出产品响应，包含产品列表和总数
+//	error: 错误信息
 func (s *Service) ListProducts(ctx context.Context, req *pb.ListProductsRequest) (*pb.ListProductsResponse, error) {
 	var products []Product
 	var total int64
 
-	// 构建查询
-	query := s.db.Model(&Product{})
-	// 如果指定了分类，则按分类筛选
-	if req.Category != "" {
-		query = query.Where("category = ?", req.Category)
+	if req == nil {
+		req = &pb.ListProductsRequest{}
 	}
 
-	// 获取总数
-	query.Count(&total)
-	// 分页查询
-	offset := (req.Page - 1) * req.PageSize
-	query.Offset(int(offset)).Limit(int(req.PageSize)).Find(&products)
+	page, pageSize := normalizeProductPagination(req.Page, req.PageSize)
+	if req.MinPrice != nil && req.MaxPrice != nil && *req.MinPrice > *req.MaxPrice {
+		return nil, status.Error(codes.InvalidArgument, "min_price must be less than or equal to max_price")
+	}
+
+	// 先统一拼好过滤条件，再分别用于 Count 与分页查询，确保 total 与列表结果属于同一个条件集合。
+	filteredQuery := applyProductFilters(s.db.Model(&Product{}), req)
+	if err := filteredQuery.Session(&gorm.Session{}).Count(&total).Error; err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to count products: %v", err)
+	}
+
+	// 排序字段只允许白名单值，且追加 id 作为次级排序键，避免同值时翻页抖动。
+	sortBy, order := normalizeProductSort(req.SortBy, req.Order)
+	offset := (page - 1) * pageSize
+	if err := filteredQuery.
+		Session(&gorm.Session{}).
+		Order(sortBy + " " + order).
+		Order("id " + order).
+		Offset(int(offset)).
+		Limit(int(pageSize)).
+		Find(&products).Error; err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to list products: %v", err)
+	}
 
 	// 转换为proto对象
 	pbProducts := make([]*pb.Product, len(products))
@@ -122,20 +150,88 @@ func (s *Service) ListProducts(ctx context.Context, req *pb.ListProductsRequest)
 	}, nil
 }
 
+const (
+	defaultProductPage     int32 = 1
+	defaultProductPageSize int32 = 10
+	maxProductPageSize     int32 = 100
+)
+
+func normalizeProductPagination(page, pageSize int32) (int32, int32) {
+	if page <= 0 {
+		page = defaultProductPage
+	}
+	if pageSize <= 0 {
+		pageSize = defaultProductPageSize
+	}
+	if pageSize > maxProductPageSize {
+		pageSize = maxProductPageSize
+	}
+	return page, pageSize
+}
+
+func applyProductFilters(query *gorm.DB, req *pb.ListProductsRequest) *gorm.DB {
+	if category := strings.TrimSpace(req.Category); category != "" {
+		query = query.Where("category = ?", category)
+	}
+
+	// 当前阶段先用 LIKE 完成关键词检索，未来若升级全文检索，这里可以自然替换为专用搜索实现。
+	if keyword := strings.TrimSpace(req.Keyword); keyword != "" {
+		pattern := "%" + keyword + "%"
+		query = query.Where("(name LIKE ? OR description LIKE ?)", pattern, pattern)
+	}
+
+	if req.MinPrice != nil {
+		query = query.Where("price >= ?", *req.MinPrice)
+	}
+	if req.MaxPrice != nil {
+		query = query.Where("price <= ?", *req.MaxPrice)
+	}
+	return query
+}
+
+func normalizeProductSort(sortBy, order string) (string, string) {
+	invalidSortBy := false
+	switch strings.TrimSpace(sortBy) {
+	case "price", "stock", "created_at":
+		sortBy = strings.TrimSpace(sortBy)
+	default:
+		sortBy = "created_at"
+		invalidSortBy = true
+	}
+
+	if invalidSortBy {
+		return sortBy, "desc"
+	}
+
+	switch strings.ToLower(strings.TrimSpace(order)) {
+	case "asc":
+		order = "asc"
+	case "desc":
+		order = "desc"
+	default:
+		order = "desc"
+	}
+
+	return sortBy, order
+}
+
 // convertToPBProduct 转换产品模型为proto对象
 // 参数：
-//   product: 产品模型对象
+//
+//	product: 产品模型对象
+//
 // 返回值：
-//   *pb.Product: proto产品对象
+//
+//	*pb.Product: proto产品对象
 func convertToPBProduct(product *Product) *pb.Product {
 	return &pb.Product{
-		Id:          int64(product.ID),          // 产品ID
-		Name:        product.Name,               // 产品名称
-		Description: product.Description,        // 产品描述
-		Price:       float32(product.Price),     // 产品价格
-		Stock:       int32(product.Stock),       // 产品库存
-		Category:    product.Category,           // 产品分类
-		ImageUrl:    product.ImageURL,           // 产品图片URL
-		MerchantId:  int64(product.MerchantID),  // 商家ID
+		Id:          int64(product.ID),         // 产品ID
+		Name:        product.Name,              // 产品名称
+		Description: product.Description,       // 产品描述
+		Price:       float32(product.Price),    // 产品价格
+		Stock:       int32(product.Stock),      // 产品库存
+		Category:    product.Category,          // 产品分类
+		ImageUrl:    product.ImageURL,          // 产品图片URL
+		MerchantId:  int64(product.MerchantID), // 商家ID
 	}
 }

@@ -56,8 +56,8 @@ export const productAPI = {
    * 获取产品列表
    * @returns {Promise} 产品列表
    */
-  listProducts: async () => {
-    const response = await api.get('/products');
+  listProducts: async (params = {}) => {
+    const response = await api.get('/products', { params });
     return response.data;
   },
   /**

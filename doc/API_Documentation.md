@@ -41,11 +41,17 @@
 ### 2.1 获取产品列表
 
 - **端点**：`GET /api/products`
-- **描述**：获取产品列表，支持分页和分类筛选
+- **描述**：获取产品列表，支持分页、分类、关键词、价格区间与排序
 - **参数**：
-  - `page` (int)：页码，默认1
-  - `page_size` (int)：每页数量，默认10
+  - `page` (int)：页码，默认 `1`
+  - `page_size` (int)：每页数量，默认 `10`，最大 `100`
   - `category` (string)：分类筛选
+  - `keyword` (string)：关键词，匹配商品名称或描述
+  - `sort_by` (string)：排序字段，可选 `created_at` / `price` / `stock`，默认 `created_at`
+  - `order` (string)：排序方向，可选 `asc` / `desc`，默认 `desc`
+  - `min_price` (float)：最低价格
+  - `max_price` (float)：最高价格，若同时传入时必须大于或等于 `min_price`
+- **示例**：`GET /api/products?page=2&page_size=20&category=book&keyword=Go&sort_by=price&order=asc&min_price=50&max_price=120`
 - **响应**：
   ```json
   {

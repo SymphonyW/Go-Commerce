@@ -15,6 +15,7 @@ import (
 	pbMerchant "go-commerce/api/merchant"
 	pbOrder "go-commerce/api/order"
 	pbPayment "go-commerce/api/payment"
+	pbProduct "go-commerce/api/product"
 	appjwt "go-commerce/pkg/jwt"
 )
 
@@ -190,6 +191,10 @@ type fakePaymentClient struct {
 	lastSucceededReq     *pbPayment.PaymentActionRequest
 }
 
+type fakeProductClient struct {
+	lastListProductsReq *pbProduct.ListProductsRequest
+}
+
 func (f *fakePaymentClient) CreatePayment(ctx context.Context, in *pbPayment.CreatePaymentRequest, opts ...grpc.CallOption) (*pbPayment.CreatePaymentResponse, error) {
 	f.lastCreatePaymentReq = in
 	return &pbPayment.CreatePaymentResponse{
@@ -246,6 +251,27 @@ func (f *fakeMerchantClient) AddProduct(ctx context.Context, in *pbMerchant.AddP
 
 func (f *fakeMerchantClient) DeleteProduct(ctx context.Context, in *pbMerchant.DeleteProductRequest, opts ...grpc.CallOption) (*pbMerchant.DeleteProductResponse, error) {
 	return &pbMerchant.DeleteProductResponse{Success: true}, nil
+}
+
+func (f *fakeProductClient) CreateProduct(context.Context, *pbProduct.CreateProductRequest, ...grpc.CallOption) (*pbProduct.CreateProductResponse, error) {
+	return nil, nil
+}
+
+func (f *fakeProductClient) GetProduct(context.Context, *pbProduct.GetProductRequest, ...grpc.CallOption) (*pbProduct.GetProductResponse, error) {
+	return nil, nil
+}
+
+func (f *fakeProductClient) ListProducts(ctx context.Context, in *pbProduct.ListProductsRequest, opts ...grpc.CallOption) (*pbProduct.ListProductsResponse, error) {
+	f.lastListProductsReq = in
+	return &pbProduct.ListProductsResponse{}, nil
+}
+
+func (f *fakeProductClient) UpdateProduct(context.Context, *pbProduct.UpdateProductRequest, ...grpc.CallOption) (*pbProduct.UpdateProductResponse, error) {
+	return nil, nil
+}
+
+func (f *fakeProductClient) DeleteProduct(context.Context, *pbProduct.DeleteProductRequest, ...grpc.CallOption) (*pbProduct.DeleteProductResponse, error) {
+	return nil, nil
 }
 
 func TestMerchantWriteRoutesRequireAuthentication(t *testing.T) {
@@ -358,6 +384,126 @@ func TestHandleCreatePaymentInjectsCurrentUser(t *testing.T) {
 	}
 	if got, want := client.lastCreatePaymentReq.UserId, int64(7); got != want {
 		t.Fatalf("unexpected user id: got %d want %d", got, want)
+	}
+}
+
+func TestHandleListProductsForwardsQueryParameters(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	client := &fakeProductClient{}
+	gateway := &APIGateway{productClient: client}
+	router := gin.New()
+	router.GET("/api/products", gateway.handleListProducts)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/products?page=2&page_size=25&category=book&keyword=Go&sort_by=price&order=asc&min_price=10.5&max_price=99.9",
+		nil,
+	)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusOK; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+	if client.lastListProductsReq == nil {
+		t.Fatal("expected ListProducts to be called")
+	}
+	if got, want := client.lastListProductsReq.Page, int32(2); got != want {
+		t.Fatalf("unexpected page: got %d want %d", got, want)
+	}
+	if got, want := client.lastListProductsReq.PageSize, int32(25); got != want {
+		t.Fatalf("unexpected page size: got %d want %d", got, want)
+	}
+	if got, want := client.lastListProductsReq.Category, "book"; got != want {
+		t.Fatalf("unexpected category: got %q want %q", got, want)
+	}
+	if got, want := client.lastListProductsReq.Keyword, "Go"; got != want {
+		t.Fatalf("unexpected keyword: got %q want %q", got, want)
+	}
+	if got, want := client.lastListProductsReq.SortBy, "price"; got != want {
+		t.Fatalf("unexpected sort_by: got %q want %q", got, want)
+	}
+	if got, want := client.lastListProductsReq.Order, "asc"; got != want {
+		t.Fatalf("unexpected order: got %q want %q", got, want)
+	}
+	if client.lastListProductsReq.MinPrice == nil || *client.lastListProductsReq.MinPrice != float32(10.5) {
+		t.Fatalf("unexpected min_price: got %v want 10.5", client.lastListProductsReq.MinPrice)
+	}
+	if client.lastListProductsReq.MaxPrice == nil || *client.lastListProductsReq.MaxPrice != float32(99.9) {
+		t.Fatalf("unexpected max_price: got %v want 99.9", client.lastListProductsReq.MaxPrice)
+	}
+}
+
+func TestHandleListProductsSanitizesInvalidPaginationAndSort(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	client := &fakeProductClient{}
+	gateway := &APIGateway{productClient: client}
+	router := gin.New()
+	router.GET("/api/products", gateway.handleListProducts)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/products?page=0&page_size=999&sort_by=name&order=random", nil)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusOK; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+	if got, want := client.lastListProductsReq.Page, int32(1); got != want {
+		t.Fatalf("unexpected default page: got %d want %d", got, want)
+	}
+	if got, want := client.lastListProductsReq.PageSize, int32(100); got != want {
+		t.Fatalf("unexpected capped page size: got %d want %d", got, want)
+	}
+	if got, want := client.lastListProductsReq.SortBy, "created_at"; got != want {
+		t.Fatalf("unexpected default sort_by: got %q want %q", got, want)
+	}
+	if got, want := client.lastListProductsReq.Order, "desc"; got != want {
+		t.Fatalf("unexpected default order: got %q want %q", got, want)
+	}
+}
+
+func TestHandleListProductsUsesDefaultPageSizeForNonPositiveValues(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	client := &fakeProductClient{}
+	gateway := &APIGateway{productClient: client}
+	router := gin.New()
+	router.GET("/api/products", gateway.handleListProducts)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/products?page=-3&page_size=-5", nil)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusOK; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+	if got, want := client.lastListProductsReq.Page, int32(1); got != want {
+		t.Fatalf("unexpected default page: got %d want %d", got, want)
+	}
+	if got, want := client.lastListProductsReq.PageSize, int32(10); got != want {
+		t.Fatalf("unexpected default page size: got %d want %d", got, want)
+	}
+}
+
+func TestHandleListProductsRejectsInvalidPriceRange(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	client := &fakeProductClient{}
+	gateway := &APIGateway{productClient: client}
+	router := gin.New()
+	router.GET("/api/products", gateway.handleListProducts)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/products?min_price=100&max_price=10", nil)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusBadRequest; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+	if client.lastListProductsReq != nil {
+		t.Fatal("expected ListProducts not to be called for invalid price range")
 	}
 }
 

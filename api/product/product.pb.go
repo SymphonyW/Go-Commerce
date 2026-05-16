@@ -4,7 +4,7 @@
 // 	protoc        v5.29.3
 // source: api/product/product.proto
 
-package __
+package product
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -350,6 +350,11 @@ type ListProductsRequest struct {
 	Page          int32                  `protobuf:"varint,1,opt,name=page,proto3" json:"page,omitempty"`
 	PageSize      int32                  `protobuf:"varint,2,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
 	Category      string                 `protobuf:"bytes,3,opt,name=category,proto3" json:"category,omitempty"`
+	Keyword       string                 `protobuf:"bytes,4,opt,name=keyword,proto3" json:"keyword,omitempty"`
+	SortBy        string                 `protobuf:"bytes,5,opt,name=sort_by,json=sortBy,proto3" json:"sort_by,omitempty"`
+	Order         string                 `protobuf:"bytes,6,opt,name=order,proto3" json:"order,omitempty"`
+	MinPrice      *float32               `protobuf:"fixed32,7,opt,name=min_price,json=minPrice,proto3,oneof" json:"min_price,omitempty"`
+	MaxPrice      *float32               `protobuf:"fixed32,8,opt,name=max_price,json=maxPrice,proto3,oneof" json:"max_price,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -403,6 +408,41 @@ func (x *ListProductsRequest) GetCategory() string {
 		return x.Category
 	}
 	return ""
+}
+
+func (x *ListProductsRequest) GetKeyword() string {
+	if x != nil {
+		return x.Keyword
+	}
+	return ""
+}
+
+func (x *ListProductsRequest) GetSortBy() string {
+	if x != nil {
+		return x.SortBy
+	}
+	return ""
+}
+
+func (x *ListProductsRequest) GetOrder() string {
+	if x != nil {
+		return x.Order
+	}
+	return ""
+}
+
+func (x *ListProductsRequest) GetMinPrice() float32 {
+	if x != nil && x.MinPrice != nil {
+		return *x.MinPrice
+	}
+	return 0
+}
+
+func (x *ListProductsRequest) GetMaxPrice() float32 {
+	if x != nil && x.MaxPrice != nil {
+		return *x.MaxPrice
+	}
+	return 0
 }
 
 type ListProductsResponse struct {
@@ -710,11 +750,20 @@ const file_api_product_product_proto_rawDesc = "" +
 	"\x11GetProductRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\"@\n" +
 	"\x12GetProductResponse\x12*\n" +
-	"\aproduct\x18\x01 \x01(\v2\x10.product.ProductR\aproduct\"b\n" +
+	"\aproduct\x18\x01 \x01(\v2\x10.product.ProductR\aproduct\"\x8b\x02\n" +
 	"\x13ListProductsRequest\x12\x12\n" +
 	"\x04page\x18\x01 \x01(\x05R\x04page\x12\x1b\n" +
 	"\tpage_size\x18\x02 \x01(\x05R\bpageSize\x12\x1a\n" +
-	"\bcategory\x18\x03 \x01(\tR\bcategory\"Z\n" +
+	"\bcategory\x18\x03 \x01(\tR\bcategory\x12\x18\n" +
+	"\akeyword\x18\x04 \x01(\tR\akeyword\x12\x17\n" +
+	"\asort_by\x18\x05 \x01(\tR\x06sortBy\x12\x14\n" +
+	"\x05order\x18\x06 \x01(\tR\x05order\x12 \n" +
+	"\tmin_price\x18\a \x01(\x02H\x00R\bminPrice\x88\x01\x01\x12 \n" +
+	"\tmax_price\x18\b \x01(\x02H\x01R\bmaxPrice\x88\x01\x01B\f\n" +
+	"\n" +
+	"_min_priceB\f\n" +
+	"\n" +
+	"_max_price\"Z\n" +
 	"\x14ListProductsResponse\x12,\n" +
 	"\bproducts\x18\x01 \x03(\v2\x10.product.ProductR\bproducts\x12\x14\n" +
 	"\x05total\x18\x02 \x01(\x03R\x05total\"\xa7\x02\n" +
@@ -745,7 +794,7 @@ const file_api_product_product_proto_rawDesc = "" +
 	"GetProduct\x12\x1a.product.GetProductRequest\x1a\x1b.product.GetProductResponse\x12K\n" +
 	"\fListProducts\x12\x1c.product.ListProductsRequest\x1a\x1d.product.ListProductsResponse\x12N\n" +
 	"\rUpdateProduct\x12\x1d.product.UpdateProductRequest\x1a\x1e.product.UpdateProductResponse\x12N\n" +
-	"\rDeleteProduct\x12\x1d.product.DeleteProductRequest\x1a\x1e.product.DeleteProductResponseB\x04Z\x02./b\x06proto3"
+	"\rDeleteProduct\x12\x1d.product.DeleteProductRequest\x1a\x1e.product.DeleteProductResponseB\x19Z\x17go-commerce/api/productb\x06proto3"
 
 var (
 	file_api_product_product_proto_rawDescOnce sync.Once
@@ -800,6 +849,7 @@ func file_api_product_product_proto_init() {
 	if File_api_product_product_proto != nil {
 		return
 	}
+	file_api_product_product_proto_msgTypes[5].OneofWrappers = []any{}
 	file_api_product_product_proto_msgTypes[7].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
