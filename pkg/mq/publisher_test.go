@@ -10,6 +10,7 @@ import (
 	"github.com/streadway/amqp"
 
 	"go-commerce/pkg/events"
+	"go-commerce/pkg/observability"
 )
 
 type fakeChannel struct {
@@ -85,6 +86,19 @@ func TestRabbitMQPublisherPublishesJSONMessage(t *testing.T) {
 	}
 	if got, want := decoded.OrderID, int64(10); got != want {
 		t.Fatalf("unexpected order id: got %d want %d", got, want)
+	}
+}
+
+func TestRabbitMQPublisherCopiesRequestIDToCorrelationID(t *testing.T) {
+	channel := &fakeChannel{}
+	publisher := NewRabbitMQPublisher(channel, "ecommerce.events")
+	ctx := observability.WithRequestID(context.Background(), "req-789")
+
+	if err := publisher.Publish(ctx, events.OrderCreatedType, events.OrderCreatedEvent{}); err != nil {
+		t.Fatalf("Publish returned error: %v", err)
+	}
+	if got, want := channel.publishedMessage.CorrelationId, "req-789"; got != want {
+		t.Fatalf("unexpected correlation id: got %q want %q", got, want)
 	}
 }
 

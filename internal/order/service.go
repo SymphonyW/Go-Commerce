@@ -5,11 +5,12 @@ package order
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"math"
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	// gRPC状态码：用于返回标准化的错误信息
@@ -29,6 +30,7 @@ import (
 	"go-commerce/internal/product"
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
+	"go-commerce/pkg/observability"
 )
 
 // Service 订单服务结构体
@@ -42,6 +44,7 @@ type Service struct {
 	paymentTimeout                     time.Duration
 	idempotency                        *idempotency.Service
 	outboxRepo                         outbox.EventRepository
+	metrics                            *observability.Metrics
 }
 
 // NewService 创建订单服务实例
@@ -59,6 +62,10 @@ func NewService(db *gorm.DB, publisher mq.Publisher) *Service {
 
 // NewServiceWithTimeout 允许在测试和启动阶段注入超时调度器及支付窗口。
 func NewServiceWithTimeout(db *gorm.DB, publisher mq.Publisher, scheduler TimeoutScheduler, paymentTimeout time.Duration) *Service {
+	return NewServiceWithTimeoutAndMetrics(db, publisher, scheduler, paymentTimeout, nil)
+}
+
+func NewServiceWithTimeoutAndMetrics(db *gorm.DB, publisher mq.Publisher, scheduler TimeoutScheduler, paymentTimeout time.Duration, metrics *observability.Metrics) *Service {
 	if publisher == nil {
 		publisher = mq.NopPublisher{}
 	}
@@ -75,6 +82,7 @@ func NewServiceWithTimeout(db *gorm.DB, publisher mq.Publisher, scheduler Timeou
 		paymentTimeout:   paymentTimeout,
 		idempotency:      idempotency.NewService(db, 24*time.Hour),
 		outboxRepo:       outbox.NewRepository(db),
+		metrics:          metrics,
 	}
 }
 
@@ -90,6 +98,11 @@ func NewServiceWithTimeout(db *gorm.DB, publisher mq.Publisher, scheduler Timeou
 //	*pb.CreateOrderResponse: 订单创建响应，包含创建的订单信息
 //	error: 错误信息
 func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (*pb.CreateOrderResponse, error) {
+	success := false
+	defer func() {
+		s.metrics.RecordOrderCreated(success)
+	}()
+
 	if req.IdempotencyKey == "" {
 		return nil, status.Error(codes.InvalidArgument, "idempotency key required")
 	}
@@ -118,6 +131,7 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 		if err := idempotency.ReplayInto(idempotencyResult.Record, &replay); err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to replay create order response: %v", err)
 		}
+		success = true
 		return &replay, nil
 	}
 
@@ -137,6 +151,9 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 	// ??????????????????????????????????????
 	orderItems, totalAmount, err := buildOrderSnapshots(tx, aggregatedItems)
 	if err != nil {
+		if strings.Contains(status.Convert(err).Message(), "insufficient stock") {
+			s.metrics.RecordInsufficientStock()
+		}
 		tx.Rollback()
 		_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 		return nil, err
@@ -165,7 +182,7 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 	}
 
 	// 订单事件与订单、订单项、库存扣减同事务提交，避免业务成功后事件丢失。
-	orderEvent := newOrderCreatedEvent(&order, req.UserId, totalAmount, orderItems)
+	orderEvent := newOrderCreatedEvent(ctx, &order, req.UserId, totalAmount, orderItems)
 	if _, err := s.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
 		AggregateType: "order",
 		AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
@@ -183,15 +200,14 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 	}
 
 	// ???????????????????????????????
-	timeoutEvent := newOrderTimeoutCheckEvent(&order, req.UserId, s.paymentTimeout)
+	timeoutEvent := newOrderTimeoutCheckEvent(ctx, &order, req.UserId, s.paymentTimeout)
 	if err := s.timeoutScheduler.Schedule(ctx, timeoutEvent, s.paymentTimeout); err != nil {
-		log.Printf(
-			"timeout_schedule_failed event_type=%s event_id=%s order_id=%d user_id=%d error=%v",
-			timeoutEvent.EventType,
-			timeoutEvent.EventID,
-			order.ID,
-			req.UserId,
-			err,
+		slog.ErrorContext(ctx, "timeout_schedule_failed",
+			"event_type", timeoutEvent.EventType,
+			"event_id", timeoutEvent.EventID,
+			"order_id", order.ID,
+			"user_id", req.UserId,
+			"error", err,
 		)
 	}
 
@@ -199,6 +215,7 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 	if err := s.idempotency.Complete(ctx, idempotencyResult.Record.ID, http.StatusOK, response); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to finalize create order idempotency record: %v", err)
 	}
+	success = true
 	return response, nil
 }
 
@@ -228,7 +245,7 @@ func newCreateOrderFingerprint(userID int64, items []aggregatedCreateOrderItem) 
 	return createOrderFingerprint{UserID: userID, Items: fingerprintItems}
 }
 
-func newOrderCreatedEvent(order *Order, userID int64, totalAmount float64, items []OrderItem) events.OrderCreatedEvent {
+func newOrderCreatedEvent(ctx context.Context, order *Order, userID int64, totalAmount float64, items []OrderItem) events.OrderCreatedEvent {
 	eventItems := make([]events.OrderItemSnapshot, len(items))
 	for i, item := range items {
 		eventItems[i] = events.OrderItemSnapshot{
@@ -241,7 +258,7 @@ func newOrderCreatedEvent(order *Order, userID int64, totalAmount float64, items
 	}
 
 	return events.OrderCreatedEvent{
-		BaseEvent:   events.NewBaseEvent(events.OrderCreatedType, time.Now()),
+		BaseEvent:   events.NewBaseEventWithContext(ctx, events.OrderCreatedType, time.Now()),
 		OrderID:     int64(order.ID),
 		UserID:      userID,
 		TotalAmount: totalAmount,
@@ -249,10 +266,10 @@ func newOrderCreatedEvent(order *Order, userID int64, totalAmount float64, items
 	}
 }
 
-func newOrderTimeoutCheckEvent(order *Order, userID int64, timeout time.Duration) events.OrderTimeoutCheckEvent {
+func newOrderTimeoutCheckEvent(ctx context.Context, order *Order, userID int64, timeout time.Duration) events.OrderTimeoutCheckEvent {
 	createdAt := order.OrderDate.UTC()
 	return events.OrderTimeoutCheckEvent{
-		BaseEvent:      events.NewBaseEvent(events.OrderTimeoutCheckType, time.Now()),
+		BaseEvent:      events.NewBaseEventWithContext(ctx, events.OrderTimeoutCheckType, time.Now()),
 		OrderID:        int64(order.ID),
 		UserID:         userID,
 		CreatedAt:      createdAt.Format(time.RFC3339Nano),
@@ -479,7 +496,7 @@ func (s *Service) GetOrder(ctx context.Context, req *pb.GetOrderRequest) (*pb.Ge
 func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (*pb.CancelOrderResponse, error) {
 	_, changed, err := cancelOrderWithReason(s.db, req.Id, req.UserId, OrderCancelReasonUserCancelled, func(tx *gorm.DB, order *Order) error {
 		event := events.OrderCancelledEvent{
-			BaseEvent: events.NewBaseEvent(events.OrderCancelledType, time.Now()),
+			BaseEvent: events.NewBaseEventWithContext(ctx, events.OrderCancelledType, time.Now()),
 			OrderID:   int64(order.ID),
 			UserID:    req.UserId,
 			Reason:    OrderCancelReasonUserCancelled,
@@ -605,7 +622,7 @@ func (s *Service) ShipOrder(ctx context.Context, req *pb.ShipOrderRequest) (*pb.
 	if err := TransitionTo(&order, OrderStatusShipped); err != nil {
 		return nil, orderStatusError(err)
 	}
-	statusEvent := newOrderStatusChangedEvent(events.OrderShippedType, &order, fromStatus, OrderStatusShipped)
+	statusEvent := newOrderStatusChangedEvent(ctx, events.OrderShippedType, &order, fromStatus, OrderStatusShipped)
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Save(&order).Error; err != nil {
 			return err
@@ -638,7 +655,7 @@ func (s *Service) CompleteOrder(ctx context.Context, req *pb.CompleteOrderReques
 	if err := TransitionTo(&order, OrderStatusCompleted); err != nil {
 		return nil, orderStatusError(err)
 	}
-	statusEvent := newOrderStatusChangedEvent(events.OrderCompletedType, &order, fromStatus, OrderStatusCompleted)
+	statusEvent := newOrderStatusChangedEvent(ctx, events.OrderCompletedType, &order, fromStatus, OrderStatusCompleted)
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Save(&order).Error; err != nil {
 			return err
@@ -711,22 +728,21 @@ func uniqueMerchantIDs(orderItems []OrderItem) []uint {
 }
 
 func (s *Service) publishOrderStatusChanged(ctx context.Context, eventType string, order *Order, fromStatus, toStatus string) {
-	event := newOrderStatusChangedEvent(eventType, order, fromStatus, toStatus)
+	event := newOrderStatusChangedEvent(ctx, eventType, order, fromStatus, toStatus)
 	if err := s.publisher.Publish(ctx, eventType, event); err != nil {
-		log.Printf(
-			"event_publish_failed event_type=%s event_id=%s order_id=%d user_id=%d error=%v",
-			event.EventType,
-			event.EventID,
-			order.ID,
-			order.UserID,
-			err,
+		slog.ErrorContext(ctx, "event_publish_failed",
+			"event_type", event.EventType,
+			"event_id", event.EventID,
+			"order_id", order.ID,
+			"user_id", order.UserID,
+			"error", err,
 		)
 	}
 }
 
-func newOrderStatusChangedEvent(eventType string, order *Order, fromStatus, toStatus string) events.OrderStatusChangedEvent {
+func newOrderStatusChangedEvent(ctx context.Context, eventType string, order *Order, fromStatus, toStatus string) events.OrderStatusChangedEvent {
 	return events.OrderStatusChangedEvent{
-		BaseEvent:  events.NewBaseEvent(eventType, time.Now()),
+		BaseEvent:  events.NewBaseEventWithContext(ctx, eventType, time.Now()),
 		OrderID:    int64(order.ID),
 		UserID:     int64(order.UserID),
 		FromStatus: fromStatus,

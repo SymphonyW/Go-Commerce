@@ -1,10 +1,13 @@
 package events
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"time"
+
+	"go-commerce/pkg/observability"
 )
 
 const (
@@ -23,6 +26,8 @@ type BaseEvent struct {
 	EventID    string `json:"event_id"`
 	EventType  string `json:"event_type"`
 	OccurredAt string `json:"occurred_at"`
+	RequestID  string `json:"request_id,omitempty"`
+	TraceID    string `json:"trace_id,omitempty"`
 }
 
 // GetEventID 让消息发布器可以把业务事件 ID 同步写入 AMQP MessageId。
@@ -100,6 +105,15 @@ func NewBaseEvent(eventType string, occurredAt time.Time) BaseEvent {
 		EventType:  eventType,
 		OccurredAt: occurredAt.UTC().Format(time.RFC3339Nano),
 	}
+}
+
+// NewBaseEventWithContext 会把入口请求的关联字段写入事件负载，
+// 即使事件稍后由 outbox worker 异步投递，也仍能沿链路回溯到原始请求。
+func NewBaseEventWithContext(ctx context.Context, eventType string, occurredAt time.Time) BaseEvent {
+	event := NewBaseEvent(eventType, occurredAt)
+	event.RequestID = observability.RequestIDFromContext(ctx)
+	event.TraceID = observability.TraceIDFromContext(ctx)
+	return event
 }
 
 func newEventID() string {

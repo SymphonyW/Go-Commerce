@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/streadway/amqp"
+
+	"go-commerce/pkg/observability"
 )
 
 const (
@@ -18,6 +20,10 @@ const (
 // Publisher 抽象消息发布能力，让业务层不直接依赖 RabbitMQ SDK。
 type Publisher interface {
 	Publish(ctx context.Context, routingKey string, event interface{}) error
+}
+
+type PublishObserver interface {
+	RecordMQPublish(eventType string, success bool)
 }
 
 // Channel 描述 RabbitMQPublisher 真正需要的 AMQP 能力，便于在单元测试中替换。
@@ -96,6 +102,9 @@ func (p *RabbitMQPublisher) Publish(ctx context.Context, routingKey string, even
 		Timestamp:    p.now().UTC(),
 		Body:         body,
 	}
+	if requestID := observability.RequestIDFromContext(ctx); requestID != "" {
+		message.CorrelationId = requestID
+	}
 	if identified, ok := event.(identifiedEvent); ok {
 		message.MessageId = identified.GetEventID()
 	}
@@ -112,4 +121,25 @@ type NopPublisher struct{}
 
 func (NopPublisher) Publish(ctx context.Context, routingKey string, event interface{}) error {
 	return nil
+}
+
+// InstrumentedPublisher 在不改变业务层发布接口的前提下，补充 MQ 成功/失败指标。
+type InstrumentedPublisher struct {
+	inner    Publisher
+	observer PublishObserver
+}
+
+func NewInstrumentedPublisher(inner Publisher, observer PublishObserver) Publisher {
+	if inner == nil {
+		inner = NopPublisher{}
+	}
+	return &InstrumentedPublisher{inner: inner, observer: observer}
+}
+
+func (p *InstrumentedPublisher) Publish(ctx context.Context, routingKey string, event interface{}) error {
+	err := p.inner.Publish(ctx, routingKey, event)
+	if p.observer != nil {
+		p.observer.RecordMQPublish(routingKey, err == nil)
+	}
+	return err
 }

@@ -182,6 +182,31 @@ func TestHandleCreateOrderMapsIdempotencyConflictToHTTP409(t *testing.T) {
 	}
 }
 
+func TestRequestContextMiddlewareReusesHeaderAndExposesResponseID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	router := gin.New()
+	router.Use(requestContextMiddleware())
+	router.GET("/ping", func(c *gin.Context) {
+		if got, want := c.GetString(requestIDContextKey), "req-from-client"; got != want {
+			t.Fatalf("unexpected request id in gin context: got %q want %q", got, want)
+		}
+		if got, want := c.GetString(traceIDContextKey), "req-from-client"; got != want {
+			t.Fatalf("unexpected trace id in gin context: got %q want %q", got, want)
+		}
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/ping", nil)
+	req.Header.Set("X-Request-ID", "req-from-client")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Header().Get("X-Request-ID"), "req-from-client"; got != want {
+		t.Fatalf("unexpected response request id: got %q want %q", got, want)
+	}
+}
+
 type fakeMerchantClient struct {
 	lastCreateMerchantReq *pbMerchant.CreateMerchantRequest
 }
