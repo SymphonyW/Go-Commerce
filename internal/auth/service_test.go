@@ -9,7 +9,9 @@ import (
 	pb "go-commerce/api/auth"
 	"go-commerce/pkg/jwt"
 
-	"gorm.io/driver/sqlite"
+	"github.com/glebarez/sqlite"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"gorm.io/gorm"
 )
 
@@ -88,5 +90,25 @@ func TestRegisterAllowsMerchantRole(t *testing.T) {
 	}
 	if loginResp.Role != "merchant" {
 		t.Fatalf("unexpected login role: got %q want %q", loginResp.Role, "merchant")
+	}
+}
+
+func TestLoginRejectsInvalidPassword(t *testing.T) {
+	service, _ := newAuthTestService(t)
+
+	if _, err := service.Register(context.Background(), &pb.RegisterRequest{
+		Username: "login-user",
+		Password: "correct-password",
+		Email:    "login@example.com",
+	}); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	_, err := service.Login(context.Background(), &pb.LoginRequest{
+		Username: "login-user",
+		Password: "wrong-password",
+	})
+	if got, want := status.Code(err), codes.Unauthenticated; got != want {
+		t.Fatalf("unexpected login error code: got %v want %v", got, want)
 	}
 }

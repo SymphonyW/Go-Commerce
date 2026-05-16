@@ -21,9 +21,9 @@ import (
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
 
+	"github.com/glebarez/sqlite"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -138,6 +138,10 @@ func newConcurrentTestService(t *testing.T) (*Service, *gorm.DB) {
 		t.Fatalf("failed to open sql db: %v", err)
 	}
 	sqlDB.SetMaxOpenConns(100)
+	t.Cleanup(func() {
+		// 关闭文件型 sqlite 连接，避免 Windows 上临时目录清理时文件仍被占用。
+		_ = sqlDB.Close()
+	})
 
 	return NewService(db, nil), db
 }
@@ -881,6 +885,33 @@ func TestCancelOrderRejectsCompletedOrder(t *testing.T) {
 		t.Fatal("expected completed order cancellation to fail")
 	}
 	if got, want := resp.Message, "invalid order status transition: completed -> cancelled"; got != want {
+		t.Fatalf("unexpected message: got %q want %q", got, want)
+	}
+}
+
+func TestCancelOrderRejectsPaidOrder(t *testing.T) {
+	service, db := newTestService(t)
+	order := Order{
+		UserID:      1,
+		TotalAmount: 10,
+		Status:      OrderStatusPaid,
+		OrderDate:   time.Now(),
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatalf("failed to create order: %v", err)
+	}
+
+	resp, err := service.CancelOrder(context.Background(), &pb.CancelOrderRequest{
+		Id:     int64(order.ID),
+		UserId: 1,
+	})
+	if err != nil {
+		t.Fatalf("CancelOrder returned error: %v", err)
+	}
+	if resp.Success {
+		t.Fatal("expected paid order cancellation to fail")
+	}
+	if got, want := resp.Message, "invalid order status transition: paid -> cancelled"; got != want {
 		t.Fatalf("unexpected message: got %q want %q", got, want)
 	}
 }

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"google.golang.org/protobuf/types/known/wrapperspb"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 

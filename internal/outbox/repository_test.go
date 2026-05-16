@@ -9,7 +9,7 @@ import (
 
 	"go-commerce/pkg/events"
 
-	"gorm.io/driver/sqlite"
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 

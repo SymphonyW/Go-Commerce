@@ -10,9 +10,9 @@ import (
 	"go-commerce/internal/auth"
 	"go-commerce/internal/product"
 
+	"github.com/glebarez/sqlite"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 

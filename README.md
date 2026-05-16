@@ -339,3 +339,89 @@ curl -X DELETE http://localhost:8081/api/cart \
 - [技术文档](doc/TECHNICAL_DOCUMENT.md)：详细的技术架构和实现说明
 - [API文档](doc/API_Documentation.md)：完整的API接口说明
 
+
+## 如何运行测试
+
+项目现在按三层组织测试：
+
+```text
+Unit Test         -> 纯业务逻辑，sqlite in-memory / mock 依赖
+Integration Test  -> 真实 MySQL、Redis、RabbitMQ
+E2E Test          -> 通过 API Gateway 回归完整交易主链路
+```
+
+### 单元测试
+
+```bash
+make test
+# 或
+make test-unit
+```
+
+当前重点覆盖：
+
+- `auth`：注册、登录、密码校验
+- `product`：商品创建、分页、筛选、排序
+- `order`：重复下单、价格快照、库存扣减、取消订单、状态机
+- `payment`：创建支付、支付成功、已取消订单不可继续支付
+- `merchant`：越权校验、添加商品、删除商品
+
+### 集成测试
+
+```bash
+make test-integration
+# 等价于先启动 mysql / redis / rabbitmq，再执行：
+go test ./... -tags=integration
+```
+
+默认连接：
+
+- MySQL：`127.0.0.1:3307`
+- Redis：`127.0.0.1:6379`
+- RabbitMQ：`127.0.0.1:5672`
+
+如需覆盖默认值，可设置：
+
+- `INTEGRATION_DB_DSN`
+- `INTEGRATION_REDIS_ADDR`
+- `INTEGRATION_RABBITMQ_URL`
+
+当前集成测试覆盖：
+
+- Redis 购物车读写
+- MySQL 订单落库与库存扣减
+- RabbitMQ 领域事件发布
+
+### E2E 测试
+
+```bash
+make test-e2e
+```
+
+默认会先启动整套 Compose 服务，再通过 API 网关自动回归：
+
+1. 注册商家与用户
+2. 登录获取 token
+3. 商家创建店铺和商品
+4. 用户浏览商品并加入购物车
+5. 创建订单
+6. 发起支付并标记成功
+7. 等待订单状态变为 `paid`
+8. 查询订单详情
+
+如需覆盖默认值，可设置：
+
+- `E2E_BASE_URL`
+- `E2E_DB_DSN`
+
+### CI 建议
+
+GitHub Actions 中可直接使用：
+
+```bash
+make test-unit
+make test-integration
+make test-e2e
+```
+
+其中集成测试依赖基础设施容器，E2E 测试依赖完整服务栈。若 CI 平台没有预装 `make`，也可以直接调用上面的 `go test` 命令。

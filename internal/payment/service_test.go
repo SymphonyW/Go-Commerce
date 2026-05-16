@@ -15,10 +15,10 @@ import (
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
 
+	"github.com/glebarez/sqlite"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -207,5 +207,24 @@ func TestFailPaymentMarksRecordFailed(t *testing.T) {
 	}
 	if got, want := updated.Status, PaymentStatusFailed; got != want {
 		t.Fatalf("unexpected status: got %q want %q", got, want)
+	}
+}
+
+func TestSucceedPaymentRejectsCancelledOrder(t *testing.T) {
+	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+	}}, nil)
+
+	payment, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
+	if err != nil {
+		t.Fatalf("CreatePayment returned error: %v", err)
+	}
+
+	service.orderClient = &fakeOrderClient{orders: map[int64]*pbOrder.Order{
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusCancelled, TotalAmount: 99},
+	}}
+	_, err = service.SucceedPayment(context.Background(), 1, payment.ID)
+	if !errors.Is(err, ErrOrderNotPayable) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

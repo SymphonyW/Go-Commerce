@@ -58,6 +58,37 @@ func TestListProductsUsesDefaultPagination(t *testing.T) {
 	}
 }
 
+func TestCreateProductPersistsProductSnapshot(t *testing.T) {
+	service := seedListProducts(t)
+
+	resp, err := service.CreateProduct(context.Background(), &pb.CreateProductRequest{
+		Name:        "测试商品",
+		Description: "来自 create-product 单测",
+		Price:       88.5,
+		Stock:       6,
+		Category:    "book",
+		ImageUrl:    "https://example.com/test.png",
+		MerchantId:  9,
+	})
+	if err != nil {
+		t.Fatalf("CreateProduct returned error: %v", err)
+	}
+	if resp.Product.Id == 0 {
+		t.Fatal("expected created product id")
+	}
+	if got, want := resp.Product.MerchantId, int64(9); got != want {
+		t.Fatalf("unexpected merchant id: got %d want %d", got, want)
+	}
+
+	got, err := service.GetProduct(context.Background(), &pb.GetProductRequest{Id: resp.Product.Id})
+	if err != nil {
+		t.Fatalf("GetProduct returned error: %v", err)
+	}
+	if got.Product.Name != "测试商品" || got.Product.Price != float32(88.5) || got.Product.Stock != 6 {
+		t.Fatalf("unexpected persisted product: %+v", got.Product)
+	}
+}
+
 func TestListProductsAppliesPageAndPageSize(t *testing.T) {
 	service := seedListProducts(t)
 

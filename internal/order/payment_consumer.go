@@ -48,7 +48,7 @@ func (c *PaymentSucceededConsumer) HandleDelivery(delivery amqp.Delivery) error 
 	}
 
 	_, changed, err := MarkOrderPaid(c.db, event.OrderID, event.UserID, event.Amount, func(tx *gorm.DB, order *Order) error {
-		statusEvent := newOrderStatusChangedEvent(events.OrderPaidType, order, OrderStatusPending, OrderStatusPaid)
+		statusEvent := newOrderStatusChangedEvent(context.Background(), events.OrderPaidType, order, OrderStatusPending, OrderStatusPaid)
 		_, err := c.outboxRepo.Create(context.Background(), tx, outbox.NewEventInput{
 			AggregateType: "order",
 			AggregateID:   strconv.FormatUint(uint64(order.ID), 10),

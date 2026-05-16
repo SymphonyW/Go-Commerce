@@ -424,3 +424,83 @@ published_at=now      next_retry_at=退避后时间
 ### 6.5 当前并发假设
 
 当前实现按 **单实例 `outbox-worker`** 运行设计，因此不会出现多个 worker 同时抢同一条事件的问题。若未来需要水平扩容，应在仓储层增加“领取 / lease”机制或数据库行锁策略，再放开多实例部署。
+
+## 7. 测试策略
+
+项目采用三层测试金字塔：
+
+```text
+                 E2E
+        Integration Test
+     Unit Test / Service Test
+```
+
+### 7.1 单元测试
+
+- 使用 Go 标准 `testing` 包。
+- 业务服务优先使用 sqlite in-memory，避免依赖真实数据库。
+- `order`、`payment` 对外部发布器和 gRPC client 通过接口 mock，验证业务分支而不引入网络波动。
+- 已覆盖的核心场景包括：
+  - `auth`：注册、角色归一化、登录密码校验
+  - `product`：创建商品、分页、筛选、排序
+  - `order`：重复下单、价格快照、库存扣减、取消订单、支付后不可取消、库存不足
+  - `payment`：创建支付、支付成功、已取消订单不可继续支付
+  - `merchant`：越权操作、添加商品、删除商品
+
+### 7.2 集成测试
+
+- 使用 build tag：`integration`
+- 运行方式：
+
+```bash
+make test-integration
+# 或
+go test ./... -tags=integration
+```
+
+- 真实依赖：
+  - Redis：验证购物车存取
+  - MySQL：验证订单、订单项、库存与 outbox 落库
+  - RabbitMQ：验证领域事件可以真实投递
+- 每个测试都创建独立数据，并在 `t.Cleanup` 中删除测试产生的数据，避免互相污染。
+
+### 7.3 E2E 测试
+
+- 使用 build tag：`e2e`
+- 运行方式：
+
+```bash
+make test-e2e
+```
+
+- 当前主链路覆盖：
+  1. 注册商家与用户
+  2. 登录
+  3. 创建店铺与商品
+  4. 浏览商品
+  5. 加入购物车
+  6. 创建订单
+  7. 发起支付
+  8. 支付成功后等待订单变为 `paid`
+  9. 查询订单详情
+
+### 7.4 数据准备与清理
+
+- Unit Test：每个测试使用独立 sqlite 数据库。
+- Integration Test：使用唯一测试数据，测试结束后清理 MySQL / Redis / RabbitMQ 资源。
+- E2E Test：使用唯一用户名和商品名，测试结束后清理 MySQL 中的用户、商家、商品、订单、支付、outbox、幂等记录。
+- 对无法通过单个事务回滚的跨服务链路，采用“唯一数据 + 显式清理”策略，确保测试可重复执行。
+
+### 7.5 CI 接入
+
+推荐在 GitHub Actions 中分三步执行：
+
+```bash
+make test-unit
+make test-integration
+make test-e2e
+```
+
+- `test-unit` 无需外部服务，适合每次提交快速反馈。
+- `test-integration` 先拉起基础设施容器，再验证真实依赖。
+- `test-e2e` 拉起完整 Compose 栈后执行交易主链路回归。
