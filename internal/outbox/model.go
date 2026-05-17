@@ -11,7 +11,7 @@ const (
 // Event 对应 outbox_events 表。
 // 业务事件先随本地事务一同落库，再由 worker 异步投递到 RabbitMQ。
 type Event struct {
-	ID            uint      `gorm:"primaryKey"`
+	ID uint `gorm:"primaryKey"`
 	// 这里使用 unique 而不是 uniqueIndex：
 	// MySQL 下 GORM 会把 uniqueIndex 识别成“唯一列”，重复 AutoMigrate 时会误删不存在的约束，导致服务启动失败。
 	EventID       string    `gorm:"size:64;not null;unique"`
