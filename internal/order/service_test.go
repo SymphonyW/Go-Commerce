@@ -269,21 +269,34 @@ func TestCreateOrderConcurrentSameKeyCreatesOneOrder(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 
+	errCh := make(chan error, requestCount)
+
 	for i := 0; i < requestCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			<-start
-			_, _ = service.CreateOrder(context.Background(), createOrderRequest(
+
+			_, err := service.CreateOrder(context.Background(), createOrderRequest(
 				1,
 				"concurrent-create-order",
 				&pb.CreateOrderItem{ProductId: int64(item.ID), Quantity: 1},
 			))
+
+			// 关键：不要吞掉错误，先把它记录下来
+			errCh <- err
 		}()
 	}
 
 	close(start)
 	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Logf("concurrent CreateOrder error: %v", err)
+		}
+	}
 
 	var orderCount int64
 	if err := db.Model(&Order{}).Count(&orderCount).Error; err != nil {
