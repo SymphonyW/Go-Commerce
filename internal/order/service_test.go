@@ -137,7 +137,7 @@ func newConcurrentTestService(t *testing.T) (*Service, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("failed to open sql db: %v", err)
 	}
-	sqlDB.SetMaxOpenConns(100)
+	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() {
 		// 关闭文件型 sqlite 连接，避免 Windows 上临时目录清理时文件仍被占用。
 		_ = sqlDB.Close()
