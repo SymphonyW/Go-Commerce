@@ -3,6 +3,8 @@
 > 基础地址：`http://localhost:8080`
 > OpenAPI 3.0 描述：[`openapi.yaml`](../openapi.yaml)
 
+本文档用于阅读和理解接口；如需工具消费、接口导入或后续接入 Swagger UI，应以 `openapi.yaml` 为准。
+
 ## 1. 约定
 
 ### 1.1 鉴权标记

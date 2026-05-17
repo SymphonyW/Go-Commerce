@@ -319,6 +319,7 @@ curl -X POST http://localhost:8080/api/payments/1/success \
 ```
 
 更完整的接口说明见 [API 文档](doc/API_Documentation.md) 与 [OpenAPI 描述](openapi.yaml)。
+其中，`doc/API_Documentation.md` 用于面向阅读地解释接口，`openapi.yaml` 则是机器可读的 OpenAPI 3.0 接口描述；二者都以当前已经实现的 Gateway 接口为准，不描述未来能力。
 
 ## 10. 测试方式
 
@@ -402,6 +403,8 @@ CI 当前自动执行：
 ## 14. 相关文档
 
 - [技术文档](doc/TECHNICAL_DOCUMENT.md)
-- [API 文档](doc/API_Documentation.md)
+- [API 文档](doc/API_Documentation.md)：面向阅读的接口说明文档
 - [面试文档](doc/INTERVIEW.md)
-- [OpenAPI 3.0](openapi.yaml)
+- [OpenAPI 3.0](openapi.yaml)：机器可读的接口契约
+
+`doc/API_Documentation.md` 与 `openapi.yaml` 均以当前已经实现的 Gateway 接口为准，不描述未来能力。
