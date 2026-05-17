@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-integration test-e2e test-integration-up test-e2e-up
+.PHONY: test test-unit test-integration test-e2e test-integration-up test-e2e-up seed-demo
 
 COMPOSE ?= docker compose
 
@@ -18,3 +18,6 @@ test-e2e-up:
 
 test-e2e: test-e2e-up
 	go test ./tests/e2e -tags=e2e -v
+
+seed-demo:
+	go run ./cmd/seed-data

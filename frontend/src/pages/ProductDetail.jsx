@@ -1,21 +1,10 @@
 import { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { productAPI, orderAPI, cartAPI } from '../services/api';
-
-// 处理图片URL，将维基百科页面URL转换为实际图片文件URL
-const processImageUrl = (url) => {
-  if (!url) return 'https://via.placeholder.com/400';
-  
-  // 检查是否是维基百科的图片页面URL
-  if (url.includes('wikipedia.org/wiki/File:')) {
-    // 提取文件名
-    const fileName = url.split('/').pop();
-    // 构建实际的图片文件URL
-    return `https://upload.wikimedia.org/wikipedia/commons/thumb/${fileName.charAt(0)}/${fileName.charAt(0) + fileName.charAt(1)}/${fileName}/640px-${fileName}`;
-  }
-  
-  return url;
-};
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import ErrorState from '../components/ErrorState';
+import LoadingState from '../components/LoadingState';
+import StatusBadge from '../components/StatusBadge';
+import { cartAPI, orderAPI, productAPI } from '../services/api';
+import { formatCurrency, getProductImageUrl, getStockMeta } from '../utils/display';
 
 const ProductDetail = () => {
   const { id } = useParams();
@@ -24,14 +13,15 @@ const ProductDetail = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [quantity, setQuantity] = useState(1);
+  const [feedback, setFeedback] = useState(null);
 
   useEffect(() => {
     const fetchProduct = async () => {
       try {
         const data = await productAPI.getProduct(id);
         setProduct(data.product);
-      } catch (error) {
-        console.error('Failed to fetch product:', error);
+      } catch (fetchError) {
+        console.error('Failed to fetch product:', fetchError);
         setError('获取商品详情失败');
       } finally {
         setLoading(false);
@@ -41,95 +31,113 @@ const ProductDetail = () => {
     fetchProduct();
   }, [id]);
 
-  const handleAddToCart = async () => {
+  const ensureLoggedIn = () => {
     const token = localStorage.getItem('token');
     if (!token) {
       navigate('/login');
-      return;
+      return false;
     }
+    return true;
+  };
+
+  const handleAddToCart = async () => {
+    if (!ensureLoggedIn() || !product) return;
 
     try {
       await cartAPI.addItem({
         product_id: product.id,
-        quantity: quantity
+        quantity,
       });
-      alert('商品已添加到购物车');
-    } catch (error) {
-      console.error('Failed to add to cart:', error);
-      alert('添加到购物车失败，请稍后重试');
+      setFeedback({ type: 'success', text: '商品已加入购物车。' });
+    } catch (actionError) {
+      console.error('Failed to add to cart:', actionError);
+      setFeedback({ type: 'error', text: '添加到购物车失败，请稍后重试。' });
     }
   };
 
   const handleBuyNow = async () => {
-    const token = localStorage.getItem('token');
-    if (!token) {
-      navigate('/login');
-      return;
-    }
+    if (!ensureLoggedIn() || !product) return;
 
     try {
       await orderAPI.createOrder({
-        items: [{
-          product_id: product.id,
-          product_name: product.name,
-          price: product.price,
-          quantity: quantity,
-        }],
+        items: [
+          {
+            product_id: product.id,
+            product_name: product.name,
+            price: product.price,
+            quantity,
+          },
+        ],
       });
-      alert('订单创建成功！');
       navigate('/orders');
-    } catch (error) {
-      console.error('Failed to create order:', error);
-      alert('创建订单失败，请稍后重试');
+    } catch (actionError) {
+      console.error('Failed to create order:', actionError);
+      setFeedback({ type: 'error', text: '创建订单失败，请稍后重试。' });
     }
   };
 
   if (loading) {
-    return <div className="loading">加载中...</div>;
+    return <LoadingState label="正在加载商品详情..." />;
   }
 
   if (error || !product) {
-    return <div className="error-message">{error || '商品不存在'}</div>;
+    return <ErrorState title="商品暂时不可用" description={error || '商品不存在'} />;
   }
 
+  const stockMeta = getStockMeta(product.stock);
+  const outOfStock = product.stock <= 0;
+
   return (
-    <div className="product-detail">
+    <div className="page-stack product-detail">
+      <Link to="/products" className="btn btn-ghost btn-sm">
+        ← 返回商品列表
+      </Link>
+
       <div className="product-detail-container">
         <div className="product-detail-image">
-          <img 
-            src={processImageUrl(product.image_url)} 
-            alt={product.name} 
-          />
+          <img src={getProductImageUrl(product.image_url, 'detail')} alt={product.name} />
         </div>
+
         <div className="product-detail-info">
+          <div className="product-detail-summary">
+            <span className="tag">{product.category || '未分类'}</span>
+            <StatusBadge status={stockMeta.tone} label={stockMeta.label} />
+          </div>
+
           <h1>{product.name}</h1>
-          <p className="product-detail-price">¥{product.price}</p>
-          <p className="product-detail-stock">库存: {product.stock}</p>
-          <p className="product-detail-category">分类: {product.category}</p>
+          <p className="product-detail-price">{formatCurrency(product.price)}</p>
+
           <div className="product-detail-description">
             <h3>商品描述</h3>
-            <p>{product.description}</p>
+            <p>{product.description || '该商品暂未补充详细描述。'}</p>
           </div>
+
+          {feedback && <div className={`notice notice-${feedback.type}`}>{feedback.text}</div>}
+
           <div className="product-detail-actions">
-            <div className="quantity-control">
-              <button 
-                onClick={() => setQuantity(Math.max(1, quantity - 1))}
+            <div className="quantity-control" aria-label="选择数量">
+              <button
+                type="button"
+                onClick={() => setQuantity((value) => Math.max(1, value - 1))}
                 className="quantity-btn"
+                disabled={quantity <= 1}
               >
-                -
+                −
               </button>
               <span className="quantity">{quantity}</span>
-              <button 
-                onClick={() => setQuantity(quantity + 1)}
+              <button
+                type="button"
+                onClick={() => setQuantity((value) => Math.min(product.stock || 1, value + 1))}
                 className="quantity-btn"
+                disabled={outOfStock || quantity >= product.stock}
               >
                 +
               </button>
             </div>
-            <button className="btn btn-secondary" onClick={handleAddToCart}>
-              添加到购物车
+            <button type="button" className="btn btn-secondary" onClick={handleAddToCart} disabled={outOfStock}>
+              加入购物车
             </button>
-            <button className="btn btn-primary" onClick={handleBuyNow}>
+            <button type="button" className="btn btn-primary" onClick={handleBuyNow} disabled={outOfStock}>
               立即购买
             </button>
           </div>

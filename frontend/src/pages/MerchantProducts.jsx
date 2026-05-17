@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import EmptyState from '../components/EmptyState';
+import LoadingState from '../components/LoadingState';
 import MerchantConsoleNav from '../components/MerchantConsoleNav';
+import PageHeader from '../components/PageHeader';
+import SectionCard from '../components/SectionCard';
 import { merchantAPI } from '../services/api';
+import { formatCurrency } from '../utils/display';
 
 const emptyForm = {
   name: '',
@@ -61,8 +66,8 @@ const MerchantProducts = () => {
       });
       setProducts(data.products || []);
       setTotal(data.total || 0);
-    } catch (err) {
-      setError(err.response?.data?.error || '获取商品列表失败');
+    } catch (loadError) {
+      setError(loadError.response?.data?.error || '获取商品列表失败');
     } finally {
       setLoading(false);
     }
@@ -113,8 +118,8 @@ const MerchantProducts = () => {
       setFormData(emptyForm);
       setEditingProductId(null);
       await loadProducts(page);
-    } catch (err) {
-      setError(err.response?.data?.error || '保存商品失败');
+    } catch (submitError) {
+      setError(submitError.response?.data?.error || '保存商品失败');
     } finally {
       setSubmitting(false);
     }
@@ -135,9 +140,11 @@ const MerchantProducts = () => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const cancelEditing = () => {
+  const resetForm = () => {
     setEditingProductId(null);
     setFormData(emptyForm);
+    setSuccess('');
+    setError('');
   };
 
   const handleDelete = async (product) => {
@@ -152,8 +159,8 @@ const MerchantProducts = () => {
       const nextPage = products.length === 1 && page > 1 ? page - 1 : page;
       setPage(nextPage);
       await loadProducts(nextPage);
-    } catch (err) {
-      setError(err.response?.data?.error || '删除商品失败');
+    } catch (deleteError) {
+      setError(deleteError.response?.data?.error || '删除商品失败');
     } finally {
       setSubmitting(false);
     }
@@ -165,116 +172,121 @@ const MerchantProducts = () => {
     <div className="merchant-console">
       <MerchantConsoleNav />
 
-      <section className="merchant-section">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">商品管理</p>
-            <h1>{editingProductId ? '编辑商品' : '新增商品'}</h1>
-          </div>
-        </div>
-
-        {error && <div className="error-message">{error}</div>}
-        {success && <div className="success-message">{success}</div>}
-
-        <form className="merchant-form refined" onSubmit={handleSubmit}>
-          <div className="form-row">
-            <div className="form-group">
-              <label htmlFor="name">商品名称</label>
-              <input id="name" name="name" value={formData.name} onChange={handleChange} required />
-            </div>
-            <div className="form-group">
-              <label htmlFor="category">分类</label>
-              <input id="category" name="category" value={formData.category} onChange={handleChange} required />
-            </div>
-          </div>
-          <div className="form-row">
-            <div className="form-group">
-              <label htmlFor="price">价格</label>
-              <input id="price" name="price" type="number" min="0" step="0.01" value={formData.price} onChange={handleChange} required />
-            </div>
-            <div className="form-group">
-              <label htmlFor="stock">库存</label>
-              <input id="stock" name="stock" type="number" min="0" value={formData.stock} onChange={handleChange} required />
-            </div>
-          </div>
-          <div className="form-group">
-            <label htmlFor="description">描述</label>
-            <textarea id="description" name="description" value={formData.description} onChange={handleChange} />
-          </div>
-          <div className="form-group">
-            <label htmlFor="image_url">图片 URL</label>
-            <input id="image_url" name="image_url" value={formData.image_url} onChange={handleChange} />
-          </div>
-          <div className="form-actions">
-            <button type="submit" className="btn btn-primary" disabled={submitting}>
-              {submitting ? '保存中...' : editingProductId ? '保存修改' : '创建商品'}
+      <PageHeader
+        eyebrow="商品管理"
+        title="管理店铺商品"
+        subtitle="在同一页完成新增、编辑、库存维护与列表查看。"
+        meta={`${total} 件`}
+        actions={
+          editingProductId && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={resetForm}>
+              新增商品
             </button>
-            {editingProductId && (
-              <button type="button" className="btn btn-secondary" onClick={cancelEditing}>
-                取消编辑
-              </button>
-            )}
-          </div>
-        </form>
-      </section>
+          )
+        }
+      />
 
-      <section className="merchant-section">
-        <div className="section-heading">
-          <div>
-            <h2>商品列表</h2>
-            <p>共 {total} 件商品，支持分页查看。</p>
-          </div>
-        </div>
+      {error && <div className="error-message">{error}</div>}
+      {success && <div className="success-message">{success}</div>}
 
-        {loading ? (
-          <div className="loading">加载中...</div>
-        ) : products.length === 0 ? (
-          <div className="empty-state compact">暂无商品，先创建第一件商品吧。</div>
-        ) : (
-          <>
-            <div className="merchant-table product-table">
-              <div className="merchant-table-head">
-                <span>商品</span>
-                <span>分类</span>
-                <span>价格</span>
-                <span>库存</span>
-                <span>操作</span>
+      <div className="merchant-products-layout">
+        <SectionCard
+          title={editingProductId ? '编辑商品' : '新增商品'}
+          subtitle={editingProductId ? '调整商品信息并保存。' : '补充完整字段，前端展示会更自然。'}
+        >
+          <form id="merchant-product-form" className="merchant-form" onSubmit={handleSubmit}>
+            <div className="form-row">
+              <div className="form-group">
+                <label htmlFor="name">商品名称</label>
+                <input id="name" name="name" value={formData.name} onChange={handleChange} required />
               </div>
-              {products.map((product) => (
-                <div key={product.id} className="merchant-table-row">
-                  <span>
-                    <strong>{product.name}</strong>
-                    <small>{product.description || '暂无描述'}</small>
-                  </span>
-                  <span>{product.category}</span>
-                  <span>¥{Number(product.price || 0).toFixed(2)}</span>
-                  <span>{product.stock}</span>
-                  <span className="inline-actions">
-                    <button type="button" className="btn btn-sm" onClick={() => startEditing(product)}>
-                      编辑
-                    </button>
-                    <button type="button" className="btn btn-sm btn-danger" onClick={() => handleDelete(product)} disabled={submitting}>
-                      删除
-                    </button>
-                  </span>
-                </div>
-              ))}
+              <div className="form-group">
+                <label htmlFor="category">分类</label>
+                <input id="category" name="category" value={formData.category} onChange={handleChange} required />
+              </div>
             </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label htmlFor="price">价格</label>
+                <input id="price" name="price" type="number" min="0" step="0.01" value={formData.price} onChange={handleChange} required />
+              </div>
+              <div className="form-group">
+                <label htmlFor="stock">库存</label>
+                <input id="stock" name="stock" type="number" min="0" value={formData.stock} onChange={handleChange} required />
+              </div>
+            </div>
+            <div className="form-group">
+              <label htmlFor="description">描述</label>
+              <textarea id="description" name="description" value={formData.description} onChange={handleChange} />
+            </div>
+            <div className="form-group">
+              <label htmlFor="image_url">图片 URL</label>
+              <input id="image_url" name="image_url" value={formData.image_url} onChange={handleChange} />
+            </div>
+            <div className="form-actions">
+              <button type="submit" className="btn btn-primary" disabled={submitting}>
+                {submitting ? '保存中...' : editingProductId ? '保存修改' : '创建商品'}
+              </button>
+              {editingProductId && (
+                <button type="button" className="btn btn-secondary" onClick={resetForm}>
+                  取消编辑
+                </button>
+              )}
+            </div>
+          </form>
+        </SectionCard>
 
-            <div className="pagination">
-              <button className="btn btn-secondary" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>
-                上一页
-              </button>
-              <span>
-                第 {page} / {totalPages} 页
-              </span>
-              <button className="btn btn-secondary" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}>
-                下一页
-              </button>
-            </div>
-          </>
-        )}
-      </section>
+        <SectionCard title="商品列表" subtitle={`共 ${total} 件商品，支持分页查看。`}>
+          {loading ? (
+            <LoadingState label="正在加载商品..." />
+          ) : products.length === 0 ? (
+            <EmptyState compact title="暂无商品" description="先创建第一件商品，店铺就会真正开始运转。" />
+          ) : (
+            <>
+              <div className="merchant-table product-table">
+                <div className="merchant-table-head">
+                  <span>商品</span>
+                  <span>分类</span>
+                  <span>价格</span>
+                  <span>库存</span>
+                  <span>操作</span>
+                </div>
+                {products.map((product) => (
+                  <div key={product.id} className="merchant-table-row">
+                    <span>
+                      <strong>{product.name}</strong>
+                      <small>{product.description || '暂无描述'}</small>
+                    </span>
+                    <span>{product.category}</span>
+                    <span>{formatCurrency(product.price)}</span>
+                    <span>{product.stock}</span>
+                    <span className="inline-actions">
+                      <button type="button" className="btn btn-secondary btn-sm" onClick={() => startEditing(product)}>
+                        编辑
+                      </button>
+                      <button type="button" className="btn btn-danger btn-sm" onClick={() => handleDelete(product)} disabled={submitting}>
+                        删除
+                      </button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="pagination">
+                <button type="button" className="btn btn-secondary btn-sm" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>
+                  上一页
+                </button>
+                <span>
+                  第 {page} / {totalPages} 页
+                </span>
+                <button type="button" className="btn btn-secondary btn-sm" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}>
+                  下一页
+                </button>
+              </div>
+            </>
+          )}
+        </SectionCard>
+      </div>
     </div>
   );
 };

@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import EmptyState from '../components/EmptyState';
+import LoadingState from '../components/LoadingState';
 import MerchantConsoleNav from '../components/MerchantConsoleNav';
+import StatCard from '../components/StatCard';
+import StatusBadge from '../components/StatusBadge';
 import { merchantAPI } from '../services/api';
+import { formatCurrency, formatDateTime, getOrderStatusLabel } from '../utils/display';
 
 const MerchantDashboard = () => {
   const navigate = useNavigate();
@@ -40,8 +45,8 @@ const MerchantDashboard = () => {
         setProducts(productResp.products || []);
         setOrders(orderResp.orders || []);
         setOrderTotal(orderResp.total || 0);
-      } catch (err) {
-        setError(err.response?.data?.error || '加载商家后台失败');
+      } catch (loadError) {
+        setError(loadError.response?.data?.error || '加载商家后台失败');
       } finally {
         setLoading(false);
       }
@@ -62,7 +67,7 @@ const MerchantDashboard = () => {
   }, [orderTotal, orders, products]);
 
   if (loading) {
-    return <div className="loading">加载中...</div>;
+    return <LoadingState label="正在加载商家后台..." />;
   }
 
   return (
@@ -75,34 +80,33 @@ const MerchantDashboard = () => {
           <h1>{profile?.name || '尚未找到店铺'}</h1>
           <p>{profile ? `联系方式：${profile.contact_info}` : '先创建店铺，再开始管理商品和订单。'}</p>
         </div>
-        {!profile && (
-          <Link to="/merchants/create" className="btn btn-primary">
-            创建店铺
-          </Link>
-        )}
+        <div className="merchant-hero-actions">
+          {!profile ? (
+            <Link to="/merchants/create" className="btn btn-primary">
+              创建店铺
+            </Link>
+          ) : (
+            <>
+              <Link to={`/merchant/products${merchantId ? `?merchant_id=${merchantId}` : ''}`} className="btn btn-primary">
+                管理商品
+              </Link>
+              <Link to={`/merchant/orders${merchantId ? `?merchant_id=${merchantId}` : ''}`} className="btn btn-secondary">
+                查看订单
+              </Link>
+            </>
+          )}
+        </div>
       </section>
 
       {error && <div className="error-message">{error}</div>}
 
       {profile && (
         <>
-          <section className="merchant-metrics">
-            <div>
-              <span>商品总数</span>
-              <strong>{stats.productTotal}</strong>
-            </div>
-            <div>
-              <span>当前在售</span>
-              <strong>{stats.activeProducts}</strong>
-            </div>
-            <div>
-              <span>订单总数</span>
-              <strong>{stats.orderTotal}</strong>
-            </div>
-            <div>
-              <span>待处理订单</span>
-              <strong>{stats.pendingOrders}</strong>
-            </div>
+          <section className="stat-grid">
+            <StatCard label="商品总数" value={stats.productTotal} helper="当前店铺全部商品" icon="□" />
+            <StatCard label="当前在售" value={stats.activeProducts} helper="库存大于 0" tone="success" icon="✓" />
+            <StatCard label="订单总数" value={stats.orderTotal} helper="历史相关订单" tone="accent" icon="◎" />
+            <StatCard label="待处理订单" value={stats.pendingOrders} helper="待支付 / 已支付" tone="warning" icon="!" />
           </section>
 
           <section className="merchant-section">
@@ -111,13 +115,13 @@ const MerchantDashboard = () => {
                 <h2>最近订单</h2>
                 <p>优先查看刚进入履约链路的订单。</p>
               </div>
-              <Link to={`/merchant/orders${merchantId ? `?merchant_id=${merchantId}` : ''}`} className="btn btn-secondary">
+              <Link to={`/merchant/orders${merchantId ? `?merchant_id=${merchantId}` : ''}`} className="btn btn-secondary btn-sm">
                 查看全部
               </Link>
             </div>
 
             {orders.length === 0 ? (
-              <div className="empty-state compact">暂无相关订单</div>
+              <EmptyState compact title="暂无相关订单" description="有订单进入店铺后，这里会先展示最近几笔。" />
             ) : (
               <div className="merchant-table">
                 <div className="merchant-table-head">
@@ -129,9 +133,9 @@ const MerchantDashboard = () => {
                 {orders.slice(0, 5).map((order) => (
                   <div key={order.id} className="merchant-table-row">
                     <span>#{order.id}</span>
-                    <span className={`status-pill ${order.status}`}>{order.status}</span>
-                    <span>¥{Number(order.total_amount || 0).toFixed(2)}</span>
-                    <span>{new Date(order.created_at).toLocaleString()}</span>
+                    <StatusBadge status={order.status} label={getOrderStatusLabel(order.status, order.cancel_reason)} />
+                    <span>{formatCurrency(order.total_amount)}</span>
+                    <span>{formatDateTime(order.created_at)}</span>
                   </div>
                 ))}
               </div>

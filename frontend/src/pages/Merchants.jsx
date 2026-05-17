@@ -3,7 +3,7 @@ import { merchantAPI, productAPI } from '../services/api';
 
 // 处理图片URL，将维基百科页面URL转换为实际图片文件URL
 const processImageUrl = (url) => {
-  if (!url) return 'https://via.placeholder.com/100';
+  if (!url) return 'https://loremflickr.com/100/100/product?lock=0';
   
   // 检查是否是维基百科的图片页面URL
   if (url.includes('wikipedia.org/wiki/File:')) {

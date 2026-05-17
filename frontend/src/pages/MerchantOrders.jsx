@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import EmptyState from '../components/EmptyState';
+import LoadingState from '../components/LoadingState';
 import MerchantConsoleNav from '../components/MerchantConsoleNav';
+import PageHeader from '../components/PageHeader';
+import SectionCard from '../components/SectionCard';
+import StatusBadge from '../components/StatusBadge';
 import { merchantAPI } from '../services/api';
+import { formatCurrency, formatDateTime, getOrderStatusLabel } from '../utils/display';
 
 const MerchantOrders = () => {
   const navigate = useNavigate();
@@ -38,8 +44,8 @@ const MerchantOrders = () => {
         });
         setOrders(data.orders || []);
         setTotal(data.total || 0);
-      } catch (err) {
-        setError(err.response?.data?.error || '获取商家订单失败');
+      } catch (loadError) {
+        setError(loadError.response?.data?.error || '获取商家订单失败');
       } finally {
         setLoading(false);
       }
@@ -54,21 +60,20 @@ const MerchantOrders = () => {
     <div className="merchant-console">
       <MerchantConsoleNav />
 
-      <section className="merchant-section">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">订单管理</p>
-            <h1>相关订单</h1>
-            <p>这里只展示与当前店铺商品有关的订单项。</p>
-          </div>
-        </div>
+      <PageHeader
+        eyebrow="订单管理"
+        title="相关订单"
+        subtitle="这里只展示与当前店铺商品有关的订单项。"
+        meta={`${total} 笔`}
+      />
 
-        {error && <div className="error-message">{error}</div>}
+      {error && <div className="error-message">{error}</div>}
 
+      <SectionCard>
         {loading ? (
-          <div className="loading">加载中...</div>
+          <LoadingState label="正在加载订单..." />
         ) : orders.length === 0 ? (
-          <div className="empty-state compact">暂无相关订单</div>
+          <EmptyState compact title="暂无相关订单" description="一旦有商品成交，这里会沉淀店铺订单记录。" />
         ) : (
           <>
             <div className="merchant-table order-table">
@@ -82,30 +87,28 @@ const MerchantOrders = () => {
               {orders.map((order) => (
                 <div key={order.id} className="merchant-table-row">
                   <span>#{order.id}</span>
-                  <span className={`status-pill ${order.status}`}>{order.status}</span>
-                  <span>
-                    {(order.items || []).map((item) => `${item.product_name} × ${item.quantity}`).join('，')}
-                  </span>
-                  <span>¥{Number(order.total_amount || 0).toFixed(2)}</span>
-                  <span>{new Date(order.created_at).toLocaleString()}</span>
+                  <StatusBadge status={order.status} label={getOrderStatusLabel(order.status, order.cancel_reason)} />
+                  <span>{(order.items || []).map((item) => `${item.product_name} × ${item.quantity}`).join('，')}</span>
+                  <span>{formatCurrency(order.total_amount)}</span>
+                  <span>{formatDateTime(order.created_at)}</span>
                 </div>
               ))}
             </div>
 
             <div className="pagination">
-              <button className="btn btn-secondary" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>
+              <button type="button" className="btn btn-secondary btn-sm" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>
                 上一页
               </button>
               <span>
                 第 {page} / {totalPages} 页
               </span>
-              <button className="btn btn-secondary" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}>
+              <button type="button" className="btn btn-secondary btn-sm" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}>
                 下一页
               </button>
             </div>
           </>
         )}
-      </section>
+      </SectionCard>
     </div>
   );
 };

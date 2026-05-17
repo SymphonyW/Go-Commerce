@@ -30,8 +30,8 @@ const Login = () => {
       } else {
         navigate('/');
       }
-    } catch (err) {
-      setError(err.response?.data?.error || '登录失败，请检查用户名和密码');
+    } catch (submitError) {
+      setError(submitError.response?.data?.error || '登录失败，请检查用户名和密码');
     } finally {
       setLoading(false);
     }
@@ -39,8 +39,17 @@ const Login = () => {
 
   return (
     <div className="auth-container">
-      <div className="auth-card">
-        <h2>用户登录</h2>
+      <section className="auth-intro">
+        <p className="eyebrow">Welcome Back</p>
+        <h1>继续浏览、下单和管理你的店铺。</h1>
+        <p>登录后可查看购物车、订单，并根据角色进入商家后台或商户管理。</p>
+      </section>
+
+      <section className="auth-card">
+        <div className="auth-card-header">
+          <h2>用户登录</h2>
+          <p>使用你的账户继续体验完整交易流程。</p>
+        </div>
         {error && <div className="error-message">{error}</div>}
         <form onSubmit={handleSubmit}>
           <div className="form-group">
@@ -58,7 +67,7 @@ const Login = () => {
         <div className="auth-footer">
           没有账户？<Link to="/register">注册</Link>
         </div>
-      </div>
+      </section>
     </div>
   );
 };
