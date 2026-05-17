@@ -288,8 +288,8 @@ func seedDemoData(db *gorm.DB) (seedReport, error) {
 	for _, item := range demoMerchants {
 		var existing merchant.Merchant
 		err := db.Where("name = ?", item.Name).First(&existing).Error
-		switch {
-		case err == nil:
+		switch err {
+		case nil:
 			if existing.OwnerUserID == nil || *existing.OwnerUserID != merchantOwnerID {
 				if err := db.Model(&existing).Update("owner_user_id", merchantOwnerID).Error; err != nil {
 					return report, err
@@ -300,14 +300,20 @@ func seedDemoData(db *gorm.DB) (seedReport, error) {
 			report.MerchantsSkipped++
 			merchantIDs[item.Name] = existing.ID
 			log.Printf("seed_merchant_skipped name=%s", item.Name)
-		case err == gorm.ErrRecordNotFound:
-			record := merchant.Merchant{Name: item.Name, ContactInfo: item.ContactInfo, OwnerUserID: &merchantOwnerID}
+
+		case gorm.ErrRecordNotFound:
+			record := merchant.Merchant{
+				Name:        item.Name,
+				ContactInfo: item.ContactInfo,
+				OwnerUserID: &merchantOwnerID,
+			}
 			if err := db.Create(&record).Error; err != nil {
 				return report, err
 			}
 			report.MerchantsCreated++
 			merchantIDs[item.Name] = record.ID
 			log.Printf("seed_merchant_created name=%s", item.Name)
+
 		default:
 			return report, err
 		}
