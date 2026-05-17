@@ -23,6 +23,33 @@ Go Commerce 采用 `API Gateway + gRPC 微服务 + RabbitMQ 事件总线` 的结
 - 未支付订单通过 RabbitMQ `TTL + DLX` 自动关闭并回补库存。
 - 商家后台支持当前店铺资料、商品维护、相关订单查看，并有资源归属校验。
 
+## 快速体验
+
+```bash
+# 启动后端与基础设施
+docker compose up -d --build
+
+# 初始化演示数据（也可使用 make seed-demo）
+go run ./cmd/seed-data
+
+# 启动前端
+cd frontend
+npm install
+npm run dev
+```
+
+| 入口 | 地址 |
+| --- | --- |
+| 前端 | `http://localhost:5173` |
+| API Gateway | `http://localhost:8080` |
+
+演示商户账号：
+
+- 用户名：`demo_merchant`
+- 密码：`password123`
+
+> 演示数据初始化命令需要本机安装 Go 1.24+；详细启动与调试方式见后文“快速启动”。
+
 ## 2. 核心亮点
 
 | 亮点 | 当前实现 |
@@ -130,7 +157,7 @@ Go-Commerce/
 - Node.js 22+（用于启动前端）
 - Go 1.24+（用于手动启动后端，或执行本地演示数据初始化命令 `go run ./cmd/seed-data` / `make seed-demo`）
 
-### 7.2 推荐方式：Docker Compose 启动后端全栈
+### 7.2 推荐方式：Docker Compose 启动后端与基础设施
 
 ```bash
 docker compose up -d --build
@@ -164,7 +191,7 @@ npm run dev
 # 如果你只想先启动数据库
 docker compose up -d mysql
 
-# 或直接启动完整后端栈
+# 或直接启动后端与基础设施
 docker compose up -d
 
 # 导入演示商家与演示商品
