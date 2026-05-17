@@ -323,8 +323,8 @@ func seedDemoData(db *gorm.DB) (seedReport, error) {
 		merchantID := merchantIDs[item.MerchantName]
 		var existing product.Product
 		err := db.Where("name = ? AND merchant_id = ?", item.Name, merchantID).First(&existing).Error
-		switch {
-		case err == nil:
+		switch err {
+		case nil:
 			if existing.ImageURL != item.ImageURL {
 				if err := db.Model(&existing).Update("image_url", item.ImageURL).Error; err != nil {
 					return report, err
@@ -334,7 +334,8 @@ func seedDemoData(db *gorm.DB) (seedReport, error) {
 			}
 			report.ProductsSkipped++
 			log.Printf("seed_product_skipped name=%s merchant=%s", item.Name, item.MerchantName)
-		case err == gorm.ErrRecordNotFound:
+
+		case gorm.ErrRecordNotFound:
 			record := product.Product{
 				Name:        item.Name,
 				Description: item.Description,
@@ -349,6 +350,7 @@ func seedDemoData(db *gorm.DB) (seedReport, error) {
 			}
 			report.ProductsCreated++
 			log.Printf("seed_product_created name=%s merchant=%s", item.Name, item.MerchantName)
+
 		default:
 			return report, err
 		}
