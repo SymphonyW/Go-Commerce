@@ -126,9 +126,9 @@ Go-Commerce/
 
 ### 7.1 前置条件
 
-- Docker 与 Docker Compose
-- Node.js 22+（前端开发）
-- 如需本地手动启动后端：Go 1.24+
+- Docker 与 Docker Compose（用于启动基础设施和后端服务）
+- Node.js 22+（用于启动前端）
+- Go 1.24+（用于手动启动后端，或执行本地演示数据初始化命令 `go run ./cmd/seed-data` / `make seed-demo`）
 
 ### 7.2 推荐方式：Docker Compose 启动后端全栈
 
@@ -158,7 +158,7 @@ npm run dev
 
 ### 7.4 初始化演示数据
 
-为了让首页、商品列表、商品详情、购物车和商家列表在首次打开时就具备完整展示效果，建议先导入演示数据：
+为了让首页、商品列表、商品详情、购物车和商家列表在首次打开时就具备完整展示效果，建议先导入演示数据。以下导入命令在本机执行，因此也需要 Go 1.24+：
 
 ```bash
 # 如果你只想先启动数据库
@@ -222,9 +222,11 @@ go run ./cmd/merchant-service
 go run ./cmd/api-gateway
 ```
 
-> 手动启动时，程序直接读取系统环境变量；仓库没有内置 `.env` 自动加载器。
+> 手动启动时，程序直接读取系统环境变量；仓库没有内置 `.env` 自动加载器，配置方式见下文“8. 环境变量”。
 
 ## 8. 环境变量
+
+`.env.example` 用于说明本地手动启动时可配置的环境变量。当前项目不会自动加载 `.env` 文件；如需手动启动后端服务，请自行通过 shell、IDE 或运行环境导出这些变量。使用 Docker Compose 启动时，默认环境变量已在 `docker-compose.yml` 中配置。
 
 | 变量 | 作用 | 默认值 |
 | --- | --- | --- |
@@ -244,7 +246,7 @@ go run ./cmd/api-gateway
 | `OUTBOX_MAX_RETRY` | Outbox 最大重试次数 | `5` |
 | `OUTBOX_RETRY_BASE_DELAY` | Outbox 退避基准 | `1s` |
 
-完整示例见 `.env.example`。
+完整参考配置见 `.env.example`。
 
 ## 9. API 示例
 
