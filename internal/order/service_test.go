@@ -1070,3 +1070,56 @@ func TestCompleteOrderRejectsPaidOrder(t *testing.T) {
 		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.FailedPrecondition)
 	}
 }
+
+func TestListMerchantOrdersOnlyReturnsRelatedOrders(t *testing.T) {
+	service, db := newTestService(t)
+	merchantUser := createTestUser(t, db, auth.RoleMerchant)
+	otherUser := createTestUser(t, db, auth.RoleMerchant)
+	ownShop := createTestMerchant(t, db, merchantUser.ID)
+	otherShop := createTestMerchant(t, db, otherUser.ID)
+
+	ownOrder := Order{UserID: 10, TotalAmount: 30, Status: OrderStatusPaid, OrderDate: time.Now()}
+	if err := db.Create(&ownOrder).Error; err != nil {
+		t.Fatalf("failed to create own order: %v", err)
+	}
+	if err := db.Create(&[]OrderItem{
+		{OrderID: ownOrder.ID, ProductID: 1, MerchantID: ownShop.ID, ProductName: "Own Item", Price: 10, Quantity: 1},
+		{OrderID: ownOrder.ID, ProductID: 2, MerchantID: otherShop.ID, ProductName: "Other Item", Price: 20, Quantity: 1},
+	}).Error; err != nil {
+		t.Fatalf("failed to create mixed order items: %v", err)
+	}
+
+	foreignOrder := Order{UserID: 11, TotalAmount: 40, Status: OrderStatusPaid, OrderDate: time.Now()}
+	if err := db.Create(&foreignOrder).Error; err != nil {
+		t.Fatalf("failed to create foreign order: %v", err)
+	}
+	if err := db.Create(&OrderItem{
+		OrderID: foreignOrder.ID, ProductID: 3, MerchantID: otherShop.ID, ProductName: "Foreign Item", Price: 40, Quantity: 1,
+	}).Error; err != nil {
+		t.Fatalf("failed to create foreign order item: %v", err)
+	}
+
+	resp, err := service.ListMerchantOrders(context.Background(), &pb.ListMerchantOrdersRequest{
+		ActorUserId: int64(merchantUser.ID),
+		Page:        1,
+		PageSize:    10,
+	})
+	if err != nil {
+		t.Fatalf("ListMerchantOrders returned error: %v", err)
+	}
+	if got, want := resp.Total, int64(1); got != want {
+		t.Fatalf("unexpected merchant order total: got %d want %d", got, want)
+	}
+	if got, want := len(resp.Orders), 1; got != want {
+		t.Fatalf("unexpected merchant order count: got %d want %d", got, want)
+	}
+	if got, want := resp.Orders[0].Id, int64(ownOrder.ID); got != want {
+		t.Fatalf("unexpected order id: got %d want %d", got, want)
+	}
+	if got, want := len(resp.Orders[0].Items), 1; got != want {
+		t.Fatalf("unexpected merchant order item count: got %d want %d", got, want)
+	}
+	if got, want := resp.Orders[0].Items[0].ProductName, "Own Item"; got != want {
+		t.Fatalf("unexpected merchant order item: got %q want %q", got, want)
+	}
+}

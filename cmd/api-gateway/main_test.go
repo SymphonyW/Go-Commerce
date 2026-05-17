@@ -23,6 +23,7 @@ type fakeOrderClient struct {
 	lastCreateOrderReq *pbOrder.CreateOrderRequest
 	lastCancelOrderReq *pbOrder.CancelOrderRequest
 	lastShipOrderReq   *pbOrder.ShipOrderRequest
+	lastMerchantOrders *pbOrder.ListMerchantOrdersRequest
 }
 
 type conflictOrderClient struct {
@@ -53,6 +54,11 @@ func (f *fakeOrderClient) GetOrder(ctx context.Context, in *pbOrder.GetOrderRequ
 
 func (f *fakeOrderClient) ListOrders(ctx context.Context, in *pbOrder.ListOrdersRequest, opts ...grpc.CallOption) (*pbOrder.ListOrdersResponse, error) {
 	return nil, nil
+}
+
+func (f *fakeOrderClient) ListMerchantOrders(ctx context.Context, in *pbOrder.ListMerchantOrdersRequest, opts ...grpc.CallOption) (*pbOrder.ListMerchantOrdersResponse, error) {
+	f.lastMerchantOrders = in
+	return &pbOrder.ListMerchantOrdersResponse{}, nil
 }
 
 func (f *fakeOrderClient) CancelOrder(ctx context.Context, in *pbOrder.CancelOrderRequest, opts ...grpc.CallOption) (*pbOrder.CancelOrderResponse, error) {
@@ -208,7 +214,8 @@ func TestRequestContextMiddlewareReusesHeaderAndExposesResponseID(t *testing.T) 
 }
 
 type fakeMerchantClient struct {
-	lastCreateMerchantReq *pbMerchant.CreateMerchantRequest
+	lastCreateMerchantReq  *pbMerchant.CreateMerchantRequest
+	lastCurrentMerchantReq *pbMerchant.CurrentMerchantRequest
 }
 
 type fakePaymentClient struct {
@@ -278,6 +285,21 @@ func (f *fakeMerchantClient) DeleteProduct(ctx context.Context, in *pbMerchant.D
 	return &pbMerchant.DeleteProductResponse{Success: true}, nil
 }
 
+func (f *fakeMerchantClient) GetCurrentMerchant(ctx context.Context, in *pbMerchant.CurrentMerchantRequest, opts ...grpc.CallOption) (*pbMerchant.CurrentMerchantResponse, error) {
+	f.lastCurrentMerchantReq = in
+	return &pbMerchant.CurrentMerchantResponse{
+		Merchant: &pbMerchant.Merchant{Id: 1, Name: "Current Shop", OwnerUserId: in.ActorUserId},
+	}, nil
+}
+
+func (f *fakeMerchantClient) ListMerchantProducts(ctx context.Context, in *pbMerchant.ListMerchantProductsRequest, opts ...grpc.CallOption) (*pbMerchant.ListMerchantProductsResponse, error) {
+	return &pbMerchant.ListMerchantProductsResponse{}, nil
+}
+
+func (f *fakeMerchantClient) UpdateMerchantProduct(ctx context.Context, in *pbMerchant.UpdateMerchantProductRequest, opts ...grpc.CallOption) (*pbMerchant.UpdateMerchantProductResponse, error) {
+	return &pbMerchant.UpdateMerchantProductResponse{}, nil
+}
+
 func (f *fakeProductClient) CreateProduct(context.Context, *pbProduct.CreateProductRequest, ...grpc.CallOption) (*pbProduct.CreateProductResponse, error) {
 	return nil, nil
 }
@@ -330,6 +352,28 @@ func TestCustomerCannotAccessMerchantWriteRoutes(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/merchants", strings.NewReader(`{"name":"Shop","contact_info":"shop@example.com"}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if got, want := resp.Code, http.StatusForbidden; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+}
+
+func TestCustomerCannotAccessMerchantConsoleRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	token, err := appjwt.GenerateToken(17, "customer")
+	if err != nil {
+		t.Fatalf("failed to generate token: %v", err)
+	}
+
+	gateway := &APIGateway{merchantClient: &fakeMerchantClient{}}
+	router := gin.New()
+	router.GET("/api/merchant/profile", gateway.authMiddleware(), gateway.requireRole("merchant", "admin"), gateway.handleCurrentMerchantProfile)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/merchant/profile", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)

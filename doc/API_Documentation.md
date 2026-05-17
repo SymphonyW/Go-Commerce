@@ -202,6 +202,150 @@
   }
   ```
 
+### 3.6 获取当前商家信息
+
+- **端点**：`GET /api/merchant/profile`
+- **权限**：需要登录，且角色为 `merchant` 或 `admin`
+- **说明**：
+  - `merchant` 返回当前账号可操作的店铺信息
+  - `admin` 需要通过 `merchant_id` 查询参数指定目标店铺
+- **响应**：
+  ```json
+  {
+    "merchant": {
+      "id": 1,
+      "name": "Test Merchant",
+      "contact_info": "test@merchant.com",
+      "owner_user_id": 2,
+      "created_at": "2026-05-17T00:00:00Z"
+    }
+  }
+  ```
+
+### 3.7 获取当前商家商品列表
+
+- **端点**：`GET /api/merchant/products`
+- **权限**：需要登录，且角色为 `merchant` 或 `admin`
+- **参数**：
+  - `page` (int)：页码，默认 `1`
+  - `page_size` (int)：每页数量，默认 `10`
+  - `merchant_id` (int，可选)：仅 `admin` 使用，用于指定店铺
+- **说明**：`merchant` 只能看到自己店铺下的商品
+- **响应**：
+  ```json
+  {
+    "products": [
+      {
+        "id": 1,
+        "name": "Product Name",
+        "description": "Product Description",
+        "price": 99.99,
+        "stock": 100,
+        "category": "Electronics",
+        "image_url": "https://example.com/image.jpg",
+        "merchant_id": 1
+      }
+    ],
+    "total": 1
+  }
+  ```
+
+### 3.8 新增当前商家商品
+
+- **端点**：`POST /api/merchant/products`
+- **权限**：需要登录，且角色为 `merchant` 或 `admin`
+- **参数**：
+  - `name` (string)
+  - `description` (string)
+  - `price` (float)
+  - `stock` (int)
+  - `category` (string)
+  - `image_url` (string，可选)
+- **说明**：
+  - `merchant` 的店铺归属由服务端根据当前登录身份推导
+  - `admin` 可通过 `merchant_id` 查询参数指定目标店铺
+- **响应**：
+  ```json
+  {
+    "product_id": 1
+  }
+  ```
+
+### 3.9 更新当前商家商品
+
+- **端点**：`PUT /api/merchant/products/:id`
+- **权限**：需要登录，且角色为 `merchant` 或 `admin`
+- **可更新字段**：
+  - `name`
+  - `description`
+  - `price`
+  - `stock`
+  - `category`
+  - `image_url`
+- **说明**：至少提交一个字段；`merchant` 只能修改自己店铺下的商品
+- **响应**：
+  ```json
+  {
+    "product": {
+      "id": 1,
+      "name": "Updated Product",
+      "description": "Updated Description",
+      "price": 88.8,
+      "stock": 20,
+      "category": "Books",
+      "image_url": "https://example.com/image.jpg",
+      "merchant_id": 1
+    }
+  }
+  ```
+
+### 3.10 删除当前商家商品
+
+- **端点**：`DELETE /api/merchant/products/:id`
+- **权限**：需要登录，且角色为 `merchant` 或 `admin`
+- **说明**：`merchant` 只能删除自己店铺下的商品
+- **响应**：
+  ```json
+  {
+    "success": true
+  }
+  ```
+
+### 3.11 获取当前商家相关订单
+
+- **端点**：`GET /api/merchant/orders`
+- **权限**：需要登录，且角色为 `merchant` 或 `admin`
+- **参数**：
+  - `page` (int)：页码，默认 `1`
+  - `page_size` (int)：每页数量，默认 `10`
+  - `merchant_id` (int，可选)：仅 `admin` 使用，用于指定店铺
+- **说明**：
+  - 查询依据为 `order_items.merchant_id`
+  - 返回结果只包含当前商家可见的订单项；混合商家订单会自动裁剪为当前商家自己的商品项
+- **响应**：
+  ```json
+  {
+    "orders": [
+      {
+        "id": 1,
+        "user_id": 8,
+        "items": [
+          {
+            "product_id": 1,
+            "product_name": "Product Name",
+            "price": 99.99,
+            "quantity": 1
+          }
+        ],
+        "total_amount": 99.99,
+        "status": "paid",
+        "created_at": "2026-05-17T00:00:00Z"
+      }
+    ],
+    "total": 1
+  }
+  ```
+
 ## 4. 订单流程接口（v2.0新增）
 
 ### 4.1 创建订单

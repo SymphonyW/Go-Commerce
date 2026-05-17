@@ -237,6 +237,18 @@ func main() {
 		private.POST("/merchants", gateway.requireRole("merchant", "admin"), gateway.handleCreateMerchant)
 		private.POST("/merchants/products", gateway.requireRole("merchant", "admin"), gateway.handleMerchantAddProduct)
 		private.DELETE("/merchants/products", gateway.requireRole("merchant", "admin"), gateway.handleMerchantDeleteProduct)
+
+		// 商家控制台专用接口：都要求登录，且只能由 merchant / admin 访问。
+		merchantConsole := private.Group("/merchant")
+		merchantConsole.Use(gateway.requireRole("merchant", "admin"))
+		{
+			merchantConsole.GET("/profile", gateway.handleCurrentMerchantProfile)
+			merchantConsole.GET("/products", gateway.handleCurrentMerchantProducts)
+			merchantConsole.POST("/products", gateway.handleCreateCurrentMerchantProduct)
+			merchantConsole.PUT("/products/:id", gateway.handleUpdateCurrentMerchantProduct)
+			merchantConsole.DELETE("/products/:id", gateway.handleDeleteCurrentMerchantProduct)
+			merchantConsole.GET("/orders", gateway.handleCurrentMerchantOrders)
+		}
 	}
 
 	// 启动HTTP服务器，监听8080端口
@@ -613,6 +625,18 @@ func optionalProductPrice(value float32, present bool) *float32 {
 	return &value
 }
 
+func parseOptionalQueryID(raw string) (*int64, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, nil
+	}
+	id, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || id <= 0 {
+		return nil, fmt.Errorf("invalid id")
+	}
+	return &id, nil
+}
+
 // handleGetProduct 处理获取单个产品详情请求
 // 参数：
 //
@@ -925,6 +949,255 @@ func (g *APIGateway) handleMerchantDeleteProduct(c *gin.Context) {
 
 	// 返回删除产品响应
 	c.JSON(http.StatusOK, resp)
+}
+
+func (g *APIGateway) handleCurrentMerchantProfile(c *gin.Context) {
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		return
+	}
+	merchantID, err := parseOptionalQueryID(c.Query("merchant_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid merchant id"})
+		return
+	}
+
+	resp, err := g.merchantClient.GetCurrentMerchant(gatewayContext(c), &pbMerchant.CurrentMerchantRequest{
+		ActorUserId: userID,
+		MerchantId:  merchantID,
+	})
+	if err != nil {
+		writeGRPCError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func (g *APIGateway) handleCurrentMerchantProducts(c *gin.Context) {
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		return
+	}
+	merchantID, err := parseOptionalQueryID(c.Query("merchant_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid merchant id"})
+		return
+	}
+
+	resp, err := g.merchantClient.ListMerchantProducts(gatewayContext(c), &pbMerchant.ListMerchantProductsRequest{
+		ActorUserId: userID,
+		MerchantId:  merchantID,
+		Page:        parseProductPage(c.Query("page")),
+		PageSize:    parseProductPageSize(c.Query("page_size")),
+	})
+	if err != nil {
+		writeGRPCError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func (g *APIGateway) handleCreateCurrentMerchantProduct(c *gin.Context) {
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		return
+	}
+	merchantID, err := parseOptionalQueryID(c.Query("merchant_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid merchant id"})
+		return
+	}
+	currentMerchant, err := g.merchantClient.GetCurrentMerchant(gatewayContext(c), &pbMerchant.CurrentMerchantRequest{
+		ActorUserId: userID,
+		MerchantId:  merchantID,
+	})
+	if err != nil {
+		writeGRPCError(c, err)
+		return
+	}
+
+	var req struct {
+		Name        string  `json:"name"`
+		Description string  `json:"description"`
+		Price       float32 `json:"price"`
+		Stock       int32   `json:"stock"`
+		Category    string  `json:"category"`
+		ImageURL    string  `json:"image_url"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Category) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name and category are required"})
+		return
+	}
+	if req.Price < 0 || req.Stock < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "price and stock must be non-negative"})
+		return
+	}
+
+	resp, err := g.merchantClient.AddProduct(gatewayContext(c), &pbMerchant.AddProductRequest{
+		MerchantId:  currentMerchant.Merchant.Id,
+		Name:        strings.TrimSpace(req.Name),
+		Description: strings.TrimSpace(req.Description),
+		Price:       req.Price,
+		Stock:       req.Stock,
+		Category:    strings.TrimSpace(req.Category),
+		ImageUrl:    strings.TrimSpace(req.ImageURL),
+		ActorUserId: userID,
+	})
+	if err != nil {
+		writeGRPCError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func (g *APIGateway) handleUpdateCurrentMerchantProduct(c *gin.Context) {
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		return
+	}
+	productID, err := parsePathID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid product id"})
+		return
+	}
+	merchantID, err := parseOptionalQueryID(c.Query("merchant_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid merchant id"})
+		return
+	}
+
+	var req struct {
+		Name        *string  `json:"name"`
+		Description *string  `json:"description"`
+		Price       *float32 `json:"price"`
+		Stock       *int32   `json:"stock"`
+		Category    *string  `json:"category"`
+		ImageURL    *string  `json:"image_url"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Name == nil && req.Description == nil && req.Price == nil && req.Stock == nil && req.Category == nil && req.ImageURL == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "at least one field must be provided"})
+		return
+	}
+	if req.Name != nil && strings.TrimSpace(*req.Name) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name cannot be empty"})
+		return
+	}
+	if req.Category != nil && strings.TrimSpace(*req.Category) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "category cannot be empty"})
+		return
+	}
+	if req.Price != nil && *req.Price < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "price must be non-negative"})
+		return
+	}
+	if req.Stock != nil && *req.Stock < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "stock must be non-negative"})
+		return
+	}
+	trimOptionalString(req.Name)
+	trimOptionalString(req.Description)
+	trimOptionalString(req.Category)
+	trimOptionalString(req.ImageURL)
+
+	resp, err := g.merchantClient.UpdateMerchantProduct(gatewayContext(c), &pbMerchant.UpdateMerchantProductRequest{
+		ProductId:   productID,
+		ActorUserId: userID,
+		MerchantId:  merchantID,
+		Name:        req.Name,
+		Description: req.Description,
+		Price:       req.Price,
+		Stock:       req.Stock,
+		Category:    req.Category,
+		ImageUrl:    req.ImageURL,
+	})
+	if err != nil {
+		writeGRPCError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func (g *APIGateway) handleDeleteCurrentMerchantProduct(c *gin.Context) {
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		return
+	}
+	productID, err := parsePathID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid product id"})
+		return
+	}
+	merchantID, err := parseOptionalQueryID(c.Query("merchant_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid merchant id"})
+		return
+	}
+	currentMerchant, err := g.merchantClient.GetCurrentMerchant(gatewayContext(c), &pbMerchant.CurrentMerchantRequest{
+		ActorUserId: userID,
+		MerchantId:  merchantID,
+	})
+	if err != nil {
+		writeGRPCError(c, err)
+		return
+	}
+
+	resp, err := g.merchantClient.DeleteProduct(gatewayContext(c), &pbMerchant.DeleteProductRequest{
+		MerchantId:  currentMerchant.Merchant.Id,
+		ProductId:   productID,
+		ActorUserId: userID,
+	})
+	if err != nil {
+		writeGRPCError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func (g *APIGateway) handleCurrentMerchantOrders(c *gin.Context) {
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		return
+	}
+	merchantID, err := parseOptionalQueryID(c.Query("merchant_id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid merchant id"})
+		return
+	}
+	resp, err := g.orderClient.ListMerchantOrders(gatewayContext(c), &pbOrder.ListMerchantOrdersRequest{
+		ActorUserId: userID,
+		MerchantId:  merchantID,
+		Page:        parseProductPage(c.Query("page")),
+		PageSize:    parseProductPageSize(c.Query("page_size")),
+	})
+	if err != nil {
+		writeGRPCError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func trimOptionalString(value *string) {
+	if value == nil {
+		return
+	}
+	*value = strings.TrimSpace(*value)
+}
+
+func authenticatedUserID(c *gin.Context) (int64, bool) {
+	userID, ok := currentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return 0, false
+	}
+	return userID, true
 }
 
 func writeGRPCError(c *gin.Context, err error) {

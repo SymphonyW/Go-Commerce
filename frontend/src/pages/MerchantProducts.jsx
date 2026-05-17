@@ -1,251 +1,280 @@
-import React, { useState, useEffect } from 'react';
-import { merchantAPI, productAPI } from '../services/api';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import MerchantConsoleNav from '../components/MerchantConsoleNav';
+import { merchantAPI } from '../services/api';
 
-// 处理图片URL，将维基百科页面URL转换为实际图片文件URL
-const processImageUrl = (url) => {
-  if (!url) return 'https://via.placeholder.com/100';
-  
-  // 检查是否是维基百科的图片页面URL
-  if (url.includes('wikipedia.org/wiki/File:')) {
-    // 提取文件名
-    const fileName = url.split('/').pop();
-    // 构建实际的图片文件URL
-    return `https://upload.wikimedia.org/wikipedia/commons/thumb/${fileName.charAt(0)}/${fileName.charAt(0) + fileName.charAt(1)}/${fileName}/100px-${fileName}`;
-  }
-  
-  return url;
+const emptyForm = {
+  name: '',
+  description: '',
+  price: '',
+  stock: '',
+  category: '',
+  image_url: '',
 };
 
 const MerchantProducts = () => {
-  const { id } = useParams();
   const navigate = useNavigate();
-  const [products, setProducts] = useState([]);
-  const [newProduct, setNewProduct] = useState({
-    merchant_id: id,
-    name: '',
-    description: '',
-    price: '',
-    stock: '',
-    category: '',
-    image_url: ''
-  });
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+  const { id } = useParams();
+  const [searchParams] = useSearchParams();
+  const explicitMerchantId = searchParams.get('merchant_id') || id || undefined;
   const role = localStorage.getItem('role');
-  const canManageMerchants = role === 'merchant' || role === 'admin';
+  const [products, setProducts] = useState([]);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [formData, setFormData] = useState(emptyForm);
+  const [editingProductId, setEditingProductId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const pageSize = 6;
 
   useEffect(() => {
-    fetchProducts();
-  }, [id]);
-
-  if (!canManageMerchants) {
-    return <div className="error-message">当前账户没有管理商户商品的权限。</div>;
-  }
-
-  const fetchProducts = async () => {
-    try {
-      setLoading(true);
-      const data = await productAPI.listProducts();
-      // 过滤出当前商户的产品
-      const merchantProducts = data.products.filter(product => product.merchant_id == id);
-      setProducts(merchantProducts);
-    } catch (err) {
-      setError('获取产品列表失败');
-      console.error('Error fetching products:', err);
-    } finally {
-      setLoading(false);
+    const token = localStorage.getItem('token');
+    if (!token) {
+      navigate('/login');
+      return;
     }
-  };
+    if (role !== 'merchant' && role !== 'admin') {
+      navigate('/');
+    }
+  }, [navigate, role]);
 
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    setNewProduct(prev => ({ ...prev, [name]: value }));
-  };
+  const params = useMemo(
+    () => (explicitMerchantId ? { merchant_id: explicitMerchantId } : {}),
+    [explicitMerchantId],
+  );
 
-  const handleAddProduct = async (e) => {
-    e.preventDefault();
+  useEffect(() => {
+    loadProducts(page);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, explicitMerchantId]);
+
+  const loadProducts = async (targetPage = page) => {
     try {
       setLoading(true);
-      // 转换类型
-      const productData = {
-        ...newProduct,
-        merchant_id: parseInt(newProduct.merchant_id),
-        price: parseFloat(newProduct.price),
-        stock: parseInt(newProduct.stock)
-      };
-      await merchantAPI.addProduct(productData);
-      setNewProduct({
-        merchant_id: id,
-        name: '',
-        description: '',
-        price: '',
-        stock: '',
-        category: '',
-        image_url: ''
+      setError('');
+      const data = await merchantAPI.listConsoleProducts({
+        ...params,
+        page: targetPage,
+        page_size: pageSize,
       });
-      await fetchProducts();
+      setProducts(data.products || []);
+      setTotal(data.total || 0);
     } catch (err) {
-      setError('添加产品失败');
-      console.error('Error adding product:', err);
+      setError(err.response?.data?.error || '获取商品列表失败');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleDeleteProduct = async (productId) => {
+  const handleChange = (event) => {
+    const { name, value } = event.target;
+    setFormData((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const validateForm = () => {
+    if (!formData.name.trim()) return '请输入商品名称';
+    if (!formData.category.trim()) return '请输入商品分类';
+    if (formData.price === '' || Number(formData.price) < 0) return '价格必须大于等于 0';
+    if (formData.stock === '' || Number(formData.stock) < 0) return '库存必须大于等于 0';
+    return '';
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    const validationError = validateForm();
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
+    const payload = {
+      ...formData,
+      name: formData.name.trim(),
+      description: formData.description.trim(),
+      category: formData.category.trim(),
+      image_url: formData.image_url.trim(),
+      price: Number(formData.price),
+      stock: Number(formData.stock),
+    };
+
     try {
-      setLoading(true);
-      await merchantAPI.deleteProduct({ merchant_id: parseInt(id), product_id: productId });
-      await fetchProducts();
+      setSubmitting(true);
+      setError('');
+      setSuccess('');
+      if (editingProductId) {
+        await merchantAPI.updateConsoleProduct(editingProductId, payload, params);
+        setSuccess('商品已更新');
+      } else {
+        await merchantAPI.createConsoleProduct(payload, params);
+        setSuccess('商品已创建');
+      }
+      setFormData(emptyForm);
+      setEditingProductId(null);
+      await loadProducts(page);
     } catch (err) {
-      setError('删除产品失败');
-      console.error('Error deleting product:', err);
+      setError(err.response?.data?.error || '保存商品失败');
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   };
+
+  const startEditing = (product) => {
+    setEditingProductId(product.id);
+    setFormData({
+      name: product.name || '',
+      description: product.description || '',
+      price: product.price ?? '',
+      stock: product.stock ?? '',
+      category: product.category || '',
+      image_url: product.image_url || '',
+    });
+    setSuccess('');
+    setError('');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const cancelEditing = () => {
+    setEditingProductId(null);
+    setFormData(emptyForm);
+  };
+
+  const handleDelete = async (product) => {
+    if (!window.confirm(`确认删除商品“${product.name}”吗？`)) return;
+
+    try {
+      setSubmitting(true);
+      setError('');
+      setSuccess('');
+      await merchantAPI.deleteConsoleProduct(product.id, params);
+      setSuccess('商品已删除');
+      const nextPage = products.length === 1 && page > 1 ? page - 1 : page;
+      setPage(nextPage);
+      await loadProducts(nextPage);
+    } catch (err) {
+      setError(err.response?.data?.error || '删除商品失败');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   return (
-    <div className="merchant-products-container">
-      <h1>商户产品管理</h1>
-      
-      {error && <div className="error-message">{error}</div>}
-      
-      <div className="page-actions">
-        <button type="button" onClick={() => navigate('/merchants')} className="btn btn-secondary">
-          返回商户列表
-        </button>
-      </div>
-      
-      {/* 添加产品表单 */}
-      <div className="add-product">
-        <h2>添加产品</h2>
-        <form onSubmit={handleAddProduct} className="product-form">
+    <div className="merchant-console">
+      <MerchantConsoleNav />
+
+      <section className="merchant-section">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">商品管理</p>
+            <h1>{editingProductId ? '编辑商品' : '新增商品'}</h1>
+          </div>
+        </div>
+
+        {error && <div className="error-message">{error}</div>}
+        {success && <div className="success-message">{success}</div>}
+
+        <form className="merchant-form refined" onSubmit={handleSubmit}>
           <div className="form-row">
             <div className="form-group">
-              <label htmlFor="merchant_id">商户ID</label>
-              <input
-                type="number"
-                id="merchant_id"
-                name="merchant_id"
-                value={newProduct.merchant_id}
-                onChange={handleChange}
-                readOnly
-              />
+              <label htmlFor="name">商品名称</label>
+              <input id="name" name="name" value={formData.name} onChange={handleChange} required />
             </div>
             <div className="form-group">
-              <label htmlFor="name">产品名称</label>
-              <input
-                type="text"
-                id="name"
-                name="name"
-                value={newProduct.name}
-                onChange={handleChange}
-                required
-              />
+              <label htmlFor="category">分类</label>
+              <input id="category" name="category" value={formData.category} onChange={handleChange} required />
             </div>
           </div>
           <div className="form-row">
             <div className="form-group">
               <label htmlFor="price">价格</label>
-              <input
-                type="number"
-                step="0.01"
-                id="price"
-                name="price"
-                value={newProduct.price}
-                onChange={handleChange}
-                required
-              />
+              <input id="price" name="price" type="number" min="0" step="0.01" value={formData.price} onChange={handleChange} required />
             </div>
             <div className="form-group">
               <label htmlFor="stock">库存</label>
-              <input
-                type="number"
-                id="stock"
-                name="stock"
-                value={newProduct.stock}
-                onChange={handleChange}
-                required
-              />
-            </div>
-          </div>
-          <div className="form-row">
-            <div className="form-group">
-              <label htmlFor="category">分类</label>
-              <input
-                type="text"
-                id="category"
-                name="category"
-                value={newProduct.category}
-                onChange={handleChange}
-                required
-              />
-            </div>
-            <div className="form-group">
-              <label htmlFor="image_url">图片URL</label>
-              <input
-                type="text"
-                id="image_url"
-                name="image_url"
-                value={newProduct.image_url}
-                onChange={handleChange}
-                required
-              />
+              <input id="stock" name="stock" type="number" min="0" value={formData.stock} onChange={handleChange} required />
             </div>
           </div>
           <div className="form-group">
-            <label htmlFor="description">产品描述</label>
-            <textarea
-              id="description"
-              name="description"
-              value={newProduct.description}
-              onChange={handleChange}
-              required
-            />
+            <label htmlFor="description">描述</label>
+            <textarea id="description" name="description" value={formData.description} onChange={handleChange} />
+          </div>
+          <div className="form-group">
+            <label htmlFor="image_url">图片 URL</label>
+            <input id="image_url" name="image_url" value={formData.image_url} onChange={handleChange} />
           </div>
           <div className="form-actions">
-            <button type="submit" disabled={loading} className="btn btn-primary">
-              {loading ? '添加中...' : '添加产品'}
+            <button type="submit" className="btn btn-primary" disabled={submitting}>
+              {submitting ? '保存中...' : editingProductId ? '保存修改' : '创建商品'}
             </button>
+            {editingProductId && (
+              <button type="button" className="btn btn-secondary" onClick={cancelEditing}>
+                取消编辑
+              </button>
+            )}
           </div>
         </form>
-      </div>
-      
-      {/* 产品列表 */}
-      <div className="products-list">
-        <h2>产品列表</h2>
-        {loading ? (
-          <p>加载中...</p>
-        ) : (
-          <div className="products-grid">
-            {products.map((product) => (
-              <div key={product.id} className="product-card">
-                <img 
-                  src={processImageUrl(product.image_url)} 
-                  alt={product.name} 
-                  className="product-image"
-                />
-                <h3>{product.name}</h3>
-                <p>描述: {product.description}</p>
-                <p>价格: ¥{product.price}</p>
-                <p>库存: {product.stock}</p>
-                <p>分类: {product.category}</p>
-                <div className="card-actions">
-                  <button
-                    onClick={() => handleDeleteProduct(product.id)}
-                    disabled={loading}
-                    className="btn btn-danger"
-                  >
-                    删除
-                  </button>
-                </div>
-              </div>
-            ))}
+      </section>
+
+      <section className="merchant-section">
+        <div className="section-heading">
+          <div>
+            <h2>商品列表</h2>
+            <p>共 {total} 件商品，支持分页查看。</p>
           </div>
+        </div>
+
+        {loading ? (
+          <div className="loading">加载中...</div>
+        ) : products.length === 0 ? (
+          <div className="empty-state compact">暂无商品，先创建第一件商品吧。</div>
+        ) : (
+          <>
+            <div className="merchant-table product-table">
+              <div className="merchant-table-head">
+                <span>商品</span>
+                <span>分类</span>
+                <span>价格</span>
+                <span>库存</span>
+                <span>操作</span>
+              </div>
+              {products.map((product) => (
+                <div key={product.id} className="merchant-table-row">
+                  <span>
+                    <strong>{product.name}</strong>
+                    <small>{product.description || '暂无描述'}</small>
+                  </span>
+                  <span>{product.category}</span>
+                  <span>¥{Number(product.price || 0).toFixed(2)}</span>
+                  <span>{product.stock}</span>
+                  <span className="inline-actions">
+                    <button type="button" className="btn btn-sm" onClick={() => startEditing(product)}>
+                      编辑
+                    </button>
+                    <button type="button" className="btn btn-sm btn-danger" onClick={() => handleDelete(product)} disabled={submitting}>
+                      删除
+                    </button>
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            <div className="pagination">
+              <button className="btn btn-secondary" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>
+                上一页
+              </button>
+              <span>
+                第 {page} / {totalPages} 页
+              </span>
+              <button className="btn btn-secondary" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}>
+                下一页
+              </button>
+            </div>
+          </>
         )}
-      </div>
+      </section>
     </div>
   );
 };

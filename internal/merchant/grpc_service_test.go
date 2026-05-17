@@ -168,3 +168,58 @@ func TestCustomerCannotUseMerchantWriteOperations(t *testing.T) {
 		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.PermissionDenied)
 	}
 }
+
+func TestMerchantOnlyListsOwnProducts(t *testing.T) {
+	service, db := newMerchantTestService(t)
+	owner := createMerchantTestUser(t, db, "product-owner", "merchant")
+	other := createMerchantTestUser(t, db, "product-other", "merchant")
+	ownShop := createOwnedMerchant(t, db, "Own Shop", owner.ID)
+	otherShop := createOwnedMerchant(t, db, "Other Shop", other.ID)
+
+	if err := db.Create(&product.Product{Name: "Own Product", Price: 10, Stock: 3, MerchantID: ownShop.ID}).Error; err != nil {
+		t.Fatalf("failed to create own product: %v", err)
+	}
+	if err := db.Create(&product.Product{Name: "Other Product", Price: 20, Stock: 5, MerchantID: otherShop.ID}).Error; err != nil {
+		t.Fatalf("failed to create other product: %v", err)
+	}
+
+	resp, err := service.ListMerchantProducts(context.Background(), &pb.ListMerchantProductsRequest{
+		ActorUserId: int64(owner.ID),
+		Page:        1,
+		PageSize:    10,
+	})
+	if err != nil {
+		t.Fatalf("ListMerchantProducts returned error: %v", err)
+	}
+	if got, want := resp.Total, int64(1); got != want {
+		t.Fatalf("unexpected product total: got %d want %d", got, want)
+	}
+	if got, want := len(resp.Products), 1; got != want {
+		t.Fatalf("unexpected product count: got %d want %d", got, want)
+	}
+	if got, want := resp.Products[0].Name, "Own Product"; got != want {
+		t.Fatalf("unexpected product name: got %q want %q", got, want)
+	}
+}
+
+func TestMerchantCannotUpdateForeignProduct(t *testing.T) {
+	service, db := newMerchantTestService(t)
+	owner := createMerchantTestUser(t, db, "foreign-owner", "merchant")
+	other := createMerchantTestUser(t, db, "foreign-actor", "merchant")
+	shop := createOwnedMerchant(t, db, "Foreign Shop", owner.ID)
+
+	target := product.Product{Name: "Protected Product", Price: 10, Stock: 3, MerchantID: shop.ID}
+	if err := db.Create(&target).Error; err != nil {
+		t.Fatalf("failed to create product: %v", err)
+	}
+
+	newPrice := float32(99)
+	_, err := service.UpdateMerchantProduct(context.Background(), &pb.UpdateMerchantProductRequest{
+		ProductId:   int64(target.ID),
+		ActorUserId: int64(other.ID),
+		Price:       &newPrice,
+	})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.PermissionDenied)
+	}
+}

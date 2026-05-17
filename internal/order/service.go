@@ -446,6 +446,74 @@ func (s *Service) ListOrders(ctx context.Context, req *pb.ListOrdersRequest) (*p
 	}, nil
 }
 
+// ListMerchantOrders 返回与当前商家相关的订单。
+// 订单归属直接基于 order_items.merchant_id 快照筛选，因此商品后续改名、改价或换归属都不会污染历史订单。
+func (s *Service) ListMerchantOrders(ctx context.Context, req *pb.ListMerchantOrdersRequest) (*pb.ListMerchantOrdersResponse, error) {
+	if req == nil {
+		req = &pb.ListMerchantOrdersRequest{}
+	}
+	page, pageSize := normalizeOrderPagination(req.Page, req.PageSize)
+
+	merchantIDs, restrictedItems, err := s.resolveMerchantOrderScope(uint(req.ActorUserId), req.MerchantId)
+	if err != nil {
+		return nil, orderStatusError(err)
+	}
+
+	var orders []Order
+	var total int64
+
+	if len(merchantIDs) == 0 && restrictedItems {
+		return &pb.ListMerchantOrdersResponse{}, nil
+	}
+
+	if !restrictedItems {
+		if err := s.db.Model(&Order{}).Count(&total).Error; err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to count merchant orders: %v", err)
+		}
+		offset := (page - 1) * pageSize
+		if err := s.db.Order("created_at DESC").Order("id DESC").Offset(int(offset)).Limit(int(pageSize)).Find(&orders).Error; err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to fetch merchant orders: %v", err)
+		}
+	} else {
+		orderIDSubQuery := s.db.Model(&OrderItem{}).
+			Select("DISTINCT order_id").
+			Where("merchant_id IN ?", merchantIDs)
+		if err := s.db.Model(&Order{}).Where("id IN (?)", orderIDSubQuery).Count(&total).Error; err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to count merchant orders: %v", err)
+		}
+		offset := (page - 1) * pageSize
+		if err := s.db.
+			Where("id IN (?)", orderIDSubQuery).
+			Order("created_at DESC").
+			Order("id DESC").
+			Offset(int(offset)).
+			Limit(int(pageSize)).
+			Find(&orders).Error; err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to fetch merchant orders: %v", err)
+		}
+	}
+
+	pbOrders := make([]*pb.Order, len(orders))
+	for i, orderInfo := range orders {
+		var orderItems []OrderItem
+		itemQuery := s.db.Where("order_id = ?", orderInfo.ID)
+		if restrictedItems {
+			itemQuery = itemQuery.Where("merchant_id IN ?", merchantIDs)
+		}
+		if err := itemQuery.Find(&orderItems).Error; err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to fetch merchant order items: %v", err)
+		}
+
+		visibleOrder := orderInfo
+		if restrictedItems {
+			visibleOrder.TotalAmount = sumOrderItems(orderItems)
+		}
+		pbOrders[i] = convertToPBOrder(&visibleOrder, orderItems)
+	}
+
+	return &pb.ListMerchantOrdersResponse{Orders: pbOrders, Total: total}, nil
+}
+
 // GetOrder 获取订单详情
 // 功能：根据订单ID和用户ID获取订单详情
 // 参数：
@@ -724,6 +792,71 @@ func uniqueMerchantIDs(orderItems []OrderItem) []uint {
 	return merchantIDs
 }
 
+func normalizeOrderPagination(page, pageSize int32) (int32, int32) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 10
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	return page, pageSize
+}
+
+func (s *Service) resolveMerchantOrderScope(actorUserID uint, requestedMerchantID *int64) ([]uint, bool, error) {
+	var actor auth.User
+	if err := s.db.First(&actor, actorUserID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, false, merchant.ErrUserNotFound
+		}
+		return nil, false, err
+	}
+
+	switch actor.Role {
+	case auth.RoleAdmin:
+		if requestedMerchantID == nil {
+			return nil, false, nil
+		}
+		var shop merchant.Merchant
+		if err := s.db.First(&shop, *requestedMerchantID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, false, merchant.ErrMerchantNotFound
+			}
+			return nil, false, err
+		}
+		return []uint{shop.ID}, true, nil
+	case auth.RoleMerchant:
+		query := s.db.Where("owner_user_id = ?", actorUserID)
+		if requestedMerchantID != nil {
+			query = query.Where("id = ?", *requestedMerchantID)
+		}
+		var shops []merchant.Merchant
+		if err := query.Find(&shops).Error; err != nil {
+			return nil, false, err
+		}
+		if requestedMerchantID != nil && len(shops) == 0 {
+			return nil, false, merchant.ErrPermissionDenied
+		}
+		merchantIDs := make([]uint, len(shops))
+		for i, shop := range shops {
+			merchantIDs[i] = shop.ID
+		}
+		return merchantIDs, true, nil
+	default:
+		return nil, false, merchant.ErrPermissionDenied
+	}
+}
+
+func sumOrderItems(items []OrderItem) float64 {
+	var total float64
+	for _, item := range items {
+		total += item.Price * float64(item.Quantity)
+	}
+	return total
+}
+
 func newOrderStatusChangedEvent(ctx context.Context, eventType string, order *Order, fromStatus, toStatus string) events.OrderStatusChangedEvent {
 	return events.OrderStatusChangedEvent{
 		BaseEvent:  events.NewBaseEventWithContext(ctx, eventType, time.Now()),
@@ -753,6 +886,8 @@ func orderStatusError(err error) error {
 		return status.Error(codes.PermissionDenied, "order operation is not allowed")
 	case errors.Is(err, merchant.ErrUserNotFound):
 		return status.Error(codes.NotFound, "user not found")
+	case errors.Is(err, merchant.ErrMerchantNotFound):
+		return status.Error(codes.NotFound, "merchant not found")
 	default:
 		return status.Errorf(codes.Internal, "order operation failed: %v", err)
 	}

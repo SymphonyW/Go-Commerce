@@ -56,6 +56,18 @@ message ListOrdersResponse {
   int64 total = 2;
 }
 
+message ListMerchantOrdersRequest {
+  int64 actor_user_id = 1;
+  optional int64 merchant_id = 2;
+  int32 page = 3;
+  int32 page_size = 4;
+}
+
+message ListMerchantOrdersResponse {
+  repeated Order orders = 1;
+  int64 total = 2;
+}
+
 message CancelOrderRequest {
   int64 id = 1;
   int64 user_id = 2;
@@ -91,6 +103,7 @@ service OrderService {
   rpc CreateOrder(CreateOrderRequest) returns (CreateOrderResponse);
   rpc GetOrder(GetOrderRequest) returns (GetOrderResponse);
   rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
+  rpc ListMerchantOrders(ListMerchantOrdersRequest) returns (ListMerchantOrdersResponse);
   rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
   rpc ShipOrder(ShipOrderRequest) returns (ShipOrderResponse);
   rpc CompleteOrder(CompleteOrderRequest) returns (CompleteOrderResponse);

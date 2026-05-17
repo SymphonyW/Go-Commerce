@@ -195,11 +195,91 @@ func (s *GRPCService) DeleteProduct(ctx context.Context, req *pb.DeleteProductRe
 	}, nil
 }
 
+// GetCurrentMerchant 获取当前登录商家的控制台店铺信息。
+func (s *GRPCService) GetCurrentMerchant(ctx context.Context, req *pb.CurrentMerchantRequest) (*pb.CurrentMerchantResponse, error) {
+	merchant, err := s.core.CurrentMerchantForUser(uint(req.ActorUserId), optionalMerchantID(req.MerchantId))
+	if err != nil {
+		return nil, merchantStatusError(err, "failed to get current merchant")
+	}
+	return &pb.CurrentMerchantResponse{Merchant: convertToPBMerchant(&merchant)}, nil
+}
+
+// ListMerchantProducts 列出当前控制台店铺下的商品。
+func (s *GRPCService) ListMerchantProducts(ctx context.Context, req *pb.ListMerchantProductsRequest) (*pb.ListMerchantProductsResponse, error) {
+	products, total, err := s.core.ListProductsForUser(
+		uint(req.ActorUserId),
+		optionalMerchantID(req.MerchantId),
+		req.Page,
+		req.PageSize,
+	)
+	if err != nil {
+		return nil, merchantStatusError(err, "failed to list merchant products")
+	}
+
+	pbProducts := make([]*pb.MerchantProduct, len(products))
+	for i := range products {
+		pbProducts[i] = convertToPBMerchantProduct(&products[i])
+	}
+	return &pb.ListMerchantProductsResponse{Products: pbProducts, Total: total}, nil
+}
+
+// UpdateMerchantProduct 更新当前控制台店铺下的商品资料。
+func (s *GRPCService) UpdateMerchantProduct(ctx context.Context, req *pb.UpdateMerchantProductRequest) (*pb.UpdateMerchantProductResponse, error) {
+	productInfo, err := s.core.UpdateProductForUser(
+		uint(req.ActorUserId),
+		optionalMerchantID(req.MerchantId),
+		uint(req.ProductId),
+		ProductUpdate{
+			Name:        req.Name,
+			Description: req.Description,
+			Price:       req.Price,
+			Stock:       req.Stock,
+			Category:    req.Category,
+			ImageURL:    req.ImageUrl,
+		},
+	)
+	if err != nil {
+		return nil, merchantStatusError(err, "failed to update merchant product")
+	}
+	return &pb.UpdateMerchantProductResponse{Product: convertToPBMerchantProduct(&productInfo)}, nil
+}
+
 func ownerUserIDValue(ownerUserID *uint) int64 {
 	if ownerUserID == nil {
 		return 0
 	}
 	return int64(*ownerUserID)
+}
+
+func convertToPBMerchant(merchant *Merchant) *pb.Merchant {
+	return &pb.Merchant{
+		Id:          int64(merchant.ID),
+		Name:        merchant.Name,
+		ContactInfo: merchant.ContactInfo,
+		CreatedAt:   merchant.CreatedAt.Format(time.RFC3339),
+		OwnerUserId: ownerUserIDValue(merchant.OwnerUserID),
+	}
+}
+
+func convertToPBMerchantProduct(productInfo *product.Product) *pb.MerchantProduct {
+	return &pb.MerchantProduct{
+		Id:          int64(productInfo.ID),
+		Name:        productInfo.Name,
+		Description: productInfo.Description,
+		Price:       float32(productInfo.Price),
+		Stock:       productInfo.Stock,
+		Category:    productInfo.Category,
+		ImageUrl:    productInfo.ImageURL,
+		MerchantId:  int64(productInfo.MerchantID),
+	}
+}
+
+func optionalMerchantID(value *int64) *uint {
+	if value == nil {
+		return nil
+	}
+	merchantID := uint(*value)
+	return &merchantID
 }
 
 func merchantStatusError(err error, fallback string) error {
@@ -210,6 +290,8 @@ func merchantStatusError(err error, fallback string) error {
 		return status.Error(codes.NotFound, "user not found")
 	case errors.Is(err, ErrMerchantNotFound):
 		return status.Error(codes.NotFound, "merchant not found")
+	case errors.Is(err, ErrMerchantSelectionRequired):
+		return status.Error(codes.InvalidArgument, "merchant id is required for admin")
 	case errors.Is(err, ErrProductNotFound):
 		return status.Error(codes.NotFound, "product not found or not belong to this merchant")
 	default:

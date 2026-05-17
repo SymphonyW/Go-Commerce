@@ -42,6 +42,10 @@ func (f *fakeOrderClient) ListOrders(context.Context, *pbOrder.ListOrdersRequest
 	return nil, nil
 }
 
+func (f *fakeOrderClient) ListMerchantOrders(context.Context, *pbOrder.ListMerchantOrdersRequest, ...grpc.CallOption) (*pbOrder.ListMerchantOrdersResponse, error) {
+	return nil, nil
+}
+
 func (f *fakeOrderClient) CancelOrder(context.Context, *pbOrder.CancelOrderRequest, ...grpc.CallOption) (*pbOrder.CancelOrderResponse, error) {
 	return nil, nil
 }

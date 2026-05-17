@@ -184,6 +184,30 @@ export const merchantAPI = {
 		const response = await api.delete('/merchants/products', { data });
 		return response.data;
 	},
+	getProfile: async (params = {}) => {
+		const response = await api.get('/merchant/profile', { params });
+		return response.data;
+	},
+	listConsoleProducts: async (params = {}) => {
+		const response = await api.get('/merchant/products', { params });
+		return response.data;
+	},
+	createConsoleProduct: async (productData, params = {}) => {
+		const response = await api.post('/merchant/products', productData, { params });
+		return response.data;
+	},
+	updateConsoleProduct: async (id, productData, params = {}) => {
+		const response = await api.put(`/merchant/products/${id}`, productData, { params });
+		return response.data;
+	},
+	deleteConsoleProduct: async (id, params = {}) => {
+		const response = await api.delete(`/merchant/products/${id}`, { params });
+		return response.data;
+	},
+	listConsoleOrders: async (params = {}) => {
+		const response = await api.get('/merchant/orders', { params });
+		return response.data;
+	},
 };
 
 // 购物车相关API

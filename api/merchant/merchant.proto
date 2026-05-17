@@ -65,10 +65,61 @@ message DeleteProductResponse {
   bool success = 1;
 }
 
+message CurrentMerchantRequest {
+  int64 actor_user_id = 1;
+  optional int64 merchant_id = 2;
+}
+
+message CurrentMerchantResponse {
+  Merchant merchant = 1;
+}
+
+message MerchantProduct {
+  int64 id = 1;
+  string name = 2;
+  string description = 3;
+  float price = 4;
+  int32 stock = 5;
+  string category = 6;
+  string image_url = 7;
+  int64 merchant_id = 8;
+}
+
+message ListMerchantProductsRequest {
+  int64 actor_user_id = 1;
+  optional int64 merchant_id = 2;
+  int32 page = 3;
+  int32 page_size = 4;
+}
+
+message ListMerchantProductsResponse {
+  repeated MerchantProduct products = 1;
+  int64 total = 2;
+}
+
+message UpdateMerchantProductRequest {
+  int64 product_id = 1;
+  int64 actor_user_id = 2;
+  optional int64 merchant_id = 3;
+  optional string name = 4;
+  optional string description = 5;
+  optional float price = 6;
+  optional int32 stock = 7;
+  optional string category = 8;
+  optional string image_url = 9;
+}
+
+message UpdateMerchantProductResponse {
+  MerchantProduct product = 1;
+}
+
 service MerchantService {
   rpc CreateMerchant(CreateMerchantRequest) returns (CreateMerchantResponse);
   rpc GetMerchant(GetMerchantRequest) returns (GetMerchantResponse);
   rpc ListMerchants(ListMerchantsRequest) returns (ListMerchantsResponse);
   rpc AddProduct(AddProductRequest) returns (AddProductResponse);
   rpc DeleteProduct(DeleteProductRequest) returns (DeleteProductResponse);
+  rpc GetCurrentMerchant(CurrentMerchantRequest) returns (CurrentMerchantResponse);
+  rpc ListMerchantProducts(ListMerchantProductsRequest) returns (ListMerchantProductsResponse);
+  rpc UpdateMerchantProduct(UpdateMerchantProductRequest) returns (UpdateMerchantProductResponse);
 }

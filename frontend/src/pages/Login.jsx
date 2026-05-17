@@ -1,26 +1,20 @@
 import { useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { authAPI } from '../services/api';
-import { useNavigate, Link } from 'react-router-dom';
 
 const Login = () => {
-  const [formData, setFormData] = useState({
-    username: '',
-    password: '',
-  });
+  const [formData, setFormData] = useState({ username: '', password: '' });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    setFormData((prev) => ({
-      ...prev,
-      [name]: value,
-    }));
+  const handleChange = (event) => {
+    const { name, value } = event.target;
+    setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const handleSubmit = async (event) => {
+    event.preventDefault();
     setError('');
     setLoading(true);
 
@@ -29,9 +23,15 @@ const Login = () => {
       localStorage.setItem('token', data.token);
       localStorage.setItem('user_id', data.user_id);
       localStorage.setItem('role', data.role);
-      navigate('/');
-    } catch (error) {
-      setError(error.response?.data?.error || '登录失败，请检查用户名和密码');
+      if (data.role === 'merchant') {
+        navigate('/merchant');
+      } else if (data.role === 'admin') {
+        navigate('/merchants');
+      } else {
+        navigate('/');
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || '登录失败，请检查用户名和密码');
     } finally {
       setLoading(false);
     }
@@ -45,32 +45,18 @@ const Login = () => {
         <form onSubmit={handleSubmit}>
           <div className="form-group">
             <label htmlFor="username">用户名</label>
-            <input
-              type="text"
-              id="username"
-              name="username"
-              value={formData.username}
-              onChange={handleChange}
-              required
-            />
+            <input id="username" name="username" value={formData.username} onChange={handleChange} required />
           </div>
           <div className="form-group">
             <label htmlFor="password">密码</label>
-            <input
-              type="password"
-              id="password"
-              name="password"
-              value={formData.password}
-              onChange={handleChange}
-              required
-            />
+            <input id="password" name="password" type="password" value={formData.password} onChange={handleChange} required />
           </div>
           <button type="submit" className="btn btn-primary" disabled={loading}>
             {loading ? '登录中...' : '登录'}
           </button>
         </form>
         <div className="auth-footer">
-          没有账户？ <Link to="/register">注册</Link>
+          没有账户？<Link to="/register">注册</Link>
         </div>
       </div>
     </div>

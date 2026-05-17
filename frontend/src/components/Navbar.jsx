@@ -4,7 +4,8 @@ const Navbar = () => {
   const navigate = useNavigate();
   const token = localStorage.getItem('token');
   const role = localStorage.getItem('role');
-  const canManageMerchants = role === 'merchant' || role === 'admin';
+  const canUseMerchantConsole = role === 'merchant';
+  const canManageMerchants = role === 'admin';
 
   const handleLogout = () => {
     localStorage.removeItem('token');
@@ -33,6 +34,11 @@ const Navbar = () => {
           )}
           {token ? (
             <>
+              {canUseMerchantConsole && (
+                <Link to="/merchant" className="navbar-link">
+                  商家后台
+                </Link>
+              )}
               <Link to="/cart" className="navbar-link">
                 购物车
               </Link>

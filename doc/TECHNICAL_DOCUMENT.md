@@ -302,6 +302,19 @@ order-service timeout consumer
 - 商户服务再基于数据库中的真实角色和 `owner_user_id` 做最终授权，避免只信任前端传入的 `merchant_id`
 - 为兼容历史商户数据，`owner_user_id` 先允许为空；旧数据回填完成后，再考虑收紧为非空约束
 
+**商家后台扩展能力**：
+
+- `GetCurrentMerchant`：把商家控制台默认落到当前账号最早创建的店铺，给演示场景一个稳定入口
+- `ListMerchantProducts` / `UpdateMerchantProduct`：在商户服务内统一完成商品归属校验，避免把资源隔离逻辑散落在网关或前端
+- 管理员访问后台时必须显式传入 `merchant_id`，避免多店铺环境下出现目标不明的写操作
+
+**资源隔离逻辑**：
+
+1. API Gateway 先做登录与角色拦截：未登录返回 `401`，`customer` 访问商家后台返回 `403`
+2. `merchant-service` 再基于数据库里的真实 `owner_user_id` 做二次授权
+3. 商品列表、更新、删除都以服务端推导出的店铺归属为准，不信任前端传来的身份信息
+4. 对越权更新，服务端会在真实资源层再次校验目标商品所属店铺，阻断跨店铺操作
+
 ### 4.8 通知服务
 
 **职责**：异步消费订单事件，演示订单服务与后续业务服务之间的解耦。
@@ -326,12 +339,27 @@ order-service timeout consumer
 - 购物车管理：添加、移除商品
 - 订单管理：创建订单、查看订单历史
 - 商户管理：创建商户、管理商户产品
+- 商家后台：总览、商品分页管理、订单查看、角色化导航
 
 **主要文件**：
 - `frontend/src/main.jsx`：前端应用入口
 - `frontend/src/components/Navbar.jsx`：导航组件
 - `frontend/src/pages/`：各页面组件，包括新增的Merchants.jsx
 - `frontend/src/services/api.js`：API调用服务，包含商户相关API
+- `frontend/src/pages/MerchantDashboard.jsx`：商家后台总览
+- `frontend/src/pages/MerchantProducts.jsx`：商家商品新增、编辑、删除和分页列表
+- `frontend/src/pages/MerchantOrders.jsx`：商家相关订单列表
+
+### 4.10 商家订单归属设计
+
+商家订单查询直接依赖 `order_items.merchant_id` 快照，而不是每次都从 `product_id -> products.merchant_id` 反查：
+
+- 下单瞬间把商品所属商家写入 `order_items.merchant_id`
+- 后续即便商品改名、改价，甚至发生店铺归属调整，历史订单仍保持下单时的归属事实
+- 查询商家订单时，`order-service` 只需要按 `merchant_id` 过滤订单项即可，逻辑更直接，也更适合演示
+- 对包含多个商家的混合订单，返回给商家的响应只保留其可见的订单项，并按这些可见项重新计算展示金额
+
+这种方案本质上是“历史快照优先”的领域建模：它略微增加了写入时的冗余，但显著降低了历史查询的歧义和跨服务联表复杂度。
 
 
 ## 5. 事件驱动设计
