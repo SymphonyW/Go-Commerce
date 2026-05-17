@@ -1,660 +1,647 @@
-# API 文档
+# Go Commerce API 文档
 
-## 1. 认证接口
+> 基础地址：`http://localhost:8080`
+> OpenAPI 3.0 描述：[`openapi.yaml`](../openapi.yaml)
 
-### 1.1 用户注册
+## 1. 约定
 
-- **端点**：`POST /api/register`
-- **描述**：注册新用户
-- **参数**：
-  - `username` (string)：用户名
-  - `password` (string)：密码
-  - `email` (string)：邮箱
-  - `role` (string，可选)：用户角色，可选 `customer` 或 `merchant`，默认 `customer`
-- **响应**：
-  ```json
-  {
-    "user_id": 1,
-    "token": "JWT_TOKEN",
-    "role": "customer"
-  }
-  ```
+### 1.1 鉴权标记
 
-### 1.2 用户登录
+| 标记 | 含义 |
+| --- | --- |
+| Public | 无需登录 |
+| JWT | 需要 `Authorization: Bearer <token>` |
+| Merchant/Admin | 需要 JWT，且角色为 `merchant` 或 `admin` |
 
-- **端点**：`POST /api/login`
-- **描述**：用户登录并获取JWT令牌
-- **参数**：
-  - `username` (string)：用户名
-  - `password` (string)：密码
-- **响应**：
-  ```json
-  {
-    "user_id": 1,
-    "token": "JWT_TOKEN",
-    "role": "customer"
-  }
-  ```
+### 1.2 通用响应
 
-## 2. 产品接口
+错误响应通常为：
 
-### 2.1 获取产品列表
+```json
+{
+  "error": "message"
+}
+```
 
-- **端点**：`GET /api/products`
-- **描述**：获取产品列表，支持分页、分类、关键词、价格区间与排序
-- **参数**：
-  - `page` (int)：页码，默认 `1`
-  - `page_size` (int)：每页数量，默认 `10`，最大 `100`
-  - `category` (string)：分类筛选
-  - `keyword` (string)：关键词，匹配商品名称或描述
-  - `sort_by` (string)：排序字段，可选 `created_at` / `price` / `stock`，默认 `created_at`
-  - `order` (string)：排序方向，可选 `asc` / `desc`，默认 `desc`
-  - `min_price` (float)：最低价格
-  - `max_price` (float)：最高价格，若同时传入时必须大于或等于 `min_price`
-- **示例**：`GET /api/products?page=2&page_size=20&category=book&keyword=Go&sort_by=price&order=asc&min_price=50&max_price=120`
-- **响应**：
-  ```json
-  {
-    "products": [
-      {
-        "id": 1,
-        "name": "Product Name",
-        "description": "Product Description",
-        "price": 99.99,
-        "stock": 100,
-        "category": "Electronics",
-        "image_url": "https://example.com/image.jpg",
-        "merchant_id": 1
-      }
-    ],
-    "total": 1
-  }
-  ```
+常见状态码：
 
-### 2.2 获取产品详情
+| 状态码 | 含义 |
+| --- | --- |
+| `400` | 参数错误 |
+| `401` | 未登录或 token 无效 |
+| `403` | 权限不足 |
+| `404` | 资源不存在 |
+| `409` | 前置条件冲突，例如状态不允许 |
+| `500` | 服务内部错误 |
 
-- **端点**：`GET /api/products/:id`
-- **描述**：获取单个产品的详细信息
-- **参数**：
-  - `id` (int)：产品ID
-- **响应**：
-  ```json
-  {
-    "product": {
+> 当前网关仍有少量历史接口未统一做 gRPC -> HTTP 错误映射，例如部分认证、购物车、旧版商家接口在下游报错时仍可能返回 `500`。这是当前实现状态，不是理想契约。
+
+### 1.3 `Idempotency-Key`
+
+| 接口 | Header 要求 | 当前实现 |
+| --- | --- | --- |
+| `POST /api/orders` | 必填 | 已落库，支持同 key 同请求回放 |
+| `PUT /api/orders/:id/cancel` | 必填 | 网关要求 header，业务层依赖状态机天然幂等 |
+| `POST /api/payments/:id/success` | 必填 | 网关要求 header，业务层依赖支付状态天然幂等 |
+
+示例：
+
+```http
+Idempotency-Key: order-20260517-0001
+```
+
+### 1.4 分页、排序与筛选
+
+| 场景 | 参数 |
+| --- | --- |
+| 商品列表 | `page`、`page_size`、`category`、`keyword`、`sort_by`、`order`、`min_price`、`max_price` |
+| 商家控制台商品 | `page`、`page_size`、`merchant_id`（仅 `admin` 需要） |
+| 商家控制台订单 | `page`、`page_size`、`merchant_id`（`admin` 可选） |
+
+当前限制：
+
+- `GET /api/merchants` 在网关层固定返回第 `1` 页、每页 `10` 条，尚未暴露查询参数。
+- `GET /api/orders` 在网关层没有传分页参数，因此当前等价于返回第 `1` 页、每页 `10` 条。
+
+## 2. 接口总览
+
+| 分组 | 接口 | 权限 |
+| --- | --- | --- |
+| Auth | `POST /api/register` | Public |
+| Auth | `POST /api/login` | Public |
+| Product | `GET /api/products` | Public |
+| Product | `GET /api/products/:id` | Public |
+| Merchant Public | `GET /api/merchants` | Public |
+| Merchant Public | `GET /api/merchants/:id` | Public |
+| Merchant Legacy | `POST /api/merchants` | Merchant/Admin |
+| Merchant Legacy | `POST /api/merchants/products` | Merchant/Admin |
+| Merchant Legacy | `DELETE /api/merchants/products` | Merchant/Admin |
+| Merchant Console | `GET /api/merchant/profile` | Merchant/Admin |
+| Merchant Console | `GET /api/merchant/products` | Merchant/Admin |
+| Merchant Console | `POST /api/merchant/products` | Merchant/Admin |
+| Merchant Console | `PUT /api/merchant/products/:id` | Merchant/Admin |
+| Merchant Console | `DELETE /api/merchant/products/:id` | Merchant/Admin |
+| Merchant Console | `GET /api/merchant/orders` | Merchant/Admin |
+| Order | `POST /api/orders` | JWT |
+| Order | `GET /api/orders` | JWT |
+| Order | `GET /api/orders/:id` | JWT |
+| Order | `PUT /api/orders/:id/cancel` | JWT |
+| Order | `PUT /api/orders/:id/ship` | Merchant/Admin |
+| Order | `PUT /api/orders/:id/complete` | JWT |
+| Payment | `POST /api/payments` | JWT |
+| Payment | `GET /api/payments/:id` | JWT |
+| Payment | `POST /api/payments/:id/success` | JWT |
+| Payment | `POST /api/payments/:id/fail` | JWT |
+| Cart | `POST /api/cart/items` | JWT |
+| Cart | `GET /api/cart` | JWT |
+| Cart | `PUT /api/cart/items` | JWT |
+| Cart | `DELETE /api/cart/items` | JWT |
+| Cart | `DELETE /api/cart` | JWT |
+
+## 3. Auth
+
+### 3.1 注册
+
+- `POST /api/register`
+- 权限：Public
+
+请求体：
+
+```json
+{
+  "username": "demo_user",
+  "password": "password123",
+  "email": "demo@example.com",
+  "role": "customer"
+}
+```
+
+字段说明：
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `username` | 是 | 用户名 |
+| `password` | 是 | 密码 |
+| `email` | 是 | 邮箱 |
+| `role` | 否 | 仅允许 `customer` / `merchant`，默认 `customer`；`admin` 不能自助注册 |
+
+响应：
+
+```json
+{
+  "user_id": 1,
+  "token": "JWT_TOKEN",
+  "role": "customer"
+}
+```
+
+常见错误：
+
+| 状态码 | 场景 |
+| --- | --- |
+| `400` | JSON 解析失败 |
+| `500` | 当前实现下，重复用户名、非法角色等下游错误可能被网关直接表现为 `500` |
+
+### 3.2 登录
+
+- `POST /api/login`
+- 权限：Public
+
+请求体：
+
+```json
+{
+  "username": "demo_user",
+  "password": "password123"
+}
+```
+
+响应同注册接口。
+
+## 4. Product
+
+### 4.1 商品列表
+
+- `GET /api/products`
+- 权限：Public
+
+查询参数：
+
+| 参数 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `page` | int | `1` | 页码 |
+| `page_size` | int | `10` | 每页条数，最大 `100` |
+| `category` | string | - | 精确分类筛选 |
+| `keyword` | string | - | 模糊匹配商品名或描述 |
+| `sort_by` | string | `created_at` | 可选 `created_at / price / stock` |
+| `order` | string | `desc` | 可选 `asc / desc` |
+| `min_price` | number | - | 最低价 |
+| `max_price` | number | - | 最高价 |
+
+示例：
+
+```bash
+curl "http://localhost:8080/api/products?page=2&page_size=20&category=book&keyword=Go&sort_by=price&order=asc&min_price=50&max_price=120"
+```
+
+响应：
+
+```json
+{
+  "products": [
+    {
       "id": 1,
-      "name": "Product Name",
-      "description": "Product Description",
-      "price": 99.99,
-      "stock": 100,
-      "category": "Electronics",
-      "image_url": "https://example.com/image.jpg",
-      "merchant_id": 1
-    }
-  }
-  ```
-
-## 3. 商家管理接口（v2.0新增）
-
-### 3.1 创建商家
-
-- **端点**：`POST /api/merchants`
-- **描述**：创建新商家
-- **权限**：需要登录，且角色为 `merchant` 或 `admin`
-- **参数**：
-  - `name` (string)：商家名称
-  - `contact_info` (string)：联系方式
-- **说明**：
-  - 服务端会自动把新商家绑定到当前登录用户
-  - `customer` 无权创建商家
-- **响应**：
-  ```json
-  {
-    "merchant": {
-      "id": 1,
-      "name": "Test Merchant",
-      "contact_info": "test@merchant.com",
-      "owner_user_id": 2,
-      "created_at": "2026-03-24T00:00:00Z"
-    }
-  }
-  ```
-
-### 3.2 获取商家信息
-
-- **端点**：`GET /api/merchants/:id`
-- **描述**：获取商家详细信息
-- **参数**：
-  - `id` (int)：商家ID
-- **响应**：
-  ```json
-  {
-    "merchant": {
-      "id": 1,
-      "name": "Test Merchant",
-      "contact_info": "test@merchant.com",
-      "owner_user_id": 2,
-      "created_at": "2026-03-24T00:00:00Z"
-    }
-  }
-  ```
-
-### 3.3 列出商家
-
-- **端点**：`GET /api/merchants`
-- **描述**：获取商家列表
-- **参数**：
-  - `page` (int)：页码，默认1
-  - `page_size` (int)：每页数量，默认10
-- **响应**：
-  ```json
-  {
-    "merchants": [
-      {
-        "id": 1,
-        "name": "Test Merchant",
-        "contact_info": "test@merchant.com",
-        "owner_user_id": 2,
-        "created_at": "2026-03-24T00:00:00Z"
-      }
-    ],
-    "total": 1
-  }
-  ```
-
-### 3.4 商家添加商品
-
-- **端点**：`POST /api/merchants/products`
-- **描述**：商家添加新商品
-- **权限**：需要登录，且角色为 `merchant` 或 `admin`
-- **参数**：
-  - `merchant_id` (int)：商家ID
-  - `name` (string)：商品名称
-  - `description` (string)：商品描述
-  - `price` (float)：商品价格
-  - `stock` (int)：商品库存
-  - `category` (string)：商品分类
-  - `image_url` (string)：商品图片URL
-- **说明**：
-  - `merchant` 只能操作归属于自己的商家
-  - `admin` 可以操作任意商家
-- **响应**：
-  ```json
-  {
-    "product_id": 1
-  }
-  ```
-
-### 3.5 商家删除商品
-
-- **端点**：`DELETE /api/merchants/products`
-- **描述**：商家删除自有商品
-- **权限**：需要登录，且角色为 `merchant` 或 `admin`
-- **参数**：
-  - `merchant_id` (int)：商家ID
-  - `product_id` (int)：商品ID
-- **说明**：
-  - `merchant` 只能删除自己商家下的商品
-  - `admin` 可以删除任意商家下的商品
-- **响应**：
-  ```json
-  {
-    "success": true
-  }
-  ```
-
-### 3.6 获取当前商家信息
-
-- **端点**：`GET /api/merchant/profile`
-- **权限**：需要登录，且角色为 `merchant` 或 `admin`
-- **说明**：
-  - `merchant` 返回当前账号可操作的店铺信息
-  - `admin` 需要通过 `merchant_id` 查询参数指定目标店铺
-- **响应**：
-  ```json
-  {
-    "merchant": {
-      "id": 1,
-      "name": "Test Merchant",
-      "contact_info": "test@merchant.com",
-      "owner_user_id": 2,
-      "created_at": "2026-05-17T00:00:00Z"
-    }
-  }
-  ```
-
-### 3.7 获取当前商家商品列表
-
-- **端点**：`GET /api/merchant/products`
-- **权限**：需要登录，且角色为 `merchant` 或 `admin`
-- **参数**：
-  - `page` (int)：页码，默认 `1`
-  - `page_size` (int)：每页数量，默认 `10`
-  - `merchant_id` (int，可选)：仅 `admin` 使用，用于指定店铺
-- **说明**：`merchant` 只能看到自己店铺下的商品
-- **响应**：
-  ```json
-  {
-    "products": [
-      {
-        "id": 1,
-        "name": "Product Name",
-        "description": "Product Description",
-        "price": 99.99,
-        "stock": 100,
-        "category": "Electronics",
-        "image_url": "https://example.com/image.jpg",
-        "merchant_id": 1
-      }
-    ],
-    "total": 1
-  }
-  ```
-
-### 3.8 新增当前商家商品
-
-- **端点**：`POST /api/merchant/products`
-- **权限**：需要登录，且角色为 `merchant` 或 `admin`
-- **参数**：
-  - `name` (string)
-  - `description` (string)
-  - `price` (float)
-  - `stock` (int)
-  - `category` (string)
-  - `image_url` (string，可选)
-- **说明**：
-  - `merchant` 的店铺归属由服务端根据当前登录身份推导
-  - `admin` 可通过 `merchant_id` 查询参数指定目标店铺
-- **响应**：
-  ```json
-  {
-    "product_id": 1
-  }
-  ```
-
-### 3.9 更新当前商家商品
-
-- **端点**：`PUT /api/merchant/products/:id`
-- **权限**：需要登录，且角色为 `merchant` 或 `admin`
-- **可更新字段**：
-  - `name`
-  - `description`
-  - `price`
-  - `stock`
-  - `category`
-  - `image_url`
-- **说明**：至少提交一个字段；`merchant` 只能修改自己店铺下的商品
-- **响应**：
-  ```json
-  {
-    "product": {
-      "id": 1,
-      "name": "Updated Product",
-      "description": "Updated Description",
+      "name": "Go in Action",
+      "description": "book",
       "price": 88.8,
       "stock": 20,
-      "category": "Books",
-      "image_url": "https://example.com/image.jpg",
+      "category": "book",
+      "image_url": "https://example.com/book.png",
       "merchant_id": 1
     }
+  ],
+  "total": 1
+}
+```
+
+常见错误：
+
+| 状态码 | 场景 |
+| --- | --- |
+| `400` | `min_price > max_price` |
+| `500` | 服务内部错误 |
+
+### 4.2 商品详情
+
+- `GET /api/products/:id`
+- 权限：Public
+
+响应：
+
+```json
+{
+  "product": {
+    "id": 1,
+    "name": "Go in Action",
+    "description": "book",
+    "price": 88.8,
+    "stock": 20,
+    "category": "book",
+    "image_url": "https://example.com/book.png",
+    "merchant_id": 1
   }
-  ```
+}
+```
 
-### 3.10 删除当前商家商品
+## 5. Merchant
 
-- **端点**：`DELETE /api/merchant/products/:id`
-- **权限**：需要登录，且角色为 `merchant` 或 `admin`
-- **说明**：`merchant` 只能删除自己店铺下的商品
-- **响应**：
-  ```json
-  {
-    "success": true
-  }
-  ```
+### 5.1 公开商家列表
 
-### 3.11 获取当前商家相关订单
+- `GET /api/merchants`
+- 权限：Public
+- 当前网关固定查询第 `1` 页、每页 `10` 条
 
-- **端点**：`GET /api/merchant/orders`
-- **权限**：需要登录，且角色为 `merchant` 或 `admin`
-- **参数**：
-  - `page` (int)：页码，默认 `1`
-  - `page_size` (int)：每页数量，默认 `10`
-  - `merchant_id` (int，可选)：仅 `admin` 使用，用于指定店铺
-- **说明**：
-  - 查询依据为 `order_items.merchant_id`
-  - 返回结果只包含当前商家可见的订单项；混合商家订单会自动裁剪为当前商家自己的商品项
-- **响应**：
-  ```json
-  {
-    "orders": [
-      {
-        "id": 1,
-        "user_id": 8,
-        "items": [
-          {
-            "product_id": 1,
-            "product_name": "Product Name",
-            "price": 99.99,
-            "quantity": 1
-          }
-        ],
-        "total_amount": 99.99,
-        "status": "paid",
-        "created_at": "2026-05-17T00:00:00Z"
-      }
-    ],
-    "total": 1
-  }
-  ```
+响应：
 
-## 4. 订单流程接口（v2.0新增）
-
-### 4.1 创建订单
-
-- **端点**：`POST /api/orders`
-- **描述**：用户创建订单；订单金额由后端基于商品真实价格计算，响应中的商品名称和价格为下单时快照
-- **参数**：
-  - `items` (array)：订单项
-    - `product_id` (int)：商品ID
-    - `quantity` (int)：商品数量
-- **说明**：
-  - 客户端不需要、也不应提交商品名称或商品价格
-  - 服务端会以商品当前真实价格计算订单总金额
-  - 订单创建后会保存商品名称与价格快照，后续商品改价不会影响历史订单展示
-- **响应**：
-  ```json
-  {
-    "order": {
+```json
+{
+  "merchants": [
+    {
       "id": 1,
-      "user_id": 1,
-      "items": [
-        {
-          "product_id": 1,
-          "product_name": "Test Product",
-          "price": 99.99,
-          "quantity": 1
-        }
-      ],
-      "total_amount": 99.99,
-      "status": "pending",
-      "created_at": "2026-03-24T00:00:00Z",
-      "cancel_reason": ""
+      "name": "Demo Shop",
+      "contact_info": "shop@example.com",
+      "created_at": "2026-05-17T08:00:00Z",
+      "owner_user_id": 2
     }
-  }
-  ```
+  ],
+  "total": 1
+}
+```
 
-### 4.2 获取订单详情
+### 5.2 公开商家详情
 
-- **端点**：`GET /api/orders/:id`
-- **描述**：获取订单详细信息
-- **参数**：
-  - `id` (int)：订单ID
-- **响应**：
-  ```json
-  {
-    "order": {
-      "id": 1,
-      "user_id": 1,
-      "items": [
-        {
-          "product_id": 1,
-          "product_name": "Test Product",
-          "price": 99.99,
-          "quantity": 1
-        }
-      ],
-      "total_amount": 99.99,
-      "status": "pending",
-      "created_at": "2026-03-24T00:00:00Z",
-      "cancel_reason": ""
-    }
-  }
-  ```
+- `GET /api/merchants/:id`
+- 权限：Public
 
-### 4.3 获取订单列表
+### 5.3 创建商家（兼容接口）
 
-- **端点**：`GET /api/orders`
-- **描述**：获取用户的订单列表
-- **响应**：
-  ```json
-  {
-    "orders": [
-      {
-        "id": 1,
-        "status": "pending",
-        "total_amount": 99.99,
-        "created_at": "2026-03-24T00:00:00Z",
-        "cancel_reason": ""
-      },
-      {
-        "id": 2,
-        "status": "completed",
-        "total_amount": 199.98,
-        "created_at": "2026-03-23T00:00:00Z",
-        "cancel_reason": ""
-      }
-    ]
-  }
-  ```
+- `POST /api/merchants`
+- 权限：Merchant/Admin
 
-### 4.4 取消订单
+请求体：
 
-- **端点**：`PUT /api/orders/:id/cancel`
-- **描述**：当前用户取消自己的订单
-- **说明**：
-  - 仅允许 `pending -> cancelled`
-  - 已支付、已发货、已完成订单都不能取消
-- **响应**：
-  ```json
-  {
-    "success": true,
-    "message": "订单取消成功"
-  }
-  ```
+```json
+{
+  "name": "Demo Shop",
+  "contact_info": "shop@example.com"
+}
+```
 
-### 4.5 商家发货
+说明：
 
-- **端点**：`PUT /api/orders/:id/ship`
-- **描述**：商家或管理员把已支付订单推进为已发货
-- **权限**：需要登录，且角色为 `merchant` 或 `admin`
-- **说明**：
-  - 仅允许 `paid -> shipped`
-  - 服务端会根据订单项中的商家快照校验资源归属
-  - 普通商家只能为自己名下商品构成的订单发货；混合商家订单当前仅允许 `admin` 发货
-- **响应**：
-  ```json
-  {
-    "success": true,
-    "message": "订单已发货"
-  }
-  ```
+- 服务端会把新商家绑定到当前登录用户。
+- `customer` 无权创建商家。
 
-### 4.6 确认收货
+### 5.4 兼容版商品写接口
 
-- **端点**：`PUT /api/orders/:id/complete`
-- **描述**：订单所属用户确认收货
-- **说明**：
-  - 仅允许 `shipped -> completed`
-  - `user_id` 由网关从 JWT 注入，不信任客户端传入
-- **响应**：
-  ```json
-  {
-    "success": true,
-    "message": "订单已完成"
-  }
-  ```
+#### `POST /api/merchants/products`
 
-## 5. 支付接口
+请求体：
 
-> 以下接口都要求登录；`user_id` 由网关从 JWT 注入，不信任客户端自行传入。
+```json
+{
+  "merchant_id": 1,
+  "name": "Demo Product",
+  "description": "desc",
+  "price": 99.9,
+  "stock": 10,
+  "category": "book",
+  "image_url": "https://example.com/product.png"
+}
+```
 
-### 5.1 创建支付
+#### `DELETE /api/merchants/products`
 
-- **端点**：`POST /api/payments`
-- **描述**：为当前用户的待支付订单创建一条模拟支付记录
-- **参数**：
-  - `order_id` (int)：订单ID
-  - `payment_method` (string)：支付方式，当前支持 `mock_balance`、`mock_wechat`、`mock_alipay`
-- **说明**：
-  - 订单必须存在、归属当前用户且状态为 `pending`
-  - 支付金额由服务端直接读取订单总金额，不接受客户端传入金额
-  - 同一订单同一时刻只能存在一条活跃支付记录（`created` 或 `succeeded`）
-- **响应**：
-  ```json
-  {
-    "payment": {
-      "id": 1,
-      "payment_no": "pay-0123456789abcdef",
-      "order_id": 1,
-      "user_id": 1,
-      "amount": 99.99,
-      "status": "created",
-      "payment_method": "mock_balance",
-      "created_at": "2026-03-24T00:00:00Z",
-      "updated_at": "2026-03-24T00:00:00Z"
-    }
-  }
-  ```
+请求体：
 
-### 5.2 查询支付结果
+```json
+{
+  "merchant_id": 1,
+  "product_id": 10
+}
+```
 
-- **端点**：`GET /api/payments/:id`
-- **描述**：查询当前用户自己的支付记录
-- **参数**：
-  - `id` (int)：支付记录ID
-- **响应**：
-  ```json
-  {
-    "payment": {
-      "id": 1,
-      "payment_no": "pay-0123456789abcdef",
-      "order_id": 1,
-      "user_id": 1,
-      "amount": 99.99,
-      "status": "created",
-      "payment_method": "mock_balance",
-      "created_at": "2026-03-24T00:00:00Z",
-      "updated_at": "2026-03-24T00:00:00Z"
-    }
-  }
-  ```
+权限说明：
 
-### 5.3 模拟支付成功
+- `merchant` 只能操作自己名下商家。
+- `admin` 可跨商家操作。
 
-- **端点**：`POST /api/payments/:id/success`
-- **描述**：把当前用户自己的模拟支付标记为成功
-- **说明**：
-  - 仅允许 `created` 状态的支付单继续推进
-  - 服务端会再次校验订单仍为 `pending` 且金额未变化
-  - 成功后发布 `payment.succeeded` 事件，订单服务消费后把订单状态更新为 `paid`
-- **响应**：
-  ```json
-  {
-    "payment": {
-      "id": 1,
-      "status": "succeeded"
-    }
-  }
-  ```
+### 5.5 商家控制台
 
-### 5.4 模拟支付失败
+#### 获取当前店铺
 
-- **端点**：`POST /api/payments/:id/fail`
-- **描述**：把当前用户自己的模拟支付标记为失败
-- **说明**：
-  - 当前实现把支付单标记为 `failed`
-  - 订单继续保持 `pending`，便于用户再次发起新的支付尝试
-- **响应**：
-  ```json
-  {
-    "payment": {
-      "id": 1,
-      "status": "failed"
-    }
-  }
-  ```
+- `GET /api/merchant/profile`
+- 权限：Merchant/Admin
+- `merchant`：默认返回自己最早创建的店铺
+- `admin`：必须传 `merchant_id`
 
-## 6. 购物车接口
+#### 商品列表
 
-### 6.1 添加商品到购物车
+- `GET /api/merchant/products`
+- 权限：Merchant/Admin
 
-- **端点**：`POST /api/cart/items`
-- **描述**：向购物车添加商品
-- **参数**：
-  - `product_id` (int)：商品ID
-  - `quantity` (int)：商品数量
-- **响应**：
-  ```json
-  {
-    "item": {
+查询参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `page` | 默认 `1` |
+| `page_size` | 默认 `10`，最大 `100` |
+| `merchant_id` | `admin` 用于指定目标店铺 |
+
+#### 新增商品
+
+- `POST /api/merchant/products`
+- 权限：Merchant/Admin
+
+请求体：
+
+```json
+{
+  "name": "Demo Product",
+  "description": "desc",
+  "price": 99.9,
+  "stock": 10,
+  "category": "book",
+  "image_url": "https://example.com/product.png"
+}
+```
+
+#### 更新商品
+
+- `PUT /api/merchant/products/:id`
+- 权限：Merchant/Admin
+- 至少提交一个字段
+
+请求体示例：
+
+```json
+{
+  "price": 88.8,
+  "stock": 20
+}
+```
+
+#### 删除商品
+
+- `DELETE /api/merchant/products/:id`
+- 权限：Merchant/Admin
+
+#### 查看商家订单
+
+- `GET /api/merchant/orders`
+- 权限：Merchant/Admin
+
+查询参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `page` | 默认 `1` |
+| `page_size` | 默认 `10`，最大 `100` |
+| `merchant_id` | `admin` 可选；不传时可查看全部订单 |
+
+说明：
+
+- 查询基于 `order_items.merchant_id` 快照。
+- 混合商家订单只返回当前商家可见的订单项。
+
+## 6. Order
+
+### 6.1 创建订单
+
+- `POST /api/orders`
+- 权限：JWT
+- `Idempotency-Key`：必填
+
+请求体：
+
+```json
+{
+  "items": [
+    {
       "product_id": 1,
-      "product_name": "Product Name",
-      "price": 99.99,
-      "quantity": 1,
-      "image_url": "https://example.com/image.jpg"
+      "quantity": 2
     }
-  }
-  ```
+  ]
+}
+```
 
-### 6.2 获取购物车
+响应：
 
-- **端点**：`GET /api/cart`
-- **描述**：获取用户的购物车信息
-- **响应**：
-  ```json
-  {
+```json
+{
+  "order": {
+    "id": 1,
+    "user_id": 8,
     "items": [
       {
         "product_id": 1,
-        "product_name": "Product Name",
-        "price": 99.99,
-        "quantity": 1,
-        "image_url": "https://example.com/image.jpg"
+        "product_name": "Demo Product",
+        "price": 99.9,
+        "quantity": 2
       }
     ],
-    "total_amount": 99.99
+    "total_amount": 199.8,
+    "status": "pending",
+    "created_at": "2026-05-17T08:00:00Z",
+    "cancel_reason": ""
   }
-  ```
+}
+```
 
-### 6.3 更新购物车商品数量
+说明：
 
-- **端点**：`PUT /api/cart/items`
-- **描述**：更新购物车中商品的数量
-- **参数**：
-  - `product_id` (int)：商品ID
-  - `quantity` (int)：商品数量
-- **响应**：
-  ```json
-  {
-    "item": {
+- 前端不能提交金额。
+- 商品名称和价格均来自下单时的后端快照。
+
+常见错误：
+
+| 状态码 | 场景 |
+| --- | --- |
+| `400` | 缺少幂等键、空订单、非法数量、库存不足 |
+| `404` | 商品不存在 |
+| `409` | 同一幂等键复用但请求体不同，或请求仍在处理中 |
+
+### 6.2 订单列表
+
+- `GET /api/orders`
+- 权限：JWT
+- 当前等价于第一页、每页十条
+
+### 6.3 订单详情
+
+- `GET /api/orders/:id`
+- 权限：JWT
+- 只能查询自己的订单
+
+### 6.4 取消订单
+
+- `PUT /api/orders/:id/cancel`
+- 权限：JWT
+- `Idempotency-Key`：当前网关要求必填
+
+响应：
+
+```json
+{
+  "success": true,
+  "message": "订单取消成功"
+}
+```
+
+说明：
+
+- 只允许 `pending -> cancelled`
+- 已支付、已发货、已完成订单不能取消
+
+### 6.5 发货
+
+- `PUT /api/orders/:id/ship`
+- 权限：Merchant/Admin
+
+说明：
+
+- 只允许 `paid -> shipped`
+- 普通商家只能为自己名下商品组成的订单发货
+- 混合商家订单当前仅允许 `admin` 发货
+
+### 6.6 确认收货
+
+- `PUT /api/orders/:id/complete`
+- 权限：JWT
+
+说明：
+
+- 只允许 `shipped -> completed`
+- 只能由订单所属用户确认
+
+## 7. Payment
+
+### 7.1 创建支付
+
+- `POST /api/payments`
+- 权限：JWT
+
+请求体：
+
+```json
+{
+  "order_id": 1,
+  "payment_method": "mock_balance"
+}
+```
+
+可选支付方式：
+
+- `mock_balance`
+- `mock_wechat`
+- `mock_alipay`
+
+响应：
+
+```json
+{
+  "payment": {
+    "id": 1,
+    "payment_no": "pay-0123456789abcdef",
+    "order_id": 1,
+    "user_id": 8,
+    "amount": 199.8,
+    "status": "created",
+    "payment_method": "mock_balance",
+    "created_at": "2026-05-17T08:00:00Z",
+    "updated_at": "2026-05-17T08:00:00Z"
+  }
+}
+```
+
+说明：
+
+- 金额直接来自订单，不接收客户端金额。
+- 一个订单同一时刻只能有一条活跃支付记录。
+
+### 7.2 查询支付
+
+- `GET /api/payments/:id`
+- 权限：JWT
+- 只能查询自己的支付单
+
+### 7.3 支付成功
+
+- `POST /api/payments/:id/success`
+- 权限：JWT
+- `Idempotency-Key`：当前网关要求必填
+
+响应：
+
+```json
+{
+  "payment": {
+    "id": 1,
+    "status": "succeeded"
+  }
+}
+```
+
+### 7.4 支付失败
+
+- `POST /api/payments/:id/fail`
+- 权限：JWT
+
+说明：
+
+- 支付单变为 `failed`
+- 订单保持 `pending`
+- 用户可以重新创建新的支付尝试
+
+## 8. Cart
+
+### 8.1 添加商品
+
+- `POST /api/cart/items`
+- 权限：JWT
+
+请求体：
+
+```json
+{
+  "product_id": 1,
+  "quantity": 1
+}
+```
+
+### 8.2 获取购物车
+
+- `GET /api/cart`
+- 权限：JWT
+
+响应：
+
+```json
+{
+  "items": [
+    {
       "product_id": 1,
-      "product_name": "Product Name",
-      "price": 99.99,
-      "quantity": 2,
-      "image_url": "https://example.com/image.jpg"
+      "product_name": "Demo Product",
+      "price": 99.9,
+      "quantity": 1,
+      "image_url": "https://example.com/product.png"
     }
-  }
-  ```
+  ],
+  "total_amount": 99.9
+}
+```
 
-### 6.4 删除购物车商品
+### 8.3 更新数量
 
-- **端点**：`DELETE /api/cart/items`
-- **描述**：从购物车中删除商品
-- **参数**：
-  - `product_id` (int)：商品ID
-- **响应**：
-  ```json
-  {
-    "success": true
-  }
-  ```
+- `PUT /api/cart/items`
+- 权限：JWT
 
-### 6.5 清空购物车
+### 8.4 删除商品
 
-- **端点**：`DELETE /api/cart`
-- **描述**：清空用户的购物车
-- **响应**：
-  ```json
-  {
-    "success": true
-  }
-  ```
+- `DELETE /api/cart/items`
+- 权限：JWT
+
+### 8.5 清空购物车
+
+- `DELETE /api/cart`
+- 权限：JWT
+
+## 9. 观测接口
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /healthz` | API Gateway 存活探针 |
+| `GET /readyz` | API Gateway 就绪探针 |
+| `GET /metrics` | API Gateway Prometheus 指标 |
+
+各内部服务也暴露各自独立的健康检查端口，见 `.env.example` 与 `docker-compose.yml`。
