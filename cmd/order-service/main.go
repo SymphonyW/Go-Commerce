@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm"
 
 	pb "go-commerce/api/order"
+	"go-commerce/internal/idempotency"
 	"go-commerce/internal/order"
 	"go-commerce/internal/outbox"
 	"go-commerce/pkg/events"
@@ -36,7 +37,7 @@ func main() {
 	defer sqlDB.Close()
 	log.Printf("mysql_connected")
 
-	if err := db.AutoMigrate(&order.Order{}, &order.OrderItem{}, &outbox.Event{}); err != nil {
+	if err := db.AutoMigrate(&order.Order{}, &order.OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
 		log.Fatalf("mysql_migrate_failed error=%v", err)
 	}
 

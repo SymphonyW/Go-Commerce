@@ -12,6 +12,20 @@ const api = axios.create({
   },
 });
 
+const createIdempotencyKey = (scope) => {
+  if (globalThis.crypto?.randomUUID) {
+    return `${scope}-${globalThis.crypto.randomUUID()}`;
+  }
+
+  return `${scope}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+};
+
+const withIdempotencyKey = (scope) => ({
+  headers: {
+    'Idempotency-Key': createIdempotencyKey(scope),
+  },
+});
+
 // 请求拦截器：添加认证令牌
 api.interceptors.request.use(
   (config) => {
@@ -79,7 +93,7 @@ export const orderAPI = {
    * @returns {Promise} 创建的订单
    */
   createOrder: async (orderData) => {
-    const response = await api.post('/orders', orderData);
+    const response = await api.post('/orders', orderData, withIdempotencyKey('order'));
     return response.data;
   },
   /**
