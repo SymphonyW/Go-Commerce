@@ -26,6 +26,20 @@ const withIdempotencyKey = (scope) => ({
   },
 });
 
+export const getAPIErrorMessage = (error, fallback) => {
+  const data = error?.response?.data;
+  if (typeof data?.error === 'string' && data.error.trim()) {
+    return data.error;
+  }
+  if (typeof data?.message === 'string' && data.message.trim()) {
+    return data.message;
+  }
+  if (typeof data === 'string' && data.trim()) {
+    return data;
+  }
+  return fallback;
+};
+
 // 请求拦截器：添加认证令牌
 api.interceptors.request.use(
   (config) => {
@@ -119,7 +133,7 @@ export const orderAPI = {
    * @returns {Promise} 取消结果
    */
   cancelOrder: async (id) => {
-    const response = await api.put(`/orders/${id}/cancel`);
+    const response = await api.put(`/orders/${id}/cancel`, undefined, withIdempotencyKey('order-cancel'));
     return response.data;
   },
   shipOrder: async (id) => {
@@ -143,7 +157,7 @@ export const paymentAPI = {
     return response.data;
   },
   markSuccess: async (id) => {
-    const response = await api.post(`/payments/${id}/success`);
+    const response = await api.post(`/payments/${id}/success`, undefined, withIdempotencyKey('payment'));
     return response.data;
   },
   markFailed: async (id) => {

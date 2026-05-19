@@ -5,7 +5,7 @@ import ErrorState from '../components/ErrorState';
 import LoadingState from '../components/LoadingState';
 import PageHeader from '../components/PageHeader';
 import SectionCard from '../components/SectionCard';
-import { cartAPI, orderAPI } from '../services/api';
+import { cartAPI, getAPIErrorMessage, orderAPI } from '../services/api';
 import { formatCurrency, getProductImageUrl } from '../utils/display';
 
 const Cart = () => {
@@ -116,7 +116,10 @@ const Cart = () => {
       navigate('/orders');
     } catch (actionError) {
       console.error('Failed to create order:', actionError);
-      setFeedback({ type: 'error', text: '创建订单失败，请稍后重试。' });
+      setFeedback({
+        type: 'error',
+        text: getAPIErrorMessage(actionError, '\u521b\u5efa\u8ba2\u5355\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002'),
+      });
     } finally {
       setUpdating(false);
     }

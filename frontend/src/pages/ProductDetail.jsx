@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import ErrorState from '../components/ErrorState';
 import LoadingState from '../components/LoadingState';
 import StatusBadge from '../components/StatusBadge';
-import { cartAPI, orderAPI, productAPI } from '../services/api';
+import { cartAPI, getAPIErrorMessage, orderAPI, productAPI } from '../services/api';
 import { formatCurrency, getProductImageUrl, getStockMeta } from '../utils/display';
 
 const ProductDetail = () => {
@@ -14,6 +14,7 @@ const ProductDetail = () => {
   const [error, setError] = useState('');
   const [quantity, setQuantity] = useState(1);
   const [feedback, setFeedback] = useState(null);
+  const [buying, setBuying] = useState(false);
 
   useEffect(() => {
     const fetchProduct = async () => {
@@ -41,7 +42,7 @@ const ProductDetail = () => {
   };
 
   const handleAddToCart = async () => {
-    if (!ensureLoggedIn() || !product) return;
+    if (buying || !ensureLoggedIn() || !product) return;
 
     try {
       await cartAPI.addItem({
@@ -56,15 +57,15 @@ const ProductDetail = () => {
   };
 
   const handleBuyNow = async () => {
-    if (!ensureLoggedIn() || !product) return;
+    if (buying || !ensureLoggedIn() || !product) return;
 
     try {
+      setBuying(true);
+      setFeedback(null);
       await orderAPI.createOrder({
         items: [
           {
             product_id: product.id,
-            product_name: product.name,
-            price: product.price,
             quantity,
           },
         ],
@@ -72,7 +73,12 @@ const ProductDetail = () => {
       navigate('/orders');
     } catch (actionError) {
       console.error('Failed to create order:', actionError);
-      setFeedback({ type: 'error', text: '创建订单失败，请稍后重试。' });
+      setFeedback({
+        type: 'error',
+        text: getAPIErrorMessage(actionError, '\u521b\u5efa\u8ba2\u5355\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002'),
+      });
+    } finally {
+      setBuying(false);
     }
   };
 
@@ -137,8 +143,8 @@ const ProductDetail = () => {
             <button type="button" className="btn btn-secondary" onClick={handleAddToCart} disabled={outOfStock}>
               加入购物车
             </button>
-            <button type="button" className="btn btn-primary" onClick={handleBuyNow} disabled={outOfStock}>
-              立即购买
+            <button type="button" className="btn btn-primary" onClick={handleBuyNow} disabled={outOfStock || buying}>
+              {buying ? '\u521b\u5efa\u4e2d...' : '\u7acb\u5373\u8d2d\u4e70'}
             </button>
           </div>
         </div>
