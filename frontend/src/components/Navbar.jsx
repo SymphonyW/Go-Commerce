@@ -26,11 +26,10 @@ const Navbar = () => {
       <div className="navbar-container">
         <NavLink to="/" className="navbar-brand">
           <span className="navbar-mark" aria-hidden="true">
-            G
+            <img src="/icon.png?v=20260522" alt="" />
           </span>
           <span className="navbar-brand-copy">
             Go Commerce
-            <small>Modern retail demo</small>
           </span>
         </NavLink>
 

@@ -1,5 +1,9 @@
 # Go-Commerce
 
+<p align="center">
+  <img src="docs/assets/icon.png" alt="Go-Commerce 项目图标" width="96">
+</p>
+
 [![CI](https://github.com/SymphonyW/Go-Commerce/actions/workflows/ci.yml/badge.svg)](https://github.com/SymphonyW/Go-Commerce/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/Go-1.24-blue?logo=go)
 ![React](https://img.shields.io/badge/React-18.2-61DAFB?logo=react&logoColor=black)
@@ -154,7 +158,7 @@ Go-Commerce/
 ├── pkg/                    # JWT、MQ、事件、观测、健康检查等公共能力
 ├── frontend/               # React 前端与商家后台页面
 ├── tests/                  # integration / e2e 测试
-├── doc/                    # 技术文档、API 文档、面试文档与截图资源
+├── docs/                   # 技术文档、API 文档、面试文档与截图资源
 ├── docker-compose.yml      # 本地后端服务与基础设施编排
 ├── Makefile                # 测试与演示数据快捷命令
 └── openapi.yaml            # OpenAPI 3.0 接口描述
@@ -275,11 +279,11 @@ go run ./cmd/api-gateway
 
 | 首页 | 商品列表 | 商家后台 |
 | --- | --- | --- |
-| ![首页截图](doc/assets/homepage.png) | ![商品列表截图](doc/assets/products.png) | ![商家后台截图](doc/assets/merchant-dashboard.png) |
+| ![首页截图](docs/assets/homepage.png) | ![商品列表截图](docs/assets/products.png) | ![商家后台截图](docs/assets/merchant-dashboard.png) |
 
 ## API 示例
 
-完整接口说明见 [API 文档](doc/API_Documentation.md) 与 [OpenAPI 3.0 描述](openapi.yaml)。README 仅保留最常用的主链路示例。
+完整接口说明见 [API 文档](docs/API_Documentation.md) 与 [OpenAPI 3.0 描述](openapi.yaml)。README 仅保留最常用的主链路示例。
 
 ### 注册 / 登录
 
@@ -405,10 +409,10 @@ E2E 测试已提供为本地命令，但尚未纳入默认 GitHub Actions 工作
 
 | 文档 | 用途 |
 | --- | --- |
-| [文档导航](doc/README.md) | 汇总补充文档，适合作为二级入口。 |
-| [技术文档](doc/TECHNICAL_DOCUMENT.md) | 详细说明架构、下单流程、支付流程、超时关单、Outbox、权限模型与当前不足。 |
-| [API 文档](doc/API_Documentation.md) | 面向阅读的 REST API 说明，包含鉴权、分页、错误码和请求 / 响应示例。 |
-| [面试文档](doc/INTERVIEW.md) | 围绕真实实现整理 30 秒 / 2 分钟项目介绍与常见追问。 |
+| [文档导航](docs/README.md) | 汇总补充文档，适合作为二级入口。 |
+| [技术文档](docs/TECHNICAL_DOCUMENT.md) | 详细说明架构、下单流程、支付流程、超时关单、Outbox、权限模型与当前不足。 |
+| [API 文档](docs/API_Documentation.md) | 面向阅读的 REST API 说明，包含鉴权、分页、错误码和请求 / 响应示例。 |
+| [面试文档](docs/INTERVIEW.md) | 围绕真实实现整理 30 秒 / 2 分钟项目介绍与常见追问。 |
 | [OpenAPI 3.0](openapi.yaml) | 机器可读的接口契约，可用于导入 API 工具或后续接入 Swagger UI。 |
 
-`doc/API_Documentation.md` 与 `openapi.yaml` 均以当前已经实现的 Gateway 接口为准，不描述未来能力。
+`docs/API_Documentation.md` 与 `openapi.yaml` 均以当前已经实现的 Gateway 接口为准，不描述未来能力。
