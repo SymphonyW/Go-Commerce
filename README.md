@@ -1,7 +1,7 @@
 # Go-Commerce
 
 <p align="center">
-  <img src="docs/assets/icon.png" alt="Go-Commerce 项目图标" width="96">
+  <img src="docs/assets/text.png" alt="Go-Commerce">
 </p>
 
 [![CI](https://github.com/SymphonyW/Go-Commerce/actions/workflows/ci.yml/badge.svg)](https://github.com/SymphonyW/Go-Commerce/actions/workflows/ci.yml)
