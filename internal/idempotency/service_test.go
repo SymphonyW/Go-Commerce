@@ -136,6 +136,40 @@ func TestBeginRejectsProcessingDuplicate(t *testing.T) {
 	}
 }
 
+func TestAbortReleasesProcessingRecord(t *testing.T) {
+	service, db := newTestService(t)
+	req := BeginRequest{
+		UserID:         1,
+		RequestPath:    "POST /api/orders",
+		IdempotencyKey: "order-key",
+		RequestHash:    "hash-a",
+	}
+
+	first, err := service.Begin(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Begin returned error: %v", err)
+	}
+	if err := service.Abort(context.Background(), first.Record.ID); err != nil {
+		t.Fatalf("Abort returned error: %v", err)
+	}
+
+	var count int64
+	if err := db.Unscoped().Model(&Record{}).Where("id = ?", first.Record.ID).Count(&count).Error; err != nil {
+		t.Fatalf("failed to count aborted record: %v", err)
+	}
+	if got, want := count, int64(0); got != want {
+		t.Fatalf("unexpected aborted record count: got %d want %d", got, want)
+	}
+
+	second, err := service.Begin(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second Begin returned error: %v", err)
+	}
+	if got, want := second.Action, ActionProceed; got != want {
+		t.Fatalf("unexpected action after abort: got %q want %q", got, want)
+	}
+}
+
 func TestHashPayloadIsStable(t *testing.T) {
 	first, err := HashPayload(map[string]any{
 		"user_id": 1,

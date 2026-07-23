@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"gorm.io/gorm"
 )
 
@@ -205,6 +207,28 @@ func createOrderRequest(userID int64, key string, items ...*pb.CreateOrderItem) 
 	}
 }
 
+func cancelOrderRequest(orderID, userID int64, key string) *pb.CancelOrderRequest {
+	return &pb.CancelOrderRequest{
+		Id:             orderID,
+		UserId:         userID,
+		IdempotencyKey: key,
+	}
+}
+
+func createCancellableOrder(t *testing.T, service *Service, userID int64, item product.Product, quantity int32, key string) *pb.Order {
+	t.Helper()
+
+	resp, err := service.CreateOrder(context.Background(), createOrderRequest(
+		userID,
+		key,
+		&pb.CreateOrderItem{ProductId: int64(item.ID), Quantity: quantity},
+	))
+	if err != nil {
+		t.Fatalf("CreateOrder returned error: %v", err)
+	}
+	return resp.Order
+}
+
 func TestCreateOrderIsIdempotentForRepeatedRequests(t *testing.T) {
 	service, db := newTestService(t)
 	item := createTestProduct(t, db, "幂等商品", 25, 5)
@@ -304,6 +328,241 @@ func TestCreateOrderConcurrentSameKeyCreatesOneOrder(t *testing.T) {
 	}
 	if got, want := orderCount, int64(1); got != want {
 		t.Fatalf("unexpected order count: got %d want %d", got, want)
+	}
+}
+
+func TestCancelOrderRejectsMissingIdempotencyKey(t *testing.T) {
+	service, _ := newTestService(t)
+
+	_, err := service.CancelOrder(context.Background(), &pb.CancelOrderRequest{
+		Id:     1,
+		UserId: 1,
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.InvalidArgument)
+	}
+}
+
+func TestCancelOrderCompletesIdempotencyRecordOnSuccess(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "取消幂等记录商品", 10, 5)
+	order := createCancellableOrder(t, service, 1, item, 2, "create-before-cancel-record")
+
+	resp, err := service.CancelOrder(context.Background(), cancelOrderRequest(order.Id, 1, "cancel-record-key"))
+	if err != nil {
+		t.Fatalf("CancelOrder returned error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("expected cancellation to succeed, got message %q", resp.Message)
+	}
+
+	var record idempotency.Record
+	if err := db.Where("user_id = ? AND request_path = ? AND idempotency_key = ?", 1, cancelOrderRequestPath, "cancel-record-key").First(&record).Error; err != nil {
+		t.Fatalf("failed to load idempotency record: %v", err)
+	}
+	if got, want := record.State, idempotency.StateCompleted; got != want {
+		t.Fatalf("unexpected idempotency state: got %q want %q", got, want)
+	}
+	if got, want := record.StatusCode, http.StatusOK; got != want {
+		t.Fatalf("unexpected status code: got %d want %d", got, want)
+	}
+	var replay pb.CancelOrderResponse
+	if err := idempotency.ReplayInto(&record, &replay); err != nil {
+		t.Fatalf("failed to replay stored response: %v", err)
+	}
+	if !proto.Equal(resp, &replay) {
+		t.Fatalf("stored response mismatch: got %+v want %+v", &replay, resp)
+	}
+}
+
+func TestCancelOrderReplaysSameKeySameRequest(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "取消重放商品", 10, 5)
+	order := createCancellableOrder(t, service, 1, item, 2, "create-before-cancel-replay")
+	req := cancelOrderRequest(order.Id, 1, "repeat-cancel-key")
+
+	first, err := service.CancelOrder(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first CancelOrder returned error: %v", err)
+	}
+	second, err := service.CancelOrder(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second CancelOrder returned error: %v", err)
+	}
+
+	if !proto.Equal(first, second) {
+		t.Fatalf("expected replayed response to match first response: first=%+v second=%+v", first, second)
+	}
+	if !second.Success || second.Message != "订单取消成功" {
+		t.Fatalf("expected cached success response, got success=%v message=%q", second.Success, second.Message)
+	}
+}
+
+func TestCancelOrderRejectsSameKeyWithDifferentOrderID(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "取消冲突商品", 10, 10)
+	firstOrder := createCancellableOrder(t, service, 1, item, 1, "create-before-cancel-conflict-a")
+	secondOrder := createCancellableOrder(t, service, 1, item, 1, "create-before-cancel-conflict-b")
+
+	if _, err := service.CancelOrder(context.Background(), cancelOrderRequest(firstOrder.Id, 1, "conflicting-cancel-key")); err != nil {
+		t.Fatalf("first CancelOrder returned error: %v", err)
+	}
+
+	_, err := service.CancelOrder(context.Background(), cancelOrderRequest(secondOrder.Id, 1, "conflicting-cancel-key"))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.FailedPrecondition)
+	}
+}
+
+func TestCancelOrderRejectsSameKeyWhileProcessing(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "取消处理中商品", 10, 5)
+	order := createCancellableOrder(t, service, 1, item, 1, "create-before-processing-cancel")
+	requestHash, err := idempotency.HashPayload(newCancelOrderFingerprint(1, order.Id))
+	if err != nil {
+		t.Fatalf("failed to hash cancel request: %v", err)
+	}
+	if err := db.Create(&idempotency.Record{
+		IdempotencyKey: "processing-cancel-key",
+		UserID:         1,
+		RequestPath:    cancelOrderRequestPath,
+		RequestHash:    requestHash,
+		State:          idempotency.StateProcessing,
+		ExpiredAt:      time.Now().Add(time.Hour),
+	}).Error; err != nil {
+		t.Fatalf("failed to create processing idempotency record: %v", err)
+	}
+
+	_, err = service.CancelOrder(context.Background(), cancelOrderRequest(order.Id, 1, "processing-cancel-key"))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.FailedPrecondition)
+	}
+}
+
+func TestCancelOrderSameKeyDifferentUserDoesNotConflict(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "取消跨用户商品", 10, 10)
+	firstOrder := createCancellableOrder(t, service, 1, item, 1, "create-before-cancel-user-a")
+	secondOrder := createCancellableOrder(t, service, 2, item, 1, "create-before-cancel-user-b")
+
+	first, err := service.CancelOrder(context.Background(), cancelOrderRequest(firstOrder.Id, 1, "shared-cancel-key"))
+	if err != nil {
+		t.Fatalf("first CancelOrder returned error: %v", err)
+	}
+	second, err := service.CancelOrder(context.Background(), cancelOrderRequest(secondOrder.Id, 2, "shared-cancel-key"))
+	if err != nil {
+		t.Fatalf("second CancelOrder returned error: %v", err)
+	}
+	if !first.Success || !second.Success {
+		t.Fatalf("expected both users to cancel successfully, first=%+v second=%+v", first, second)
+	}
+}
+
+func TestCancelOrderAbortsIdempotencyRecordAfterBusinessFailure(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "取消失败释放商品", 10, 5)
+	order := createCancellableOrder(t, service, 1, item, 2, "create-before-cancel-abort")
+
+	if err := db.Exec(`
+		CREATE TRIGGER fail_cancel_outbox_insert
+		BEFORE INSERT ON outbox_events
+		WHEN NEW.event_type = 'order.cancelled'
+		BEGIN
+			SELECT RAISE(FAIL, 'forced cancel outbox failure');
+		END;
+	`).Error; err != nil {
+		t.Fatalf("failed to create trigger: %v", err)
+	}
+
+	resp, err := service.CancelOrder(context.Background(), cancelOrderRequest(order.Id, 1, "abort-cancel-key"))
+	if err != nil {
+		t.Fatalf("CancelOrder returned error: %v", err)
+	}
+	if resp.Success || resp.Message != "取消订单失败" {
+		t.Fatalf("unexpected failure response: %+v", resp)
+	}
+
+	var recordCount int64
+	if err := db.Unscoped().
+		Model(&idempotency.Record{}).
+		Where("user_id = ? AND request_path = ? AND idempotency_key = ?", 1, cancelOrderRequestPath, "abort-cancel-key").
+		Count(&recordCount).Error; err != nil {
+		t.Fatalf("failed to count idempotency records: %v", err)
+	}
+	if got, want := recordCount, int64(0); got != want {
+		t.Fatalf("unexpected idempotency record count after abort: got %d want %d", got, want)
+	}
+
+	var persisted Order
+	if err := db.First(&persisted, order.Id).Error; err != nil {
+		t.Fatalf("failed to reload order: %v", err)
+	}
+	if got, want := persisted.Status, OrderStatusPending; got != want {
+		t.Fatalf("unexpected order status after rollback: got %q want %q", got, want)
+	}
+	var latest product.Product
+	if err := db.First(&latest, item.ID).Error; err != nil {
+		t.Fatalf("failed to reload product: %v", err)
+	}
+	if got, want := latest.Stock, int32(3); got != want {
+		t.Fatalf("unexpected stock after rollback: got %d want %d", got, want)
+	}
+
+	if err := db.Exec("DROP TRIGGER fail_cancel_outbox_insert").Error; err != nil {
+		t.Fatalf("failed to drop trigger: %v", err)
+	}
+	retry, err := service.CancelOrder(context.Background(), cancelOrderRequest(order.Id, 1, "abort-cancel-key"))
+	if err != nil {
+		t.Fatalf("retry CancelOrder returned error: %v", err)
+	}
+	if !retry.Success {
+		t.Fatalf("expected retry after abort to succeed, got message %q", retry.Message)
+	}
+}
+
+func TestCancelOrderReplayDoesNotRestoreStockTwice(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "取消库存重放商品", 10, 5)
+	order := createCancellableOrder(t, service, 1, item, 2, "create-before-cancel-stock-replay")
+	req := cancelOrderRequest(order.Id, 1, "cancel-stock-replay-key")
+
+	if _, err := service.CancelOrder(context.Background(), req); err != nil {
+		t.Fatalf("first CancelOrder returned error: %v", err)
+	}
+	if _, err := service.CancelOrder(context.Background(), req); err != nil {
+		t.Fatalf("replay CancelOrder returned error: %v", err)
+	}
+
+	var latest product.Product
+	if err := db.First(&latest, item.ID).Error; err != nil {
+		t.Fatalf("failed to reload product: %v", err)
+	}
+	if got, want := latest.Stock, int32(5); got != want {
+		t.Fatalf("unexpected stock after replay: got %d want %d", got, want)
+	}
+}
+
+func TestCancelOrderReplayDoesNotCreateSecondCancelledOutboxEvent(t *testing.T) {
+	service, db := newTestService(t)
+	item := createTestProduct(t, db, "取消事件重放商品", 10, 5)
+	order := createCancellableOrder(t, service, 1, item, 1, "create-before-cancel-outbox-replay")
+	req := cancelOrderRequest(order.Id, 1, "cancel-outbox-replay-key")
+
+	if _, err := service.CancelOrder(context.Background(), req); err != nil {
+		t.Fatalf("first CancelOrder returned error: %v", err)
+	}
+	if _, err := service.CancelOrder(context.Background(), req); err != nil {
+		t.Fatalf("replay CancelOrder returned error: %v", err)
+	}
+
+	var eventCount int64
+	if err := db.Model(&outbox.Event{}).
+		Where("aggregate_type = ? AND aggregate_id = ? AND event_type = ?", "order", fmt.Sprintf("%d", order.Id), events.OrderCancelledType).
+		Count(&eventCount).Error; err != nil {
+		t.Fatalf("failed to count cancelled outbox events: %v", err)
+	}
+	if got, want := eventCount, int64(1); got != want {
+		t.Fatalf("unexpected cancelled outbox event count: got %d want %d", got, want)
 	}
 }
 
@@ -764,8 +1023,9 @@ func TestCancelOrderRestoresStockAtomically(t *testing.T) {
 	}
 
 	cancelResp, err := service.CancelOrder(context.Background(), &pb.CancelOrderRequest{
-		Id:     resp.Order.Id,
-		UserId: 1,
+		Id:             resp.Order.Id,
+		UserId:         1,
+		IdempotencyKey: "cancel-restore-stock-key",
 	})
 	if err != nil {
 		t.Fatalf("CancelOrder returned error: %v", err)
@@ -799,8 +1059,9 @@ func TestCancelOrderStoresOrderCancelledEventInOutbox(t *testing.T) {
 		t.Fatalf("CreateOrder returned error: %v", err)
 	}
 	cancelResp, err := service.CancelOrder(context.Background(), &pb.CancelOrderRequest{
-		Id:     resp.Order.Id,
-		UserId: 1,
+		Id:             resp.Order.Id,
+		UserId:         1,
+		IdempotencyKey: "cancel-outbox-key",
 	})
 	if err != nil {
 		t.Fatalf("CancelOrder returned error: %v", err)
@@ -841,8 +1102,9 @@ func TestCancelOrderPersistsUserCancelReason(t *testing.T) {
 	}
 
 	cancelResp, err := service.CancelOrder(context.Background(), &pb.CancelOrderRequest{
-		Id:     resp.Order.Id,
-		UserId: 1,
+		Id:             resp.Order.Id,
+		UserId:         1,
+		IdempotencyKey: "cancel-reason-key",
 	})
 	if err != nil {
 		t.Fatalf("CancelOrder returned error: %v", err)
@@ -888,8 +1150,9 @@ func TestCancelOrderRejectsCompletedOrder(t *testing.T) {
 	}
 
 	resp, err := service.CancelOrder(context.Background(), &pb.CancelOrderRequest{
-		Id:     int64(order.ID),
-		UserId: 1,
+		Id:             int64(order.ID),
+		UserId:         1,
+		IdempotencyKey: "cancel-completed-key",
 	})
 	if err != nil {
 		t.Fatalf("CancelOrder returned error: %v", err)
@@ -915,8 +1178,9 @@ func TestCancelOrderRejectsPaidOrder(t *testing.T) {
 	}
 
 	resp, err := service.CancelOrder(context.Background(), &pb.CancelOrderRequest{
-		Id:     int64(order.ID),
-		UserId: 1,
+		Id:             int64(order.ID),
+		UserId:         1,
+		IdempotencyKey: "cancel-paid-key",
 	})
 	if err != nil {
 		t.Fatalf("CancelOrder returned error: %v", err)

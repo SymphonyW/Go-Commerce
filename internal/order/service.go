@@ -559,6 +559,32 @@ func (s *Service) GetOrder(ctx context.Context, req *pb.GetOrderRequest) (*pb.Ge
 //	*pb.CancelOrderResponse: 取消订单响应，包含取消结果和消息
 //	error: 错误信息
 func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (*pb.CancelOrderResponse, error) {
+	if req.IdempotencyKey == "" {
+		return nil, status.Error(codes.InvalidArgument, "idempotency key required")
+	}
+
+	requestHash, err := idempotency.HashPayload(newCancelOrderFingerprint(req.UserId, req.Id))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to hash cancel order request: %v", err)
+	}
+
+	idempotencyResult, err := s.idempotency.Begin(ctx, idempotency.BeginRequest{
+		UserID:         uint(req.UserId),
+		RequestPath:    cancelOrderRequestPath,
+		IdempotencyKey: req.IdempotencyKey,
+		RequestHash:    requestHash,
+	})
+	if err != nil {
+		return nil, orderIdempotencyError(err)
+	}
+	if idempotencyResult.Action == idempotency.ActionReplay {
+		var replay pb.CancelOrderResponse
+		if err := idempotency.ReplayInto(idempotencyResult.Record, &replay); err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to replay cancel order response: %v", err)
+		}
+		return &replay, nil
+	}
+
 	_, changed, err := cancelOrderWithReason(s.db, req.Id, req.UserId, OrderCancelReasonUserCancelled, func(tx *gorm.DB, order *Order) error {
 		event := events.OrderCancelledEvent{
 			BaseEvent: events.NewBaseEventWithContext(ctx, events.OrderCancelledType, time.Now()),
@@ -574,38 +600,62 @@ func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (
 		})
 		return err
 	})
+	var response *pb.CancelOrderResponse
 	if err != nil {
 		switch {
 		case errors.Is(err, gorm.ErrRecordNotFound):
-			return &pb.CancelOrderResponse{
+			response = &pb.CancelOrderResponse{
 				Success: false,
 				Message: "订单不存在",
-			}, nil
+			}
 		case errors.Is(err, ErrInvalidOrderTransition):
-			return &pb.CancelOrderResponse{
+			response = &pb.CancelOrderResponse{
 				Success: false,
 				Message: err.Error(),
-			}, nil
+			}
 		default:
+			_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 			return &pb.CancelOrderResponse{
 				Success: false,
 				Message: "取消订单失败",
 			}, nil
 		}
-	}
-	if !changed {
-		return &pb.CancelOrderResponse{
+	} else if !changed {
+		response = &pb.CancelOrderResponse{
 			Success: false,
 			Message: "订单已取消",
-		}, nil
+		}
+	} else {
+		// 返回取消订单响应
+		response = &pb.CancelOrderResponse{
+			Success: true,
+			Message: "订单取消成功",
+		}
 	}
 
-	// 取消成功后再发布领域事件；发布失败不回滚订单，只记录日志等待后续可靠消息机制补强。
-	// 返回取消订单响应
-	return &pb.CancelOrderResponse{
-		Success: true,
-		Message: "订单取消成功",
-	}, nil
+	if err := s.idempotency.Complete(ctx, idempotencyResult.Record.ID, http.StatusOK, response); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to finalize cancel order idempotency record: %v", err)
+	}
+	return response, nil
+}
+
+const (
+	cancelOrderRequestPath = "/api/orders/:id/cancel"
+	cancelOrderOperation   = "cancel_order"
+)
+
+type cancelOrderFingerprint struct {
+	Operation string `json:"operation"`
+	UserID    int64  `json:"user_id"`
+	OrderID   int64  `json:"order_id"`
+}
+
+func newCancelOrderFingerprint(userID, orderID int64) cancelOrderFingerprint {
+	return cancelOrderFingerprint{
+		Operation: cancelOrderOperation,
+		UserID:    userID,
+		OrderID:   orderID,
+	}
 }
 
 const (

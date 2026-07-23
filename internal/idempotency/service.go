@@ -98,6 +98,7 @@ func (s *Service) Complete(ctx context.Context, recordID uint, statusCode int, r
 // Abort 仅清理仍处于处理中状态的记录，供业务事务失败且没有副作用落库时释放幂等键。
 func (s *Service) Abort(ctx context.Context, recordID uint) error {
 	return s.db.WithContext(ctx).
+		Unscoped().
 		Where("id = ? AND state = ?", recordID, StateProcessing).
 		Delete(&Record{}).Error
 }

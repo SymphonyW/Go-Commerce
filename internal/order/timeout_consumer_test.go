@@ -183,8 +183,9 @@ func TestOrderTimeoutConsumerSkipsAlreadyCancelledOrder(t *testing.T) {
 		t.Fatalf("CreateOrder returned error: %v", err)
 	}
 	if cancelResp, err := service.CancelOrder(t.Context(), &pb.CancelOrderRequest{
-		Id:     resp.Order.Id,
-		UserId: 1,
+		Id:             resp.Order.Id,
+		UserId:         1,
+		IdempotencyKey: "cancel-before-timeout-key",
 	}); err != nil {
 		t.Fatalf("CancelOrder returned error: %v", err)
 	} else if !cancelResp.Success {

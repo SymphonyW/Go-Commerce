@@ -501,6 +501,7 @@ paths:
     put:
       tags: [Order]
       summary: Cancel pending order
+      description: Requires Idempotency-Key. Repeating the same key for the same user and order replays the first cancel response; reusing the key with a different order returns 409.
       security:
         - bearerAuth: []
       parameters:
@@ -517,6 +518,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Idempotency key is already processing or was reused with a different cancel request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalServerError'
   /api/orders/{id}/ship:
@@ -830,6 +837,7 @@ components:
       name: Idempotency-Key
       in: header
       required: true
+      description: Required idempotency key for write operations. Reuse with the same request replays the first response; reuse with a different request returns 409.
       schema:
         type: string
   responses:
