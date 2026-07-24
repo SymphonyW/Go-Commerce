@@ -10,6 +10,7 @@ import (
 	"time"
 
 	pbOrder "go-commerce/api/order"
+	"go-commerce/internal/idempotency"
 	orderdomain "go-commerce/internal/order"
 	"go-commerce/internal/outbox"
 	"go-commerce/pkg/events"
@@ -35,6 +36,7 @@ type Service struct {
 	orderClient pbOrder.OrderServiceClient
 	publisher   mq.Publisher
 	outboxRepo  outbox.EventRepository
+	idempotency *idempotency.Service
 }
 
 func NewService(db *gorm.DB, orderClient pbOrder.OrderServiceClient, publisher mq.Publisher) *Service {
@@ -46,6 +48,7 @@ func NewService(db *gorm.DB, orderClient pbOrder.OrderServiceClient, publisher m
 		orderClient: orderClient,
 		publisher:   publisher,
 		outboxRepo:  outbox.NewRepository(db),
+		idempotency: idempotency.NewService(db, 24*time.Hour),
 	}
 }
 

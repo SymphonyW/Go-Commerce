@@ -15,7 +15,7 @@ Go Commerce 是一个已经跑通交易主链路的微服务演示项目。它�
 
 - 多个服务进程已经拆分，当前仍共享同一个 `ecommerce` MySQL 数据库。
 - 观测能力目前主要真正落在 API Gateway；其他服务已有健康检查，尚未全部接入统一日志、指标、追踪。
-- 下单与人工取消订单具备真正落库的幂等记录；支付成功目前更多依赖状态机语义幂等，尚未完成同级别的持久化幂等重放。
+- 下单、人工取消订单与支付成功具备真正落库的幂等记录，可按同 key 同请求稳定回放首次响应。
 
 ## 2. 技术栈
 
@@ -187,9 +187,11 @@ sequenceDiagram
     P-->>G: payment
 
     C->>G: POST /api/payments/:id/success
-    G->>P: MarkPaymentSucceeded
+    G->>P: MarkPaymentSucceeded + Idempotency-Key
+    P->>DB: 写入幂等记录 processing
     P->>O: 再次校验订单仍为 pending
     P->>DB: payment -> succeeded + outbox(payment.succeeded)
+    P->>DB: 幂等记录写入成功响应
     W->>DB: 拉取 outbox
     W->>MQ: 发布 payment.succeeded
     MQ->>O: order.payment.succeeded
@@ -201,6 +203,7 @@ sequenceDiagram
 - 支付金额直接取自订单总金额，不接收客户端金额。
 - 同一订单不能同时存在多条活跃支付单。
 - `payment.succeeded` 由订单服务异步消费，推动订单进入 `paid`。
+- `POST /api/payments/:id/success` 使用持久化幂等记录保存首次 `PaymentActionResponse`；重复请求不再更新支付单，也不会重复写 `payment.succeeded` outbox。
 
 ## 8. 订单超时关闭流程
 
@@ -337,15 +340,20 @@ WHERE id = ? AND stock >= ?;
 - 取消订单、库存回补、`order.cancelled` outbox 写入仍处于同一个数据库事务
 - 事务失败且没有业务副作用落库时，删除 processing 幂等记录，允许客户端重试
 
-### 12.2 当前仅具备“语义幂等”的接口
+`POST /api/payments/:id/success`
 
-- `POST /api/payments/:id/success`
+- 必须携带 `Idempotency-Key`
+- 指纹包含 `user_id`、`payment_id` 与固定操作类型 `payment_success`
+- 同 key、同用户、同支付单：回放首次完整 `PaymentActionResponse`
+- 同 key、同用户、不同支付单：返回冲突
+- 正在处理中的相同 key：返回冲突
+- 支付状态更新与 `payment.succeeded` outbox 写入仍处于同一个数据库事务
+- 事务失败且没有业务副作用落库时，删除 processing 幂等记录，允许客户端重试
+- 已成功支付后使用新的 key 再次调用时，保持明确业务错误：`payment cannot change status`
 
-网关当前要求携带 `Idempotency-Key`，但支付成功业务层尚未像下单、取消订单那样把键真正写入幂等表：
+### 12.2 后续可扩展
 
-- 支付成功依赖支付状态只能从 `created` 继续推进。
-
-这能防止重复副作用，但还不等于“稳定回放同一响应”。这是后续应继续补齐的地方。
+支付失败、发货、确认收货等写接口仍主要依赖状态机保证重复副作用可控；如果后续需要“同 key 回放同一响应”，可继续复用 `internal/idempotency/`。
 
 ## 13. Outbox 可靠消息机制
 
@@ -441,7 +449,7 @@ flowchart TB
 | --- | --- |
 | 服务共享同库 | 逐步明确数据库边界与迁移策略 |
 | 观测能力未全量落地 | 接入统一日志、gRPC 指标、Prometheus、Grafana、OpenTelemetry |
-| 支付成功未实现完整幂等回放 | 复用幂等表机制补齐 |
+| 更多写接口尚未实现完整幂等回放 | 复用幂等表机制按需补齐 |
 | 公开商家列表、用户订单列表未暴露分页 | 补齐网关层查询参数 |
 | 网关错误码映射不完全统一 | 统一使用 gRPC -> HTTP 映射 |
 | 支付仍为 mock | 接入真实支付渠道沙箱或适配层 |
