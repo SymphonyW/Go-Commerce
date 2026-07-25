@@ -199,6 +199,18 @@ func createTestMerchant(t *testing.T, db *gorm.DB, ownerUserID uint) merchant.Me
 	return shop
 }
 
+func countOrderOutboxEvents(t *testing.T, db *gorm.DB, orderID uint, eventType string) int64 {
+	t.Helper()
+
+	var count int64
+	if err := db.Model(&outbox.Event{}).
+		Where("aggregate_type = ? AND aggregate_id = ? AND event_type = ?", "order", fmt.Sprintf("%d", orderID), eventType).
+		Count(&count).Error; err != nil {
+		t.Fatalf("failed to count order outbox events: %v", err)
+	}
+	return count
+}
+
 func createOrderRequest(userID int64, key string, items ...*pb.CreateOrderItem) *pb.CreateOrderRequest {
 	return &pb.CreateOrderRequest{
 		UserId:         userID,
@@ -1263,15 +1275,26 @@ func TestShipOrderRejectsForeignMerchant(t *testing.T) {
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.PermissionDenied)
 	}
+
+	var latest Order
+	if err := db.First(&latest, order.ID).Error; err != nil {
+		t.Fatalf("failed to reload order: %v", err)
+	}
+	if got, want := latest.Status, OrderStatusPaid; got != want {
+		t.Fatalf("unexpected order status after permission failure: got %q want %q", got, want)
+	}
+	if got := countOrderOutboxEvents(t, db, order.ID, events.OrderShippedType); got != 0 {
+		t.Fatalf("unexpected shipped outbox event count after permission failure: got %d want 0", got)
+	}
 }
 
-func TestShipOrderRejectsPendingOrder(t *testing.T) {
+func TestShipOrderRejectsCustomerActor(t *testing.T) {
 	service, db := newTestService(t)
-	admin := createTestUser(t, db, auth.RoleAdmin)
+	customer := createTestUser(t, db, auth.RoleCustomer)
 	order := Order{
 		UserID:      1,
 		TotalAmount: 10,
-		Status:      OrderStatusPending,
+		Status:      OrderStatusPaid,
 		OrderDate:   time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
@@ -1280,10 +1303,108 @@ func TestShipOrderRejectsPendingOrder(t *testing.T) {
 
 	_, err := service.ShipOrder(context.Background(), &pb.ShipOrderRequest{
 		Id:          int64(order.ID),
+		ActorUserId: int64(customer.ID),
+	})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.PermissionDenied)
+	}
+
+	var latest Order
+	if err := db.First(&latest, order.ID).Error; err != nil {
+		t.Fatalf("failed to reload order: %v", err)
+	}
+	if got, want := latest.Status, OrderStatusPaid; got != want {
+		t.Fatalf("unexpected order status after customer ship attempt: got %q want %q", got, want)
+	}
+	if got := countOrderOutboxEvents(t, db, order.ID, events.OrderShippedType); got != 0 {
+		t.Fatalf("unexpected shipped outbox event count after customer ship attempt: got %d want 0", got)
+	}
+}
+
+func TestShipOrderRejectsInvalidStatuses(t *testing.T) {
+	statuses := []string{
+		OrderStatusPending,
+		OrderStatusShipped,
+		OrderStatusCompleted,
+		OrderStatusCancelled,
+	}
+
+	for _, initialStatus := range statuses {
+		t.Run(initialStatus, func(t *testing.T) {
+			service, db := newTestService(t)
+			admin := createTestUser(t, db, auth.RoleAdmin)
+			order := Order{
+				UserID:      1,
+				TotalAmount: 10,
+				Status:      initialStatus,
+				OrderDate:   time.Now(),
+			}
+			if err := db.Create(&order).Error; err != nil {
+				t.Fatalf("failed to create order: %v", err)
+			}
+
+			_, err := service.ShipOrder(context.Background(), &pb.ShipOrderRequest{
+				Id:          int64(order.ID),
+				ActorUserId: int64(admin.ID),
+			})
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.FailedPrecondition)
+			}
+
+			var latest Order
+			if err := db.First(&latest, order.ID).Error; err != nil {
+				t.Fatalf("failed to reload order: %v", err)
+			}
+			if got, want := latest.Status, initialStatus; got != want {
+				t.Fatalf("unexpected order status after failed ship: got %q want %q", got, want)
+			}
+			if got := countOrderOutboxEvents(t, db, order.ID, events.OrderShippedType); got != 0 {
+				t.Fatalf("unexpected shipped outbox event count: got %d want 0", got)
+			}
+		})
+	}
+}
+
+func TestShipOrderRollsBackStatusWhenOutboxInsertFails(t *testing.T) {
+	service, db := newTestService(t)
+	admin := createTestUser(t, db, auth.RoleAdmin)
+	order := Order{
+		UserID:      1,
+		TotalAmount: 10,
+		Status:      OrderStatusPaid,
+		OrderDate:   time.Now(),
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatalf("failed to create order: %v", err)
+	}
+	if err := db.Exec(`
+		CREATE TRIGGER fail_ship_outbox_insert
+		BEFORE INSERT ON outbox_events
+		WHEN NEW.event_type = 'order.shipped'
+		BEGIN
+			SELECT RAISE(FAIL, 'forced ship outbox failure');
+		END;
+	`).Error; err != nil {
+		t.Fatalf("failed to create trigger: %v", err)
+	}
+
+	_, err := service.ShipOrder(context.Background(), &pb.ShipOrderRequest{
+		Id:          int64(order.ID),
 		ActorUserId: int64(admin.ID),
 	})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.FailedPrecondition)
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.Internal)
+	}
+
+	var latest Order
+	if err := db.First(&latest, order.ID).Error; err != nil {
+		t.Fatalf("failed to reload order: %v", err)
+	}
+	if got, want := latest.Status, OrderStatusPaid; got != want {
+		t.Fatalf("unexpected order status after outbox failure: got %q want %q", got, want)
+	}
+	if got := countOrderOutboxEvents(t, db, order.ID, events.OrderShippedType); got != 0 {
+		t.Fatalf("unexpected shipped outbox event count after rollback: got %d want 0", got)
 	}
 }
 
@@ -1327,24 +1448,88 @@ func TestCompleteOrderTransitionsShippedToCompleted(t *testing.T) {
 	}
 }
 
-func TestCompleteOrderRejectsPaidOrder(t *testing.T) {
+func TestCompleteOrderRejectsInvalidStatuses(t *testing.T) {
+	statuses := []string{
+		OrderStatusPending,
+		OrderStatusPaid,
+		OrderStatusCompleted,
+		OrderStatusCancelled,
+	}
+
+	for _, initialStatus := range statuses {
+		t.Run(initialStatus, func(t *testing.T) {
+			service, db := newTestService(t)
+			order := Order{
+				UserID:      7,
+				TotalAmount: 10,
+				Status:      initialStatus,
+				OrderDate:   time.Now(),
+			}
+			if err := db.Create(&order).Error; err != nil {
+				t.Fatalf("failed to create order: %v", err)
+			}
+
+			_, err := service.CompleteOrder(context.Background(), &pb.CompleteOrderRequest{
+				Id:     int64(order.ID),
+				UserId: 7,
+			})
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.FailedPrecondition)
+			}
+
+			var latest Order
+			if err := db.First(&latest, order.ID).Error; err != nil {
+				t.Fatalf("failed to reload order: %v", err)
+			}
+			if got, want := latest.Status, initialStatus; got != want {
+				t.Fatalf("unexpected order status after failed completion: got %q want %q", got, want)
+			}
+			if got := countOrderOutboxEvents(t, db, order.ID, events.OrderCompletedType); got != 0 {
+				t.Fatalf("unexpected completed outbox event count: got %d want 0", got)
+			}
+		})
+	}
+}
+
+func TestCompleteOrderRollsBackStatusWhenOutboxInsertFails(t *testing.T) {
 	service, db := newTestService(t)
 	order := Order{
 		UserID:      7,
 		TotalAmount: 10,
-		Status:      OrderStatusPaid,
+		Status:      OrderStatusShipped,
 		OrderDate:   time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)
+	}
+	if err := db.Exec(`
+		CREATE TRIGGER fail_complete_outbox_insert
+		BEFORE INSERT ON outbox_events
+		WHEN NEW.event_type = 'order.completed'
+		BEGIN
+			SELECT RAISE(FAIL, 'forced complete outbox failure');
+		END;
+	`).Error; err != nil {
+		t.Fatalf("failed to create trigger: %v", err)
 	}
 
 	_, err := service.CompleteOrder(context.Background(), &pb.CompleteOrderRequest{
 		Id:     int64(order.ID),
 		UserId: 7,
 	})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.FailedPrecondition)
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.Internal)
+	}
+
+	var latest Order
+	if err := db.First(&latest, order.ID).Error; err != nil {
+		t.Fatalf("failed to reload order: %v", err)
+	}
+	if got, want := latest.Status, OrderStatusShipped; got != want {
+		t.Fatalf("unexpected order status after outbox failure: got %q want %q", got, want)
+	}
+	if got := countOrderOutboxEvents(t, db, order.ID, events.OrderCompletedType); got != 0 {
+		t.Fatalf("unexpected completed outbox event count after rollback: got %d want 0", got)
 	}
 }
 

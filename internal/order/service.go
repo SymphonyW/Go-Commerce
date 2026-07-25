@@ -718,30 +718,28 @@ func cancelOrderWithReason(db *gorm.DB, orderID, userID int64, reason string, af
 // ShipOrder 允许具备权限的商家或管理员把已支付订单推进到已发货。
 func (s *Service) ShipOrder(ctx context.Context, req *pb.ShipOrderRequest) (*pb.ShipOrderResponse, error) {
 	var order Order
-	if err := s.db.First(&order, req.Id).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, status.Error(codes.NotFound, "order not found")
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&order, req.Id).Error; err != nil {
+			return err
 		}
-		return nil, status.Errorf(codes.Internal, "failed to fetch order: %v", err)
-	}
 
-	var orderItems []OrderItem
-	if err := s.db.Where("order_id = ?", order.ID).Find(&orderItems).Error; err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to fetch order items: %v", err)
-	}
-	if err := s.authorizeShipment(uint(req.ActorUserId), orderItems); err != nil {
-		return nil, orderStatusError(err)
-	}
+		var orderItems []OrderItem
+		if err := tx.Where("order_id = ?", order.ID).Find(&orderItems).Error; err != nil {
+			return err
+		}
+		if err := s.authorizeShipmentWithDB(tx, uint(req.ActorUserId), orderItems); err != nil {
+			return err
+		}
 
-	fromStatus := order.Status
-	if err := TransitionTo(&order, OrderStatusShipped); err != nil {
-		return nil, orderStatusError(err)
-	}
-	statusEvent := newOrderStatusChangedEvent(ctx, events.OrderShippedType, &order, fromStatus, OrderStatusShipped)
-	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		fromStatus := order.Status
+		if err := TransitionTo(&order, OrderStatusShipped); err != nil {
+			return err
+		}
 		if err := tx.Save(&order).Error; err != nil {
 			return err
 		}
+		statusEvent := newOrderStatusChangedEvent(ctx, events.OrderShippedType, &order, fromStatus, OrderStatusShipped)
 		_, err := s.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
 			AggregateType: "order",
 			AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
@@ -750,6 +748,12 @@ func (s *Service) ShipOrder(ctx context.Context, req *pb.ShipOrderRequest) (*pb.
 		})
 		return err
 	}); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "order not found")
+		}
+		if isOrderStatusError(err) {
+			return nil, orderStatusError(err)
+		}
 		return nil, status.Errorf(codes.Internal, "failed to update order status: %v", err)
 	}
 
@@ -759,22 +763,21 @@ func (s *Service) ShipOrder(ctx context.Context, req *pb.ShipOrderRequest) (*pb.
 // CompleteOrder 仅允许订单所属用户确认收货，把已发货订单推进到已完成。
 func (s *Service) CompleteOrder(ctx context.Context, req *pb.CompleteOrderRequest) (*pb.CompleteOrderResponse, error) {
 	var order Order
-	if err := s.db.Where("id = ? AND user_id = ?", req.Id, req.UserId).First(&order).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, status.Error(codes.NotFound, "order not found")
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND user_id = ?", req.Id, req.UserId).
+			First(&order).Error; err != nil {
+			return err
 		}
-		return nil, status.Errorf(codes.Internal, "failed to fetch order: %v", err)
-	}
 
-	fromStatus := order.Status
-	if err := TransitionTo(&order, OrderStatusCompleted); err != nil {
-		return nil, orderStatusError(err)
-	}
-	statusEvent := newOrderStatusChangedEvent(ctx, events.OrderCompletedType, &order, fromStatus, OrderStatusCompleted)
-	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		fromStatus := order.Status
+		if err := TransitionTo(&order, OrderStatusCompleted); err != nil {
+			return err
+		}
 		if err := tx.Save(&order).Error; err != nil {
 			return err
 		}
+		statusEvent := newOrderStatusChangedEvent(ctx, events.OrderCompletedType, &order, fromStatus, OrderStatusCompleted)
 		_, err := s.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
 			AggregateType: "order",
 			AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
@@ -783,6 +786,12 @@ func (s *Service) CompleteOrder(ctx context.Context, req *pb.CompleteOrderReques
 		})
 		return err
 	}); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "order not found")
+		}
+		if isOrderStatusError(err) {
+			return nil, orderStatusError(err)
+		}
 		return nil, status.Errorf(codes.Internal, "failed to update order status: %v", err)
 	}
 
@@ -790,8 +799,12 @@ func (s *Service) CompleteOrder(ctx context.Context, req *pb.CompleteOrderReques
 }
 
 func (s *Service) authorizeShipment(actorUserID uint, orderItems []OrderItem) error {
+	return s.authorizeShipmentWithDB(s.db, actorUserID, orderItems)
+}
+
+func (s *Service) authorizeShipmentWithDB(db *gorm.DB, actorUserID uint, orderItems []OrderItem) error {
 	var actor auth.User
-	if err := s.db.First(&actor, actorUserID).Error; err != nil {
+	if err := db.First(&actor, actorUserID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return merchant.ErrUserNotFound
 		}
@@ -809,7 +822,7 @@ func (s *Service) authorizeShipment(actorUserID uint, orderItems []OrderItem) er
 		}
 
 		var merchants []merchant.Merchant
-		if err := s.db.Where("id IN ?", merchantIDs).Find(&merchants).Error; err != nil {
+		if err := db.Where("id IN ?", merchantIDs).Find(&merchants).Error; err != nil {
 			return err
 		}
 		if len(merchants) != len(merchantIDs) {
@@ -941,4 +954,11 @@ func orderStatusError(err error) error {
 	default:
 		return status.Errorf(codes.Internal, "order operation failed: %v", err)
 	}
+}
+
+func isOrderStatusError(err error) bool {
+	return errors.Is(err, ErrInvalidOrderTransition) ||
+		errors.Is(err, merchant.ErrPermissionDenied) ||
+		errors.Is(err, merchant.ErrUserNotFound) ||
+		errors.Is(err, merchant.ErrMerchantNotFound)
 }
