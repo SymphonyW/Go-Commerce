@@ -135,7 +135,7 @@ flowchart LR
 | 支付 | 创建模拟支付、查询、标记成功、标记失败 | 支付成功已实现落库幂等记录；支付单用数据库唯一约束保证同一订单最多一个活跃支付。 |
 | 商家后台 | 当前店铺、商品维护、商家订单查看 | 普通商家只能操作自己名下资源，`admin` 可跨店。 |
 | 事件总线 | `order.created`、`payment.succeeded` 等事件 | RabbitMQ topic exchange 承载领域事件。 |
-| 可靠消息 | Outbox 本地消息表、重试、失败状态 | 当前按单实例 worker 设计。 |
+| 可靠消息 | Outbox 本地消息表、claim、lease、重试、失败状态 | 支持多个 worker 并行领取；投递语义仍是 at-least-once delivery。 |
 | 观测 | 健康检查、就绪检查、网关指标、请求关联 ID | 完整 OpenTelemetry 追踪尚未接入。 |
 
 ## 目录结构
@@ -272,6 +272,14 @@ go run ./cmd/api-gateway
 ```
 
 手动启动时，程序直接读取系统环境变量；仓库没有内置 `.env` 自动加载器。完整参考配置见 [.env.example](.env.example)。使用 Docker Compose 启动时，默认环境变量已在 [docker-compose.yml](docker-compose.yml) 中配置。
+
+Outbox worker 支持多实例并行运行。每个 worker 会在短事务中 claim due 事件并写入 `processing / locked_by / locked_at / lease_expires_at`，事务提交后再发布 RabbitMQ；`MarkPublished` 与 `MarkRetry` 只允许当前 lease owner 更新。`OUTBOX_WORKER_ID` 未配置时使用 `hostname + UUID` 自动生成，`OUTBOX_LEASE_DURATION` 控制 worker 崩溃后的可恢复窗口。即使有 claim/lease，整体消息语义仍是 at-least-once delivery，下游消费者仍需保持幂等。
+
+Outbox worker 的 `/readyz` 会暴露 `outbox_worker_polling` 依赖状态，`/metrics` 暴露 `go_commerce_outbox_claimed_total`、`go_commerce_outbox_published_total`、`go_commerce_outbox_retry_total`、`go_commerce_outbox_failed_total` 和 `go_commerce_outbox_lease_recovered_total`。
+
+```bash
+docker compose up -d --scale outbox-worker=2 outbox-worker
+```
 
 ## 截图展示
 

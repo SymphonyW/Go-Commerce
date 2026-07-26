@@ -379,15 +379,19 @@ flowchart LR
 ### 13.2 当前实现
 
 - 业务事务里同步写 `outbox_events`
-- `outbox-worker` 扫描 `pending` 事件
-- 发布成功后标记 `published`
-- 发布失败后按 `1s -> 5s -> 30s -> 1m -> 5m` 重试
-- 超过上限标记 `failed`
+- 多个 `outbox-worker` 可以并行运行
+- worker 在数据库短事务中 claim due 事件：`pending AND next_retry_at <= now`，或 `processing AND lease_expires_at <= now`
+- MySQL 8 使用 `SELECT ... FOR UPDATE SKIP LOCKED` 避免并发 worker 领取同一批事件
+- claim 成功后立即写入 `status=processing`、`locked_by`、`locked_at`、`lease_expires_at`
+- 数据库事务提交后再执行 RabbitMQ 发布，避免把网络 IO 放入事务
+- 发布成功后，只有当前 lease owner 可以标记 `published`
+- 发布失败后，只有当前 lease owner 可以标记 retry；未达上限回到 `pending` 并设置 `next_retry_at`，达到上限进入 `failed`
+- 失败重试按 `1s -> 5s -> 30s -> 1m -> 5m` 调度
+- worker 崩溃后，其他 worker 可在 lease 过期后重新领取
 
-### 13.3 当前并发假设
+### 13.3 投递语义
 
-当前实现按**单实例 worker** 设计。
-如果未来需要水平扩容，需要继续引入租约、抢占锁或类似机制，避免多个 worker 重复处理同一事件。
+Outbox worker 通过 claim/lease 避免同一事件被多个正常 worker 同时处理，但整体仍是 **at-least-once delivery**：如果 RabbitMQ 发布成功后进程在标记 `published` 前崩溃，lease 过期后事件会被重新发布。下游消费者仍必须按 `event_id` 或业务幂等键处理重复消息。
 
 ## 14. 可观测性设计
 
@@ -405,7 +409,7 @@ flowchart LR
 
 ### 14.2 当前不足
 
-- `UnaryServerInterceptor`、统一指标对象、Outbox gauge 等能力已经在公共包中出现，但尚未全部接入服务入口。
+- API Gateway 已接入统一 HTTP/gRPC 指标，Outbox worker 已接入 claim、publish、retry、failed、lease recovery 指标；完整 OpenTelemetry 追踪尚未接入。
 - 目前更准确的说法是“链路关联 ID”，而不是完整分布式追踪。
 - 仓库未提供 Prometheus / Grafana Compose 组件。
 

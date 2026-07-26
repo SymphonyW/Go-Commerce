@@ -153,9 +153,8 @@ services:
       context: .
       dockerfile: ./cmd/outbox-worker/Dockerfile
       pull: false
-    container_name: ecommerce-outbox-worker
-    ports:
-      - "8088:8088"
+    expose:
+      - "8088"
     depends_on:
       mysql:
         condition: service_healthy
@@ -170,6 +169,7 @@ services:
       OUTBOX_BATCH_SIZE: "100"
       OUTBOX_MAX_RETRY: "5"
       OUTBOX_RETRY_BASE_DELAY: "1s"
+      OUTBOX_LEASE_DURATION: "30s"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8088/readyz"]
       interval: 10s

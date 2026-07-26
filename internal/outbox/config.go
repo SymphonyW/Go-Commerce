@@ -1,9 +1,12 @@
 package outbox
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -12,6 +15,7 @@ const (
 	DefaultBatchSize      = 100
 	DefaultMaxRetry       = 5
 	DefaultRetryBaseDelay = time.Second
+	DefaultLeaseDuration  = 30 * time.Second
 )
 
 type Config struct {
@@ -19,6 +23,8 @@ type Config struct {
 	BatchSize      int
 	MaxRetry       int
 	RetryBaseDelay time.Duration
+	LeaseDuration  time.Duration
+	WorkerID       string
 }
 
 func LoadConfigFromEnv() (Config, error) {
@@ -27,6 +33,8 @@ func LoadConfigFromEnv() (Config, error) {
 		BatchSize:      DefaultBatchSize,
 		MaxRetry:       DefaultMaxRetry,
 		RetryBaseDelay: DefaultRetryBaseDelay,
+		LeaseDuration:  DefaultLeaseDuration,
+		WorkerID:       strings.TrimSpace(os.Getenv("OUTBOX_WORKER_ID")),
 	}
 
 	var err error
@@ -54,6 +62,15 @@ func LoadConfigFromEnv() (Config, error) {
 			return Config{}, fmt.Errorf("invalid OUTBOX_RETRY_BASE_DELAY: %q", raw)
 		}
 	}
+	if raw := os.Getenv("OUTBOX_LEASE_DURATION"); raw != "" {
+		cfg.LeaseDuration, err = time.ParseDuration(raw)
+		if err != nil || cfg.LeaseDuration <= 0 {
+			return Config{}, fmt.Errorf("invalid OUTBOX_LEASE_DURATION: %q", raw)
+		}
+	}
+	if cfg.WorkerID == "" {
+		cfg.WorkerID = defaultWorkerID()
+	}
 
 	return cfg, nil
 }
@@ -71,6 +88,14 @@ func (c Config) withDefaults() Config {
 	if c.RetryBaseDelay <= 0 {
 		c.RetryBaseDelay = DefaultRetryBaseDelay
 	}
+	if c.LeaseDuration <= 0 {
+		c.LeaseDuration = DefaultLeaseDuration
+	}
+	if strings.TrimSpace(c.WorkerID) == "" {
+		c.WorkerID = defaultWorkerID()
+	} else {
+		c.WorkerID = strings.TrimSpace(c.WorkerID)
+	}
 	return c
 }
 
@@ -87,4 +112,32 @@ func (c Config) RetryDelay(retryCount int) time.Duration {
 		index = len(multipliers) - 1
 	}
 	return c.RetryBaseDelay * multipliers[index]
+}
+
+func defaultWorkerID() string {
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		hostname = "unknown-host"
+	}
+	return fmt.Sprintf("%s-%s", hostname, newUUIDString())
+}
+
+func newUUIDString() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
+	}
+
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+
+	encoded := hex.EncodeToString(b[:])
+	return fmt.Sprintf(
+		"%s-%s-%s-%s-%s",
+		encoded[0:8],
+		encoded[8:12],
+		encoded[12:16],
+		encoded[16:20],
+		encoded[20:32],
+	)
 }

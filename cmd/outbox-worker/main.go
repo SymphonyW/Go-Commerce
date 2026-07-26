@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/streadway/amqp"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -53,24 +56,36 @@ func main() {
 	}
 	defer channel.Close()
 
+	repo := outbox.NewRepository(db)
+	worker := outbox.NewWorker(repo, mq.NewRabbitMQPublisher(channel, exchangeName), config, log.Default())
+	registry := prometheus.NewRegistry()
+	worker.SetMetrics(outbox.NewPrometheusMetrics("outbox-worker", registry))
+
+	probeHandler := healthcheck.Handler(
+		healthcheck.Dependency{Name: "mysql", Check: healthcheck.SQL(sqlDB)},
+		healthcheck.Dependency{Name: "rabbitmq", Check: healthcheck.AMQP(conn)},
+		healthcheck.Dependency{Name: "outbox_worker_polling", Check: worker.CheckPolling},
+	)
+	httpMux := http.NewServeMux()
+	httpMux.Handle("/healthz", probeHandler)
+	httpMux.Handle("/readyz", probeHandler)
+	httpMux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
+
 	healthServer := serviceutil.StartHTTPServer(
 		"outbox health server",
 		serviceutil.Env("OUTBOX_HEALTH_ADDR", ":8088"),
-		healthcheck.Handler(
-			healthcheck.Dependency{Name: "mysql", Check: healthcheck.SQL(sqlDB)},
-			healthcheck.Dependency{Name: "rabbitmq", Check: healthcheck.AMQP(conn)},
-		),
+		httpMux,
 	)
 	defer serviceutil.ShutdownHTTPServer(healthServer, 5*time.Second)
 
-	repo := outbox.NewRepository(db)
-	worker := outbox.NewWorker(repo, mq.NewRabbitMQPublisher(channel, exchangeName), config, log.Default())
 	log.Printf(
-		"outbox worker started poll_interval=%s batch_size=%d max_retry=%d retry_base_delay=%s",
+		"outbox worker started worker_id=%s poll_interval=%s batch_size=%d max_retry=%d retry_base_delay=%s lease_duration=%s",
+		worker.WorkerID(),
 		config.PollInterval,
 		config.BatchSize,
 		config.MaxRetry,
 		config.RetryBaseDelay,
+		config.LeaseDuration,
 	)
 	if err := worker.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("outbox_worker_stopped_unexpectedly error=%v", err)
