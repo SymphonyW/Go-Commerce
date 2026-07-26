@@ -181,15 +181,15 @@ sequenceDiagram
 
     C->>G: POST /api/payments
     G->>P: CreatePayment(order_id, user_id)
-    P->>O: GetOrder(order_id, user_id)
-    O-->>P: pending order
-    P->>DB: 创建 payment(created)
+    P->>DB: TX + SELECT order FOR UPDATE
+    P->>DB: 校验订单 pending
+    P->>DB: 创建 payment(created, active_order_id=order_id)
     P-->>G: payment
 
     C->>G: POST /api/payments/:id/success
     G->>P: MarkPaymentSucceeded + Idempotency-Key
     P->>DB: 写入幂等记录 processing
-    P->>O: 再次校验订单仍为 pending
+    P->>DB: TX + SELECT payment/order FOR UPDATE
     P->>DB: payment -> succeeded + outbox(payment.succeeded)
     P->>DB: 幂等记录写入成功响应
     W->>DB: 拉取 outbox
@@ -201,9 +201,14 @@ sequenceDiagram
 ### 关键点
 
 - 支付金额直接取自订单总金额，不接收客户端金额。
-- 同一订单不能同时存在多条活跃支付单。
+- 同一订单不能同时存在多条活跃支付单：`created` 与 `succeeded` 的 `active_order_id=order_id`，`failed` 的 `active_order_id=NULL`。
+- `payments.active_order_id` 上有唯一索引，数据库负责最终兜底；MySQL 与 SQLite 都允许多个 `NULL`，因此失败支付不会阻塞后续重试。
+- 创建支付时锁定订单行、校验订单仍为 `pending`，再插入带 `active_order_id` 的支付单；唯一索引冲突映射为明确的 `active payment already exists` 业务错误。
+- 支付成功与失败都会先锁定支付单行再做状态迁移，避免并发 success/fail 同时生效；成功保留 `active_order_id`，失败清空它。
 - `payment.succeeded` 由订单服务异步消费，推动订单进入 `paid`。
 - `POST /api/payments/:id/success` 使用持久化幂等记录保存首次 `PaymentActionResponse`；重复请求不再更新支付单，也不会重复写 `payment.succeeded` outbox。
+
+普通的 `COUNT status IN (created, succeeded)` 只能说明“本次读取时没看到活跃支付单”。两个并发事务可以同时读到 `0`，随后各自插入一条 `created` 支付单；除非用行锁覆盖同一个订单资源，并且由唯一索引把“不超过一个活跃支付单”变成数据库不变量，否则应用层检查无法可靠解决竞态。
 
 ## 8. 订单超时关闭流程
 

@@ -17,8 +17,9 @@ type Payment struct {
 	gorm.Model
 	// 支付单号会参与唯一约束，必须显式限制长度，避免 MySQL 把它推断成 longtext 后无法建索引。
 	// 同时使用 unique，避免重复 AutoMigrate 时再次触发 GORM/MySQL 的唯一索引迁移问题。
-	PaymentNo     string  `gorm:"size:64;not null;unique"`
-	OrderID       uint    `gorm:"not null;index"`
+	PaymentNo     string `gorm:"size:64;not null;unique"`
+	OrderID       uint   `gorm:"not null;index"`
+	ActiveOrderID *uint
 	UserID        uint    `gorm:"not null;index"`
 	Amount        float64 `gorm:"not null"`
 	Status        string  `gorm:"not null;default:'created';index"`

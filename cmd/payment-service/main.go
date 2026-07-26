@@ -38,7 +38,10 @@ func main() {
 	defer sqlDB.Close()
 	log.Printf("mysql_connected")
 
-	if err := db.AutoMigrate(&payment.Payment{}, &outbox.Event{}); err != nil {
+	if err := payment.Migrate(db); err != nil {
+		log.Fatalf("mysql_payment_migrate_failed error=%v", err)
+	}
+	if err := db.AutoMigrate(&outbox.Event{}); err != nil {
 		log.Fatalf("mysql_migrate_failed error=%v", err)
 	}
 

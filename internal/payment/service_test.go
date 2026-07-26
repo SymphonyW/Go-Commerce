@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,11 +90,71 @@ func newTestService(t *testing.T, orderClient pbOrder.OrderServiceClient, publis
 	if err != nil {
 		t.Fatalf("failed to open test database: %v", err)
 	}
-	if err := db.AutoMigrate(&Payment{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
-		t.Fatalf("failed to migrate test database: %v", err)
-	}
+	migratePaymentTestDB(t, db)
+	seedFakeOrders(t, db, orderClient)
 
 	return NewService(db, orderClient, publisher), db
+}
+
+func newConcurrentTestService(t *testing.T, orderClient pbOrder.OrderServiceClient, publisher mq.Publisher) (*Service, *gorm.DB) {
+	t.Helper()
+
+	dsn := filepath.Join(t.TempDir(), "payments.db") + "?_busy_timeout=5000&_journal_mode=WAL"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open concurrent test database: %v", err)
+	}
+	migratePaymentTestDB(t, db)
+	seedFakeOrders(t, db, orderClient)
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("failed to open sql db: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() {
+		_ = sqlDB.Close()
+	})
+
+	return NewService(db, orderClient, publisher), db
+}
+
+func migratePaymentTestDB(t *testing.T, db *gorm.DB) {
+	t.Helper()
+
+	if err := db.AutoMigrate(&orderdomain.Order{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
+		t.Fatalf("failed to migrate test support tables: %v", err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("failed to migrate payment test database: %v", err)
+	}
+}
+
+func seedFakeOrders(t *testing.T, db *gorm.DB, orderClient pbOrder.OrderServiceClient) {
+	t.Helper()
+
+	fake, ok := orderClient.(*fakeOrderClient)
+	if !ok {
+		return
+	}
+	for _, orderPB := range fake.orders {
+		seedPaymentTestOrder(t, db, orderPB)
+	}
+}
+
+func seedPaymentTestOrder(t *testing.T, db *gorm.DB, orderPB *pbOrder.Order) {
+	t.Helper()
+
+	persisted := orderdomain.Order{
+		Model:       gorm.Model{ID: uint(orderPB.Id)},
+		UserID:      uint(orderPB.UserId),
+		TotalAmount: float64(orderPB.TotalAmount),
+		Status:      orderPB.Status,
+		OrderDate:   time.Now(),
+	}
+	if err := db.Create(&persisted).Error; err != nil {
+		t.Fatalf("failed to seed order: %v", err)
+	}
 }
 
 func paymentActionRequest(userID int64, paymentID uint, key string) *pbPayment.PaymentActionRequest {
@@ -110,6 +173,32 @@ func createPaymentForOrder(t *testing.T, service *Service, userID, orderID int64
 		t.Fatalf("CreatePayment returned error: %v", err)
 	}
 	return payment
+}
+
+func runConcurrentPaymentActions(workers int, fn func() error) []error {
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := fn(); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	unexpected := make([]error, 0, len(errs))
+	for err := range errs {
+		unexpected = append(unexpected, err)
+	}
+	return unexpected
 }
 
 func TestCreatePaymentRejectsMissingOrder(t *testing.T) {
@@ -150,6 +239,17 @@ func TestCreatePaymentForPendingOrder(t *testing.T) {
 	if got, want := payment.Status, PaymentStatusCreated; got != want {
 		t.Fatalf("unexpected status: got %q want %q", got, want)
 	}
+	if payment.ActiveOrderID == nil || *payment.ActiveOrderID != 1 {
+		t.Fatalf("unexpected active order id: got %v want 1", payment.ActiveOrderID)
+	}
+}
+
+func TestPaymentActiveOrderUniqueIndexExists(t *testing.T) {
+	_, db := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{}}, nil)
+
+	if !db.Migrator().HasIndex(&Payment{}, "idx_payments_active_order") {
+		t.Fatal("expected active order unique index to exist")
+	}
 }
 
 func TestCreatePaymentRejectsDuplicateActivePayment(t *testing.T) {
@@ -166,8 +266,74 @@ func TestCreatePaymentRejectsDuplicateActivePayment(t *testing.T) {
 	}
 }
 
+func TestCreatePaymentDuplicateActivePaymentMapsToFailedPrecondition(t *testing.T) {
+	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+	}}, nil)
+	grpcService := NewGRPCService(service)
+
+	if _, err := grpcService.CreatePayment(context.Background(), &pbPayment.CreatePaymentRequest{
+		UserId:        1,
+		OrderId:       1,
+		PaymentMethod: PaymentMethodMockBalance,
+	}); err != nil {
+		t.Fatalf("first CreatePayment returned error: %v", err)
+	}
+	_, err := grpcService.CreatePayment(context.Background(), &pbPayment.CreatePaymentRequest{
+		UserId:        1,
+		OrderId:       1,
+		PaymentMethod: PaymentMethodMockBalance,
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.FailedPrecondition)
+	}
+}
+
+func TestConcurrentCreatePaymentAllowsOnlyOneActivePayment(t *testing.T) {
+	service, db := newConcurrentTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+	}}, nil)
+
+	var successes int32
+	unexpected := runConcurrentPaymentActions(50, func() error {
+		created, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
+		if err == nil {
+			if created == nil {
+				return fmt.Errorf("nil payment")
+			}
+			atomic.AddInt32(&successes, 1)
+			return nil
+		}
+		if errors.Is(err, ErrActivePaymentExists) {
+			return nil
+		}
+		return err
+	})
+	for _, err := range unexpected {
+		t.Errorf("unexpected CreatePayment error: %v", err)
+	}
+	if got, want := atomic.LoadInt32(&successes), int32(1); got != want {
+		t.Fatalf("unexpected successful create count: got %d want %d", got, want)
+	}
+
+	var activeCount int64
+	if err := db.Model(&Payment{}).
+		Where("order_id = ? AND active_order_id = ? AND status IN ?", 1, 1, []string{PaymentStatusCreated, PaymentStatusSucceeded}).
+		Count(&activeCount).Error; err != nil {
+		t.Fatalf("failed to count active payments: %v", err)
+	}
+	if got, want := activeCount, int64(1); got != want {
+		t.Fatalf("unexpected active payment count: got %d want %d", got, want)
+	}
+}
+
 func TestCreatePaymentRejectsNonPendingOrders(t *testing.T) {
-	tests := []string{orderdomain.OrderStatusCancelled, orderdomain.OrderStatusPaid}
+	tests := []string{
+		orderdomain.OrderStatusCancelled,
+		orderdomain.OrderStatusPaid,
+		orderdomain.OrderStatusShipped,
+		orderdomain.OrderStatusCompleted,
+	}
 	for _, orderStatus := range tests {
 		t.Run(orderStatus, func(t *testing.T) {
 			service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
@@ -300,8 +466,8 @@ func TestMarkPaymentSucceededReplaysSameKeySameRequest(t *testing.T) {
 	if !proto.Equal(first, second) {
 		t.Fatalf("expected replayed response to match first response: first=%+v second=%+v", first, second)
 	}
-	if got, want := orderClient.getCount, 2; got != want {
-		t.Fatalf("unexpected order lookup count: got %d want %d", got, want)
+	if got, want := orderClient.getCount, 0; got != want {
+		t.Fatalf("unexpected remote order lookup count: got %d want %d", got, want)
 	}
 }
 
@@ -467,8 +633,8 @@ func TestMarkPaymentSucceededNewKeyAfterSuccessReturnsBusinessError(t *testing.T
 	}
 }
 
-func TestFailPaymentMarksRecordFailed(t *testing.T) {
-	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
+func TestFailPaymentMarksRecordFailedAndReleasesActiveOrder(t *testing.T) {
+	service, db := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
 		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
 	}}, nil)
 
@@ -483,9 +649,31 @@ func TestFailPaymentMarksRecordFailed(t *testing.T) {
 	if got, want := updated.Status, PaymentStatusFailed; got != want {
 		t.Fatalf("unexpected status: got %q want %q", got, want)
 	}
+	if updated.ActiveOrderID != nil {
+		t.Fatalf("expected failed payment to release active order id, got %v", *updated.ActiveOrderID)
+	}
+
+	var latest Payment
+	if err := db.First(&latest, payment.ID).Error; err != nil {
+		t.Fatalf("failed to reload payment: %v", err)
+	}
+	if latest.ActiveOrderID != nil {
+		t.Fatalf("expected persisted failed payment to release active order id, got %v", *latest.ActiveOrderID)
+	}
+
+	retry, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
+	if err != nil {
+		t.Fatalf("CreatePayment after failed payment returned error: %v", err)
+	}
+	if retry.ID == payment.ID {
+		t.Fatalf("expected a new payment after failure, got same id %d", retry.ID)
+	}
+	if retry.ActiveOrderID == nil || *retry.ActiveOrderID != 1 {
+		t.Fatalf("unexpected retry active order id: got %v want 1", retry.ActiveOrderID)
+	}
 }
 
-func TestSucceedPaymentRejectsCancelledOrder(t *testing.T) {
+func TestCreatePaymentAfterSucceededPaymentReturnsActivePaymentExists(t *testing.T) {
 	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
 		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
 	}}, nil)
@@ -494,10 +682,108 @@ func TestSucceedPaymentRejectsCancelledOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePayment returned error: %v", err)
 	}
+	updated, err := service.SucceedPayment(context.Background(), 1, payment.ID)
+	if err != nil {
+		t.Fatalf("SucceedPayment returned error: %v", err)
+	}
+	if updated.ActiveOrderID == nil || *updated.ActiveOrderID != 1 {
+		t.Fatalf("unexpected succeeded active order id: got %v want 1", updated.ActiveOrderID)
+	}
 
-	service.orderClient = &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusCancelled, TotalAmount: 99},
-	}}
+	_, err = service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
+	if !errors.Is(err, ErrActivePaymentExists) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestConcurrentSucceedAndFailPaymentOnlyOneStatusUpdateSucceeds(t *testing.T) {
+	service, db := newConcurrentTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+	}}, nil)
+	payment := createPaymentForOrder(t, service, 1, 1)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var successErr, failErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		_, successErr = service.SucceedPayment(context.Background(), 1, payment.ID)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		_, failErr = service.FailPayment(1, payment.ID)
+	}()
+	close(start)
+	wg.Wait()
+
+	successfulUpdates := 0
+	for _, err := range []error{successErr, failErr} {
+		if err == nil {
+			successfulUpdates++
+			continue
+		}
+		if !errors.Is(err, ErrPaymentNotActionable) {
+			t.Fatalf("unexpected concurrent status update error: %v", err)
+		}
+	}
+	if got, want := successfulUpdates, 1; got != want {
+		t.Fatalf("unexpected successful status update count: got %d want %d", got, want)
+	}
+
+	var latest Payment
+	if err := db.First(&latest, payment.ID).Error; err != nil {
+		t.Fatalf("failed to reload payment: %v", err)
+	}
+	switch latest.Status {
+	case PaymentStatusSucceeded:
+		if latest.ActiveOrderID == nil || *latest.ActiveOrderID != 1 {
+			t.Fatalf("unexpected active order id after success: got %v want 1", latest.ActiveOrderID)
+		}
+		var eventCount int64
+		if err := db.Model(&outbox.Event{}).
+			Where("aggregate_type = ? AND aggregate_id = ? AND event_type = ?", "payment", fmt.Sprintf("%d", payment.ID), events.PaymentSucceededType).
+			Count(&eventCount).Error; err != nil {
+			t.Fatalf("failed to count payment succeeded events: %v", err)
+		}
+		if got, want := eventCount, int64(1); got != want {
+			t.Fatalf("unexpected payment succeeded event count: got %d want %d", got, want)
+		}
+	case PaymentStatusFailed:
+		if latest.ActiveOrderID != nil {
+			t.Fatalf("expected failed payment to release active order id, got %v", *latest.ActiveOrderID)
+		}
+		var eventCount int64
+		if err := db.Model(&outbox.Event{}).
+			Where("aggregate_type = ? AND aggregate_id = ? AND event_type = ?", "payment", fmt.Sprintf("%d", payment.ID), events.PaymentSucceededType).
+			Count(&eventCount).Error; err != nil {
+			t.Fatalf("failed to count payment succeeded events: %v", err)
+		}
+		if got, want := eventCount, int64(0); got != want {
+			t.Fatalf("unexpected payment succeeded event count after failure: got %d want %d", got, want)
+		}
+	default:
+		t.Fatalf("unexpected final payment status: %q", latest.Status)
+	}
+}
+
+func TestSucceedPaymentRejectsCancelledOrder(t *testing.T) {
+	service, db := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+	}}, nil)
+
+	payment, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
+	if err != nil {
+		t.Fatalf("CreatePayment returned error: %v", err)
+	}
+
+	if err := db.Model(&orderdomain.Order{}).
+		Where("id = ?", 1).
+		Update("status", orderdomain.OrderStatusCancelled).Error; err != nil {
+		t.Fatalf("failed to cancel test order: %v", err)
+	}
 	_, err = service.SucceedPayment(context.Background(), 1, payment.ID)
 	if !errors.Is(err, ErrOrderNotPayable) {
 		t.Fatalf("unexpected error: %v", err)
