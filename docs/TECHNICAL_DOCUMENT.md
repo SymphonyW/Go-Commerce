@@ -9,13 +9,14 @@ Go Commerce 是一个已经跑通交易主链路的微服务演示项目。它�
 - RabbitMQ 领域事件
 - 订单超时关闭
 - Outbox 可靠消息
+- Inbox 消费去重
 - 单元、集成、E2E 测试
 
 但也要先说明当前边界：
 
 - 多个服务进程已经拆分，当前仍共享同一个 `ecommerce` MySQL 数据库。
 - 观测能力目前主要真正落在 API Gateway；其他服务已有健康检查，尚未全部接入统一日志、指标、追踪。
-- 下单、人工取消订单与支付成功具备真正落库的幂等记录，可按同 key 同请求稳定回放首次响应。
+- 下单、人工取消订单与支付成功具备真正落库的幂等记录，可按同 key 同请求稳定回放首次响应；消费者侧使用 Inbox 表按 `consumer_name + event_id` 去重。
 
 ## 2. 技术栈
 
@@ -39,7 +40,7 @@ Go Commerce 是一个已经跑通交易主链路的微服务演示项目。它�
 | `order-service` | 下单、订单状态机、取消、发货、完成、支付成功消费、超时关闭 | MySQL、RabbitMQ |
 | `payment-service` | 模拟支付单创建、成功、失败 | MySQL、`order-service` |
 | `merchant-service` | 商家资料、商品维护、资源归属校验 | MySQL |
-| `notification-service` | 订阅 `order.created` 并演示下游异步通知 | RabbitMQ |
+| `notification-service` | 订阅 `order.created` 并演示下游异步通知 | MySQL、RabbitMQ |
 | `outbox-worker` | 扫描本地消息表并可靠投递 RabbitMQ | MySQL、RabbitMQ |
 
 ## 4. 服务间调用关系
@@ -70,11 +71,12 @@ flowchart LR
     WORKER --> MQ["RabbitMQ topic exchange"]
     MQ --> ORDER
     MQ --> NOTIFY["notification-service"]
+    NOTIFY --> DB
 ```
 
 ### 当前数据拓扑
 
-- `auth / product / order / payment / merchant / outbox` 共用一个 MySQL 实例与同一个数据库。
+- `auth / product / order / payment / merchant / notification / outbox / inbox` 共用一个 MySQL 实例与同一个数据库。
 - `cart-service` 使用 Redis Hash 保存购物车。
 - RabbitMQ 既承担领域事件，也承担订单超时延迟链路。
 
@@ -133,6 +135,7 @@ flowchart TB
     OutboxWorker --> RabbitMQ
     RabbitMQ --> Notification
     RabbitMQ --> Order
+    Notification --> MySQL
 ```
 
 ## 6. 下单流程
@@ -195,7 +198,7 @@ sequenceDiagram
     W->>DB: 拉取 outbox
     W->>MQ: 发布 payment.succeeded
     MQ->>O: order.payment.succeeded
-    O->>DB: pending -> paid + outbox(order.paid)
+    O->>DB: consumed_events + pending -> paid + outbox(order.paid)
 ```
 
 ### 关键点
@@ -206,6 +209,7 @@ sequenceDiagram
 - 创建支付时锁定订单行、校验订单仍为 `pending`，再插入带 `active_order_id` 的支付单；唯一索引冲突映射为明确的 `active payment already exists` 业务错误。
 - 支付成功与失败都会先锁定支付单行再做状态迁移，避免并发 success/fail 同时生效；成功保留 `active_order_id`，失败清空它。
 - `payment.succeeded` 由订单服务异步消费，推动订单进入 `paid`。
+- 订单服务消费 `payment.succeeded` 时使用 Inbox 按 `order.payment_succeeded + event_id` 去重；重复消息直接 Ack，不重复写 `order.paid` outbox。
 - `POST /api/payments/:id/success` 使用持久化幂等记录保存首次 `PaymentActionResponse`；重复请求不再更新支付单，也不会重复写 `payment.succeeded` outbox。
 
 普通的 `COUNT status IN (created, succeeded)` 只能说明“本次读取时没看到活跃支付单”。两个并发事务可以同时读到 `0`，随后各自插入一条 `created` 支付单；除非用行锁覆盖同一个订单资源，并且由唯一索引把“不超过一个活跃支付单”变成数据库不变量，否则应用层检查无法可靠解决竞态。
@@ -232,7 +236,7 @@ flowchart TD
 
 - 使用 RabbitMQ 原生 `TTL + DLX`，不依赖额外插件。
 - 人工取消与超时取消复用同一事务函数 `cancelOrderWithReason`。
-- 只有首次从 `pending -> cancelled` 才会回补库存，重复消息不会造成二次回补。
+- 超时消费者使用 Inbox 按 `order.timeout + event_id` 去重；只有首次从 `pending -> cancelled` 才会回补库存，重复消息不会造成二次回补。
 - 人工取消还会写入幂等记录；同一用户同一 `Idempotency-Key`、同一订单重复请求时，直接回放首次 `CancelOrderResponse`。
 
 ## 9. 商家权限模型
@@ -356,7 +360,27 @@ WHERE id = ? AND stock >= ?;
 - 事务失败且没有业务副作用落库时，删除 processing 幂等记录，允许客户端重试
 - 已成功支付后使用新的 key 再次调用时，保持明确业务错误：`payment cannot change status`
 
-### 12.2 后续可扩展
+### 12.2 消费者 Inbox 去重
+
+消费者侧新增 `consumed_events` 表，核心字段为 `consumer_name`、`event_id`、`event_type`、`consumed_at`，并对 `consumer_name + event_id` 建唯一索引。`internal/inbox.ProcessOnce` 在同一个数据库事务中先写入 Inbox 行占住唯一键，再执行业务 handler；handler 失败或后续 Inbox 写入失败时，事务整体回滚。重复事件会命中唯一索引并返回 `processed=false`，消费者直接 Ack。
+
+当前接入点：
+
+| 消费者 | consumer_name | 去重效果 |
+| --- | --- | --- |
+| `PaymentSucceededConsumer` | `order.payment_succeeded` | 同一 `payment.succeeded` 只推动一次订单 `paid` 迁移和 `order.paid` outbox 写入。 |
+| `OrderTimeoutConsumer` | `order.timeout` | 同一超时事件只执行一次取消、库存回补和取消事件写入。 |
+| `notification-service` | `notification.order_created` | 同一 `order.created` 只执行一次通知侧处理日志 / 外部副作用入口。 |
+
+Ack / Nack 策略保持明确：
+
+- 重复事件：Ack。
+- JSON 无法解析或 `event_id` 为空：Nack 且不重新入队，作为坏消息处理。
+- 临时数据库错误：Nack 并重新入队，避免直接丢失。
+
+RabbitMQ 与 Outbox 仍是 **at-least-once delivery**；Inbox 与幂等业务逻辑实现的是 **effectively-once side effects**，不宣称 exactly-once delivery。
+
+### 12.3 后续可扩展
 
 支付失败、发货、确认收货等写接口仍主要依赖状态机保证重复副作用可控；如果后续需要“同 key 回放同一响应”，可继续复用 `internal/idempotency/`。
 
@@ -391,7 +415,7 @@ flowchart LR
 
 ### 13.3 投递语义
 
-Outbox worker 通过 claim/lease 避免同一事件被多个正常 worker 同时处理，但整体仍是 **at-least-once delivery**：如果 RabbitMQ 发布成功后进程在标记 `published` 前崩溃，lease 过期后事件会被重新发布。下游消费者仍必须按 `event_id` 或业务幂等键处理重复消息。
+Outbox worker 通过 claim/lease 避免同一事件被多个正常 worker 同时处理，但整体仍是 **at-least-once delivery**：如果 RabbitMQ 发布成功后进程在标记 `published` 前崩溃，lease 过期后事件会被重新发布。下游消费者通过 Inbox 按 `consumer_name + event_id` 去重，并结合状态机 / 业务唯一约束，把重复投递收敛为 effectively-once side effects；这不是 exactly-once delivery。
 
 ## 14. 可观测性设计
 
@@ -449,6 +473,7 @@ flowchart TB
     MERCHANT --> MYSQL
     PAYMENT --> MYSQL
     OUTBOX --> MYSQL
+    NOTIFY --> MYSQL
     CART --> REDIS
 ```
 
@@ -473,6 +498,7 @@ flowchart TB
 | 支付成功消费 | `internal/order/payment_consumer.go` |
 | 库存扣减 | `internal/product/stock.go` |
 | 幂等记录 | `internal/idempotency/` |
+| Inbox | `internal/inbox/` |
 | Outbox | `internal/outbox/` |
 | 商家权限 | `internal/merchant/service.go` |
 | 网关路由 | `cmd/api-gateway/main.go` |

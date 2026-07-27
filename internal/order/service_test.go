@@ -16,6 +16,7 @@ import (
 	pb "go-commerce/api/order"
 	"go-commerce/internal/auth"
 	"go-commerce/internal/idempotency"
+	"go-commerce/internal/inbox"
 	"go-commerce/internal/merchant"
 	"go-commerce/internal/outbox"
 	"go-commerce/internal/product"
@@ -42,7 +43,7 @@ func newTestService(t *testing.T) (*Service, *gorm.DB) {
 		t.Fatalf("failed to open test database: %v", err)
 	}
 
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}, &inbox.ConsumedEvent{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
 
@@ -97,7 +98,7 @@ func newTestServiceWithPublisher(t *testing.T, publisher mq.Publisher) (*Service
 		t.Fatalf("failed to open test database: %v", err)
 	}
 
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}, &inbox.ConsumedEvent{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
 
@@ -116,7 +117,7 @@ func newTestServiceWithTimeout(t *testing.T, publisher mq.Publisher, scheduler T
 		t.Fatalf("failed to open test database: %v", err)
 	}
 
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}, &inbox.ConsumedEvent{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
 
@@ -131,7 +132,7 @@ func newConcurrentTestService(t *testing.T) (*Service, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("failed to open concurrent test database: %v", err)
 	}
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
+	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}, &inbox.ConsumedEvent{}); err != nil {
 		t.Fatalf("failed to migrate concurrent test database: %v", err)
 	}
 

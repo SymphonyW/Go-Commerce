@@ -14,6 +14,7 @@ import (
 	pbOrder "go-commerce/api/order"
 	pbPayment "go-commerce/api/payment"
 	"go-commerce/internal/idempotency"
+	"go-commerce/internal/inbox"
 	orderdomain "go-commerce/internal/order"
 	"go-commerce/internal/outbox"
 	"go-commerce/internal/payment"
@@ -94,7 +95,7 @@ func (a *integrationAcknowledger) Reject(uint64, bool) error {
 func TestMySQLPaymentSuccessIdempotencyReplaysWithoutDuplicateSideEffects(t *testing.T) {
 	ctx := context.Background()
 	db := openIntegrationDB(t)
-	if err := db.AutoMigrate(&product.Product{}, &orderdomain.Order{}, &orderdomain.OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
+	if err := db.AutoMigrate(&product.Product{}, &orderdomain.Order{}, &orderdomain.OrderItem{}, &idempotency.Record{}, &outbox.Event{}, &inbox.ConsumedEvent{}); err != nil {
 		t.Fatalf("failed to migrate integration schema: %v", err)
 	}
 	if err := payment.Migrate(db); err != nil {

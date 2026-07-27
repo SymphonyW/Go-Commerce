@@ -239,10 +239,13 @@ services:
     ports:
       - "8087:8087"
     depends_on:
+      mysql:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     environment:
       NOTIFICATION_HEALTH_ADDR: ":8087"
+      DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
       EVENT_EXCHANGE: "ecommerce.events"
     healthcheck:

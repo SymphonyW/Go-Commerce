@@ -666,53 +666,60 @@ const (
 // cancelOrderWithReason 是人工取消与超时取消共用的核心路径。
 // 只有首次把 pending 推进到 cancelled 时才会回补库存，因此天然支持重复消息幂等。
 func cancelOrderWithReason(db *gorm.DB, orderID, userID int64, reason string, afterChange func(tx *gorm.DB, order *Order) error) (*Order, bool, error) {
-	var order Order
+	var order *Order
 	changed := false
 
 	err := db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id = ? AND user_id = ?", orderID, userID).
-			First(&order).Error; err != nil {
-			return err
-		}
-
-		if order.Status == OrderStatusCancelled {
-			return nil
-		}
-		if err := ValidateTransition(order.Status, OrderStatusCancelled); err != nil {
-			return err
-		}
-
-		var orderItems []OrderItem
-		if err := tx.Where("order_id = ?", order.ID).Find(&orderItems).Error; err != nil {
-			return err
-		}
-
-		for _, item := range orderItems {
-			if err := product.RestoreStock(tx, item.ProductID, item.Quantity); err != nil {
-				return err
-			}
-		}
-
-		if err := TransitionTo(&order, OrderStatusCancelled); err != nil {
-			return err
-		}
-		order.CancelReason = reason
-		if err := tx.Save(&order).Error; err != nil {
-			return err
-		}
-		if afterChange != nil {
-			if err := afterChange(tx, &order); err != nil {
-				return err
-			}
-		}
-		changed = true
-		return nil
+		updated, didChange, err := cancelOrderWithReasonInTx(tx, orderID, userID, reason, afterChange)
+		order = updated
+		changed = didChange
+		return err
 	})
 	if err != nil {
 		return nil, false, err
 	}
-	return &order, changed, nil
+	return order, changed, nil
+}
+
+func cancelOrderWithReasonInTx(tx *gorm.DB, orderID, userID int64, reason string, afterChange func(tx *gorm.DB, order *Order) error) (*Order, bool, error) {
+	var order Order
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id = ? AND user_id = ?", orderID, userID).
+		First(&order).Error; err != nil {
+		return nil, false, err
+	}
+
+	if order.Status == OrderStatusCancelled {
+		return &order, false, nil
+	}
+	if err := ValidateTransition(order.Status, OrderStatusCancelled); err != nil {
+		return nil, false, err
+	}
+
+	var orderItems []OrderItem
+	if err := tx.Where("order_id = ?", order.ID).Find(&orderItems).Error; err != nil {
+		return nil, false, err
+	}
+
+	for _, item := range orderItems {
+		if err := product.RestoreStock(tx, item.ProductID, item.Quantity); err != nil {
+			return nil, false, err
+		}
+	}
+
+	if err := TransitionTo(&order, OrderStatusCancelled); err != nil {
+		return nil, false, err
+	}
+	order.CancelReason = reason
+	if err := tx.Save(&order).Error; err != nil {
+		return nil, false, err
+	}
+	if afterChange != nil {
+		if err := afterChange(tx, &order); err != nil {
+			return nil, false, err
+		}
+	}
+	return &order, true, nil
 }
 
 // ShipOrder 允许具备权限的商家或管理员把已支付订单推进到已发货。

@@ -6,8 +6,10 @@ import (
 	"time"
 
 	"github.com/streadway/amqp"
+	"gorm.io/gorm"
 
 	pb "go-commerce/api/order"
+	"go-commerce/internal/inbox"
 	"go-commerce/internal/outbox"
 	"go-commerce/internal/product"
 	"go-commerce/pkg/events"
@@ -144,11 +146,18 @@ func TestOrderTimeoutConsumerIsIdempotentForRepeatedMessages(t *testing.T) {
 	publisher.events = nil
 
 	consumer := NewOrderTimeoutConsumer(db, publisher, nil)
-	if err := consumer.HandleDelivery(timeoutDelivery(t, &fakeAcknowledger{}, resp.Order.Id, 1)); err != nil {
+	if err := consumer.HandleDelivery(timeoutDeliveryWithEventID(t, &fakeAcknowledger{}, "evt-timeout-duplicate-1", resp.Order.Id, 1)); err != nil {
 		t.Fatalf("first HandleDelivery returned error: %v", err)
 	}
-	if err := consumer.HandleDelivery(timeoutDelivery(t, &fakeAcknowledger{}, resp.Order.Id, 1)); err != nil {
+	secondAck := &fakeAcknowledger{}
+	if err := consumer.HandleDelivery(timeoutDeliveryWithEventID(t, secondAck, "evt-timeout-duplicate-1", resp.Order.Id, 1)); err != nil {
 		t.Fatalf("second HandleDelivery returned error: %v", err)
+	}
+	if !secondAck.acked {
+		t.Fatal("expected duplicate timeout event to be acked")
+	}
+	if secondAck.nacked {
+		t.Fatal("did not expect duplicate timeout event to be nacked")
 	}
 
 	var latestProduct product.Product
@@ -164,6 +173,75 @@ func TestOrderTimeoutConsumerIsIdempotentForRepeatedMessages(t *testing.T) {
 	}
 	if got, want := len(saved), 2; got != want {
 		t.Fatalf("unexpected outbox event count after duplicate timeout: got %d want %d", got, want)
+	}
+	assertConsumedTimeoutEventCount(t, db, "evt-timeout-duplicate-1", 1)
+}
+
+func TestOrderTimeoutConsumerNacksMalformedMessageWithoutRequeue(t *testing.T) {
+	consumer := NewOrderTimeoutConsumer(nil, nil, nil)
+	ack := &fakeAcknowledger{}
+
+	err := consumer.HandleDelivery(amqp.Delivery{Acknowledger: ack, DeliveryTag: 1, Body: []byte("{bad json")})
+	if err == nil {
+		t.Fatal("expected malformed message error")
+	}
+	if !ack.nacked {
+		t.Fatal("expected malformed message to be nacked")
+	}
+	if ack.requeue {
+		t.Fatal("expected malformed message not to be requeued")
+	}
+}
+
+func TestOrderTimeoutConsumerNacksMissingEventIDWithoutRequeue(t *testing.T) {
+	consumer := NewOrderTimeoutConsumer(nil, nil, nil)
+	ack := &fakeAcknowledger{}
+	body, err := json.Marshal(events.OrderTimeoutCheckEvent{
+		BaseEvent: events.BaseEvent{EventType: events.OrderTimeoutCheckType},
+		OrderID:   1,
+		UserID:    1,
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal event: %v", err)
+	}
+
+	err = consumer.HandleDelivery(amqp.Delivery{Acknowledger: ack, DeliveryTag: 1, Body: body})
+	if err == nil {
+		t.Fatal("expected missing event id error")
+	}
+	if !ack.nacked {
+		t.Fatal("expected missing event id to be nacked")
+	}
+	if ack.requeue {
+		t.Fatal("expected missing event id not to be requeued")
+	}
+}
+
+func TestOrderTimeoutConsumerNacksTemporaryDatabaseErrorWithRequeue(t *testing.T) {
+	consumer := NewOrderTimeoutConsumer(nil, nil, nil)
+	ack := &fakeAcknowledger{}
+	body, err := json.Marshal(events.OrderTimeoutCheckEvent{
+		BaseEvent: events.BaseEvent{
+			EventID:    "evt-timeout-db-error-1",
+			EventType:  events.OrderTimeoutCheckType,
+			OccurredAt: time.Now().UTC().Format(time.RFC3339Nano),
+		},
+		OrderID: 1,
+		UserID:  1,
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal event: %v", err)
+	}
+
+	err = consumer.HandleDelivery(amqp.Delivery{Acknowledger: ack, DeliveryTag: 1, Body: body})
+	if err == nil {
+		t.Fatal("expected database error")
+	}
+	if !ack.nacked {
+		t.Fatal("expected database error to be nacked")
+	}
+	if !ack.requeue {
+		t.Fatal("expected temporary database error to be requeued")
 	}
 }
 
@@ -212,9 +290,14 @@ func TestOrderTimeoutConsumerSkipsAlreadyCancelledOrder(t *testing.T) {
 
 func timeoutDelivery(t *testing.T, ack *fakeAcknowledger, orderID, userID int64) amqp.Delivery {
 	t.Helper()
+	return timeoutDeliveryWithEventID(t, ack, events.NewBaseEvent(events.OrderTimeoutCheckType, time.Now()).EventID, orderID, userID)
+}
+
+func timeoutDeliveryWithEventID(t *testing.T, ack *fakeAcknowledger, eventID string, orderID, userID int64) amqp.Delivery {
+	t.Helper()
 
 	body, err := json.Marshal(events.OrderTimeoutCheckEvent{
-		BaseEvent:      events.NewBaseEvent(events.OrderTimeoutCheckType, time.Now()),
+		BaseEvent:      events.BaseEvent{EventID: eventID, EventType: events.OrderTimeoutCheckType, OccurredAt: time.Now().UTC().Format(time.RFC3339Nano)},
 		OrderID:        orderID,
 		UserID:         userID,
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
@@ -229,5 +312,19 @@ func timeoutDelivery(t *testing.T, ack *fakeAcknowledger, orderID, userID int64)
 		Acknowledger: ack,
 		DeliveryTag:  1,
 		Body:         body,
+	}
+}
+
+func assertConsumedTimeoutEventCount(t *testing.T, db *gorm.DB, eventID string, want int64) {
+	t.Helper()
+
+	var count int64
+	if err := db.Model(&inbox.ConsumedEvent{}).
+		Where("consumer_name = ? AND event_id = ?", orderTimeoutConsumerName, eventID).
+		Count(&count).Error; err != nil {
+		t.Fatalf("failed to count consumed timeout events: %v", err)
+	}
+	if got := count; got != want {
+		t.Fatalf("unexpected consumed timeout event count: got %d want %d", got, want)
 	}
 }

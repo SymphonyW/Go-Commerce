@@ -37,7 +37,7 @@ Go-Commerce 以“可运行的电商交易主链路”为核心：对外通过 A
 | --- | --- |
 | 学习 Go 微服务组织方式 | 通过 `cmd/` 多服务入口、`internal/` 领域实现、`api/` gRPC 协议和 `pkg/` 公共能力展示服务拆分方式。 |
 | 理解交易链路状态流转 | 覆盖下单、扣库存、创建支付、支付成功、订单变为 `paid`，并延伸到取消、发货、完成。 |
-| 演示可靠消息与异步事件 | 使用 RabbitMQ topic exchange 与 Outbox Pattern，避免把业务事务和 MQ 发布强行绑在一次同步调用中。 |
+| 演示可靠消息与异步事件 | 使用 RabbitMQ topic exchange、Outbox Pattern 与消费者 Inbox 去重，避免把业务事务和 MQ 发布强行绑在一次同步调用中，并控制重复消费副作用。 |
 | 展示超时补偿机制 | 使用 RabbitMQ 原生 `TTL + DLX` 实现未支付订单超时关闭，并回补库存。 |
 | 简历 / 面试 / 答辩项目 | 亮点集中在状态机、幂等、权限边界、事件驱动、可观测性与测试体系，而不是单纯 CRUD。 |
 
@@ -72,7 +72,7 @@ flowchart LR
 | 防超卖库存扣减 | 使用 `UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?` 做数据库条件更新。 |
 | 订单状态机 | 统一约束 `pending -> paid -> shipped -> completed` 与 `pending -> cancelled`，避免非法跳转。 |
 | RabbitMQ 超时关单 | 创建订单后投递超时检查消息，通过 `TTL + DLX` 触发取消流程并回补库存。 |
-| Outbox Pattern | 业务表与 `outbox_events` 同事务提交，由 `outbox-worker` 扫描、发布、重试和失败落库。 |
+| Outbox / Inbox Pattern | 业务表与 `outbox_events` 同事务提交，由 `outbox-worker` 扫描、发布、重试和失败落库；消费者用 `consumed_events` 按 `consumer_name + event_id` 去重。 |
 | 商家资源归属校验 | API Gateway 做角色拦截，`merchant-service` 再按真实角色和 `owner_user_id` 做细粒度授权。 |
 | 基础可观测性 | API Gateway 提供 `/metrics`、`/healthz`、`/readyz`、请求 ID、Trace ID 与结构化日志。 |
 | 分层测试 | 已有单元测试、真实依赖集成测试，以及覆盖交易主链路的 E2E 测试。 |
@@ -135,7 +135,7 @@ flowchart LR
 | 支付 | 创建模拟支付、查询、标记成功、标记失败 | 支付成功已实现落库幂等记录；支付单用数据库唯一约束保证同一订单最多一个活跃支付。 |
 | 商家后台 | 当前店铺、商品维护、商家订单查看 | 普通商家只能操作自己名下资源，`admin` 可跨店。 |
 | 事件总线 | `order.created`、`payment.succeeded` 等事件 | RabbitMQ topic exchange 承载领域事件。 |
-| 可靠消息 | Outbox 本地消息表、claim、lease、重试、失败状态 | 支持多个 worker 并行领取；投递语义仍是 at-least-once delivery。 |
+| 可靠消息 | Outbox 本地消息表、Inbox 消费记录、claim、lease、重试、失败状态 | 支持多个 worker 并行领取；RabbitMQ / Outbox 仍是 at-least-once delivery，消费者侧用 Inbox + 幂等业务控制重复副作用。 |
 | 观测 | 健康检查、就绪检查、网关指标、请求关联 ID | 完整 OpenTelemetry 追踪尚未接入。 |
 
 ## 目录结构
@@ -277,6 +277,8 @@ Outbox worker 支持多实例并行运行。每个 worker 会在短事务中 cla
 
 Outbox worker 的 `/readyz` 会暴露 `outbox_worker_polling` 依赖状态，`/metrics` 暴露 `go_commerce_outbox_claimed_total`、`go_commerce_outbox_published_total`、`go_commerce_outbox_retry_total`、`go_commerce_outbox_failed_total` 和 `go_commerce_outbox_lease_recovered_total`。
 
+消费者侧使用 Inbox Pattern：`payment.succeeded`、`order.timeout.check` 和 `order.created` 消费者会在同一数据库事务中按 `consumer_name + event_id` 写入 `consumed_events` 并执行业务 handler。重复消息不再执行业务，直接 Ack；JSON 解析失败或空 `event_id` 作为坏消息 Nack 且不重新入队；临时数据库错误 Nack 并允许 RabbitMQ 重试。RabbitMQ 和 Outbox 提供 at-least-once delivery，Inbox + 幂等业务实现的是 effectively-once side effects，不宣称 exactly-once delivery。
+
 ```bash
 docker compose up -d --scale outbox-worker=2 outbox-worker
 ```
@@ -352,7 +354,7 @@ make test-e2e
 
 | 测试层级 | 覆盖内容 |
 | --- | --- |
-| Unit | 业务逻辑、状态机、库存、幂等记录、商家权限、Outbox worker。 |
+| Unit | 业务逻辑、状态机、库存、幂等记录、Inbox 消费去重、商家权限、Outbox worker。 |
 | Integration | MySQL、Redis、RabbitMQ 的真实依赖交互。 |
 | E2E | 经由 API Gateway 回归注册 / 登录、下单、支付成功等主链路。 |
 
@@ -398,7 +400,7 @@ E2E 测试已提供为本地命令，但尚未纳入默认 GitHub Actions 工作
 - 商品、购物车、订单、支付、商家后台主功能。
 - 后端定价、订单快照与防超卖库存扣减。
 - 订单状态机与超时自动关闭。
-- Outbox Pattern 可靠事件投递。
+- Outbox Pattern 可靠事件投递与 Inbox 消费去重。
 - 下单接口、人工取消订单接口与支付成功接口落库幂等记录，并支持同 key 同请求回放首次响应。
 - 支付创建使用 `active_order_id` 唯一索引兜底，避免并发请求为同一订单创建多个活跃支付单。
 - 商家角色与资源归属校验。
@@ -419,7 +421,7 @@ E2E 测试已提供为本地命令，但尚未纳入默认 GitHub Actions 工作
 | 文档 | 用途 |
 | --- | --- |
 | [文档导航](docs/README.md) | 汇总补充文档，适合作为二级入口。 |
-| [技术文档](docs/TECHNICAL_DOCUMENT.md) | 详细说明架构、下单流程、支付流程、超时关单、Outbox、权限模型与当前不足。 |
+| [技术文档](docs/TECHNICAL_DOCUMENT.md) | 详细说明架构、下单流程、支付流程、超时关单、Outbox / Inbox、权限模型与当前不足。 |
 | [API 文档](docs/API_Documentation.md) | 面向阅读的 REST API 说明，包含鉴权、分页、错误码和请求 / 响应示例。 |
 | [面试文档](docs/INTERVIEW.md) | 围绕真实实现整理 30 秒 / 2 分钟项目介绍与常见追问。 |
 | [OpenAPI 3.0](openapi.yaml) | 机器可读的接口契约，可用于导入 API 工具或后续接入 Swagger UI。 |

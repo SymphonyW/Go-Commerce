@@ -5,7 +5,10 @@ import (
 	"time"
 
 	"github.com/streadway/amqp"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 
+	"go-commerce/internal/inbox"
 	"go-commerce/internal/notification"
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/healthcheck"
@@ -18,6 +21,22 @@ const notificationQueueName = "notification.order.created"
 func main() {
 	ctx, stop := serviceutil.SignalContext()
 	defer stop()
+
+	dsn := serviceutil.Env("DB_DSN", "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local")
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	if err != nil {
+		log.Fatalf("mysql_connect_failed error=%v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatalf("mysql_handle_failed error=%v", err)
+	}
+	defer sqlDB.Close()
+	log.Printf("mysql_connected")
+
+	if err := db.AutoMigrate(&inbox.ConsumedEvent{}); err != nil {
+		log.Fatalf("mysql_migrate_failed error=%v", err)
+	}
 
 	exchangeName := serviceutil.Env("EVENT_EXCHANGE", mq.DefaultExchangeName)
 	conn, err := amqp.Dial(serviceutil.Env("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"))
@@ -51,10 +70,13 @@ func main() {
 	healthServer := serviceutil.StartHTTPServer(
 		"notification health server",
 		serviceutil.Env("NOTIFICATION_HEALTH_ADDR", ":8087"),
-		healthcheck.Handler(healthcheck.Dependency{Name: "rabbitmq", Check: healthcheck.AMQP(conn)}),
+		healthcheck.Handler(
+			healthcheck.Dependency{Name: "mysql", Check: healthcheck.SQL(sqlDB)},
+			healthcheck.Dependency{Name: "rabbitmq", Check: healthcheck.AMQP(conn)},
+		),
 	)
 
-	consumer := notification.NewConsumer(log.Default())
+	consumer := notification.NewConsumer(db, log.Default())
 	log.Printf("notification service started exchange=%s queue=%s routing_key=%s", exchangeName, queue.Name, events.OrderCreatedType)
 
 	for {
