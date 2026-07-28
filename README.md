@@ -271,7 +271,7 @@ go run ./cmd/merchant-service
 go run ./cmd/api-gateway
 ```
 
-手动启动时，程序直接读取系统环境变量；仓库没有内置 `.env` 自动加载器。完整参考配置见 [.env.example](.env.example)。使用 Docker Compose 启动时，默认环境变量已在 [docker-compose.yml](docker-compose.yml) 中配置。
+手动启动时，程序直接读取系统环境变量；仓库没有内置 `.env` 自动加载器。完整参考配置见 [.env.example](.env.example)。使用 Docker Compose 启动时，默认环境变量已在 [docker-compose.yml](docker-compose.yml) 中配置。API Gateway 的 CORS 默认只允许 `http://localhost:5173`，可通过 `CORS_ALLOWED_ORIGINS` 配置逗号分隔的允许 Origin。
 
 Outbox worker 支持多实例并行运行。每个 worker 会在短事务中 claim due 事件并写入 `processing / locked_by / locked_at / lease_expires_at`，事务提交后再发布 RabbitMQ；`MarkPublished` 与 `MarkRetry` 只允许当前 lease owner 更新。`OUTBOX_WORKER_ID` 未配置时使用 `hostname + UUID` 自动生成，`OUTBOX_LEASE_DURATION` 控制 worker 崩溃后的可恢复窗口。即使有 claim/lease，整体消息语义仍是 at-least-once delivery，下游消费者仍需保持幂等。
 
@@ -397,6 +397,7 @@ E2E 测试已提供为本地命令，但尚未纳入默认 GitHub Actions 工作
 ### 已实现
 
 - API Gateway + gRPC 多服务通信。
+- API Gateway 已拆分到 `internal/gateway/`，并统一 gRPC -> HTTP 错误码映射与错误响应结构。
 - 商品、购物车、订单、支付、商家后台主功能。
 - 后端定价、订单快照与防超卖库存扣减。
 - 订单状态机与超时自动关闭。
@@ -409,7 +410,6 @@ E2E 测试已提供为本地命令，但尚未纳入默认 GitHub Actions 工作
 ### 计划继续完善
 
 - 为更多写接口补齐真正落库的幂等重放，而不仅是状态天然幂等。
-- 统一 API Gateway 的 gRPC -> HTTP 错误码映射，减少历史接口直接返回 `500` 的情况。
 - 为公开商家列表、用户订单列表暴露真实分页参数。
 - 将前端自动生成并携带 `Idempotency-Key` 的能力扩展到更多写接口。
 - 将结构化日志、指标和 trace 传播铺到全部服务，并接入 Prometheus / Grafana / OpenTelemetry。

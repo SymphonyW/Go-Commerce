@@ -33,7 +33,7 @@ Go Commerce 是一个已经跑通交易主链路的微服务演示项目。它�
 
 | 服务 | 职责 | 主要依赖 |
 | --- | --- | --- |
-| `api-gateway` | 对外 REST、JWT、CORS、角色粗粒度拦截、网关指标 | 各 gRPC 服务 |
+| `api-gateway` | 对外 REST、JWT、CORS、角色粗粒度拦截、统一错误响应、网关指标 | 各 gRPC 服务 |
 | `auth-service` | 注册、登录、用户角色、JWT 生成 | MySQL |
 | `product-service` | 商品详情、列表、搜索、排序 | MySQL |
 | `cart-service` | 购物车读写 | Redis、`product-service` |
@@ -428,6 +428,9 @@ Outbox worker 通过 claim/lease 避免同一事件被多个正常 worker 同时
   - `/metrics`
   - `/healthz`
   - `/readyz`
+- API Gateway 已拆分为 `internal/gateway/server.go`、`router.go`、`clients.go`、`handler/`、`middleware/` 与 `response/`；所有业务 handler 统一使用 `response.WriteGRPCError` 映射 gRPC 错误。
+- gRPC -> HTTP 映射：`InvalidArgument=400`、`Unauthenticated=401`、`PermissionDenied=403`、`NotFound=404`、`AlreadyExists/FailedPrecondition=409`、`ResourceExhausted=429`、`DeadlineExceeded=504`、`Unavailable=503`、`Internal=500`。错误体包含 `code`、`message`、兼容字段 `error` 与 `request_id`。
+- CORS 不再使用 `Allow-Origin=*` 搭配 credentials；默认允许 `http://localhost:5173`，可通过 `CORS_ALLOWED_ORIGINS` 配置逗号分隔 Origin。
 - 事件模型会携带请求关联 ID，便于异步链路回溯。
 - 各服务均暴露独立健康检查端点。
 
@@ -485,7 +488,6 @@ flowchart TB
 | 观测能力未全量落地 | 接入统一日志、gRPC 指标、Prometheus、Grafana、OpenTelemetry |
 | 更多写接口尚未实现完整幂等回放 | 复用幂等表机制按需补齐 |
 | 公开商家列表、用户订单列表未暴露分页 | 补齐网关层查询参数 |
-| 网关错误码映射不完全统一 | 统一使用 gRPC -> HTTP 映射 |
 | 支付仍为 mock | 接入真实支付渠道沙箱或适配层 |
 
 ## 17. 参考代码位置
@@ -501,4 +503,5 @@ flowchart TB
 | Inbox | `internal/inbox/` |
 | Outbox | `internal/outbox/` |
 | 商家权限 | `internal/merchant/service.go` |
-| 网关路由 | `cmd/api-gateway/main.go` |
+| 网关路由与错误映射 | `internal/gateway/` |
+| 网关进程入口 | `cmd/api-gateway/main.go` |

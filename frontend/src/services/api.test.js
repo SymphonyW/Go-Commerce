@@ -72,6 +72,22 @@ test('cancelOrder sends an idempotency key header', async () => {
 
 test('getAPIErrorMessage prefers backend error payloads', () => {
   assert.equal(
+    getAPIErrorMessage(
+      {
+        response: {
+          data: {
+            code: 'ORDER_NOT_PAYABLE',
+            message: 'order is not payable',
+            error: 'legacy error',
+            request_id: 'req-1',
+          },
+        },
+      },
+      'fallback',
+    ),
+    'order is not payable',
+  );
+  assert.equal(
     getAPIErrorMessage({ response: { data: { error: 'insufficient stock' } } }, 'fallback'),
     'insufficient stock',
   );

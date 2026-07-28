@@ -285,6 +285,7 @@ services:
       MERCHANT_SERVICE_ADDR: "merchant-service:50055"
       PAYMENT_SERVICE_ADDR: "payment-service:50056"
       GATEWAY_GRPC_TIMEOUT: "3s"
+      CORS_ALLOWED_ORIGINS: "http://localhost:5173"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
       interval: 10s
