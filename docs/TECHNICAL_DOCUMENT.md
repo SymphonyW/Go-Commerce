@@ -9,13 +9,14 @@ Go Commerce 是一个已经跑通交易主链路的微服务演示项目。它�
 - RabbitMQ 领域事件
 - 订单超时关闭
 - Outbox 可靠消息
+- Inbox 消费去重
 - 单元、集成、E2E 测试
 
 但也要先说明当前边界：
 
 - 多个服务进程已经拆分，当前仍共享同一个 `ecommerce` MySQL 数据库。
 - 观测能力目前主要真正落在 API Gateway；其他服务已有健康检查，尚未全部接入统一日志、指标、追踪。
-- 下单具备真正落库的幂等记录；取消订单与支付成功目前更多依赖状态机语义幂等，尚未完成同级别的持久化幂等重放。
+- 下单、人工取消订单与支付成功具备真正落库的幂等记录，可按同 key 同请求稳定回放首次响应；消费者侧使用 Inbox 表按 `consumer_name + event_id` 去重。
 
 ## 2. 技术栈
 
@@ -32,14 +33,14 @@ Go Commerce 是一个已经跑通交易主链路的微服务演示项目。它�
 
 | 服务 | 职责 | 主要依赖 |
 | --- | --- | --- |
-| `api-gateway` | 对外 REST、JWT、CORS、角色粗粒度拦截、网关指标 | 各 gRPC 服务 |
+| `api-gateway` | 对外 REST、JWT、CORS、角色粗粒度拦截、统一错误响应、网关指标 | 各 gRPC 服务 |
 | `auth-service` | 注册、登录、用户角色、JWT 生成 | MySQL |
 | `product-service` | 商品详情、列表、搜索、排序 | MySQL |
 | `cart-service` | 购物车读写 | Redis、`product-service` |
 | `order-service` | 下单、订单状态机、取消、发货、完成、支付成功消费、超时关闭 | MySQL、RabbitMQ |
 | `payment-service` | 模拟支付单创建、成功、失败 | MySQL、`order-service` |
 | `merchant-service` | 商家资料、商品维护、资源归属校验 | MySQL |
-| `notification-service` | 订阅 `order.created` 并演示下游异步通知 | RabbitMQ |
+| `notification-service` | 订阅 `order.created` 并演示下游异步通知 | MySQL、RabbitMQ |
 | `outbox-worker` | 扫描本地消息表并可靠投递 RabbitMQ | MySQL、RabbitMQ |
 
 ## 4. 服务间调用关系
@@ -70,11 +71,12 @@ flowchart LR
     WORKER --> MQ["RabbitMQ topic exchange"]
     MQ --> ORDER
     MQ --> NOTIFY["notification-service"]
+    NOTIFY --> DB
 ```
 
 ### 当前数据拓扑
 
-- `auth / product / order / payment / merchant / outbox` 共用一个 MySQL 实例与同一个数据库。
+- `auth / product / order / payment / merchant / notification / outbox / inbox` 共用一个 MySQL 实例与同一个数据库。
 - `cart-service` 使用 Redis Hash 保存购物车。
 - RabbitMQ 既承担领域事件，也承担订单超时延迟链路。
 
@@ -133,6 +135,7 @@ flowchart TB
     OutboxWorker --> RabbitMQ
     RabbitMQ --> Notification
     RabbitMQ --> Order
+    Notification --> MySQL
 ```
 
 ## 6. 下单流程
@@ -181,26 +184,35 @@ sequenceDiagram
 
     C->>G: POST /api/payments
     G->>P: CreatePayment(order_id, user_id)
-    P->>O: GetOrder(order_id, user_id)
-    O-->>P: pending order
-    P->>DB: 创建 payment(created)
+    P->>DB: TX + SELECT order FOR UPDATE
+    P->>DB: 校验订单 pending
+    P->>DB: 创建 payment(created, active_order_id=order_id)
     P-->>G: payment
 
     C->>G: POST /api/payments/:id/success
-    G->>P: MarkPaymentSucceeded
-    P->>O: 再次校验订单仍为 pending
+    G->>P: MarkPaymentSucceeded + Idempotency-Key
+    P->>DB: 写入幂等记录 processing
+    P->>DB: TX + SELECT payment/order FOR UPDATE
     P->>DB: payment -> succeeded + outbox(payment.succeeded)
+    P->>DB: 幂等记录写入成功响应
     W->>DB: 拉取 outbox
     W->>MQ: 发布 payment.succeeded
     MQ->>O: order.payment.succeeded
-    O->>DB: pending -> paid + outbox(order.paid)
+    O->>DB: consumed_events + pending -> paid + outbox(order.paid)
 ```
 
 ### 关键点
 
 - 支付金额直接取自订单总金额，不接收客户端金额。
-- 同一订单不能同时存在多条活跃支付单。
+- 同一订单不能同时存在多条活跃支付单：`created` 与 `succeeded` 的 `active_order_id=order_id`，`failed` 的 `active_order_id=NULL`。
+- `payments.active_order_id` 上有唯一索引，数据库负责最终兜底；MySQL 与 SQLite 都允许多个 `NULL`，因此失败支付不会阻塞后续重试。
+- 创建支付时锁定订单行、校验订单仍为 `pending`，再插入带 `active_order_id` 的支付单；唯一索引冲突映射为明确的 `active payment already exists` 业务错误。
+- 支付成功与失败都会先锁定支付单行再做状态迁移，避免并发 success/fail 同时生效；成功保留 `active_order_id`，失败清空它。
 - `payment.succeeded` 由订单服务异步消费，推动订单进入 `paid`。
+- 订单服务消费 `payment.succeeded` 时使用 Inbox 按 `order.payment_succeeded + event_id` 去重；重复消息直接 Ack，不重复写 `order.paid` outbox。
+- `POST /api/payments/:id/success` 使用持久化幂等记录保存首次 `PaymentActionResponse`；重复请求不再更新支付单，也不会重复写 `payment.succeeded` outbox。
+
+普通的 `COUNT status IN (created, succeeded)` 只能说明“本次读取时没看到活跃支付单”。两个并发事务可以同时读到 `0`，随后各自插入一条 `created` 支付单；除非用行锁覆盖同一个订单资源，并且由唯一索引把“不超过一个活跃支付单”变成数据库不变量，否则应用层检查无法可靠解决竞态。
 
 ## 8. 订单超时关闭流程
 
@@ -224,7 +236,8 @@ flowchart TD
 
 - 使用 RabbitMQ 原生 `TTL + DLX`，不依赖额外插件。
 - 人工取消与超时取消复用同一事务函数 `cancelOrderWithReason`。
-- 只有首次从 `pending -> cancelled` 才会回补库存，重复消息不会造成二次回补。
+- 超时消费者使用 Inbox 按 `order.timeout + event_id` 去重；只有首次从 `pending -> cancelled` 才会回补库存，重复消息不会造成二次回补。
+- 人工取消还会写入幂等记录；同一用户同一 `Idempotency-Key`、同一订单重复请求时，直接回放首次 `CancelOrderResponse`。
 
 ## 9. 商家权限模型
 
@@ -326,17 +339,50 @@ WHERE id = ? AND stock >= ?;
 - 同 key、同内容：回放首次成功响应
 - 同 key、不同内容：返回冲突
 
-### 12.2 当前仅具备“语义幂等”的接口
+`PUT /api/orders/:id/cancel`
 
-- `PUT /api/orders/:id/cancel`
-- `POST /api/payments/:id/success`
+- 必须携带 `Idempotency-Key`
+- 指纹包含 `user_id`、`order_id` 与固定操作类型 `cancel_order`
+- 同 key、同用户、同订单：回放首次完整取消响应，包括 `success` 与 `message`
+- 同 key、同用户、不同订单：返回冲突
+- 同 key、不同用户：按不同用户各自处理，不互相冲突
+- 取消订单、库存回补、`order.cancelled` outbox 写入仍处于同一个数据库事务
+- 事务失败且没有业务副作用落库时，删除 processing 幂等记录，允许客户端重试
 
-网关当前要求携带 `Idempotency-Key`，但业务层尚未像下单那样把键真正写入幂等表：
+`POST /api/payments/:id/success`
 
-- 取消订单依赖“只有 `pending` 才能取消”的状态机逻辑，重复取消不会再次回补库存。
-- 支付成功依赖支付状态只能从 `created` 继续推进。
+- 必须携带 `Idempotency-Key`
+- 指纹包含 `user_id`、`payment_id` 与固定操作类型 `payment_success`
+- 同 key、同用户、同支付单：回放首次完整 `PaymentActionResponse`
+- 同 key、同用户、不同支付单：返回冲突
+- 正在处理中的相同 key：返回冲突
+- 支付状态更新与 `payment.succeeded` outbox 写入仍处于同一个数据库事务
+- 事务失败且没有业务副作用落库时，删除 processing 幂等记录，允许客户端重试
+- 已成功支付后使用新的 key 再次调用时，保持明确业务错误：`payment cannot change status`
 
-这能防止重复副作用，但还不等于“稳定回放同一响应”。这是后续应继续补齐的地方。
+### 12.2 消费者 Inbox 去重
+
+消费者侧新增 `consumed_events` 表，核心字段为 `consumer_name`、`event_id`、`event_type`、`consumed_at`，并对 `consumer_name + event_id` 建唯一索引。`internal/inbox.ProcessOnce` 在同一个数据库事务中先写入 Inbox 行占住唯一键，再执行业务 handler；handler 失败或后续 Inbox 写入失败时，事务整体回滚。重复事件会命中唯一索引并返回 `processed=false`，消费者直接 Ack。
+
+当前接入点：
+
+| 消费者 | consumer_name | 去重效果 |
+| --- | --- | --- |
+| `PaymentSucceededConsumer` | `order.payment_succeeded` | 同一 `payment.succeeded` 只推动一次订单 `paid` 迁移和 `order.paid` outbox 写入。 |
+| `OrderTimeoutConsumer` | `order.timeout` | 同一超时事件只执行一次取消、库存回补和取消事件写入。 |
+| `notification-service` | `notification.order_created` | 同一 `order.created` 只执行一次通知侧处理日志 / 外部副作用入口。 |
+
+Ack / Nack 策略保持明确：
+
+- 重复事件：Ack。
+- JSON 无法解析或 `event_id` 为空：Nack 且不重新入队，作为坏消息处理。
+- 临时数据库错误：Nack 并重新入队，避免直接丢失。
+
+RabbitMQ 与 Outbox 仍是 **at-least-once delivery**；Inbox 与幂等业务逻辑实现的是 **effectively-once side effects**，不宣称 exactly-once delivery。
+
+### 12.3 后续可扩展
+
+支付失败、发货、确认收货等写接口仍主要依赖状态机保证重复副作用可控；如果后续需要“同 key 回放同一响应”，可继续复用 `internal/idempotency/`。
 
 ## 13. Outbox 可靠消息机制
 
@@ -357,15 +403,19 @@ flowchart LR
 ### 13.2 当前实现
 
 - 业务事务里同步写 `outbox_events`
-- `outbox-worker` 扫描 `pending` 事件
-- 发布成功后标记 `published`
-- 发布失败后按 `1s -> 5s -> 30s -> 1m -> 5m` 重试
-- 超过上限标记 `failed`
+- 多个 `outbox-worker` 可以并行运行
+- worker 在数据库短事务中 claim due 事件：`pending AND next_retry_at <= now`，或 `processing AND lease_expires_at <= now`
+- MySQL 8 使用 `SELECT ... FOR UPDATE SKIP LOCKED` 避免并发 worker 领取同一批事件
+- claim 成功后立即写入 `status=processing`、`locked_by`、`locked_at`、`lease_expires_at`
+- 数据库事务提交后再执行 RabbitMQ 发布，避免把网络 IO 放入事务
+- 发布成功后，只有当前 lease owner 可以标记 `published`
+- 发布失败后，只有当前 lease owner 可以标记 retry；未达上限回到 `pending` 并设置 `next_retry_at`，达到上限进入 `failed`
+- 失败重试按 `1s -> 5s -> 30s -> 1m -> 5m` 调度
+- worker 崩溃后，其他 worker 可在 lease 过期后重新领取
 
-### 13.3 当前并发假设
+### 13.3 投递语义
 
-当前实现按**单实例 worker** 设计。
-如果未来需要水平扩容，需要继续引入租约、抢占锁或类似机制，避免多个 worker 重复处理同一事件。
+Outbox worker 通过 claim/lease 避免同一事件被多个正常 worker 同时处理，但整体仍是 **at-least-once delivery**：如果 RabbitMQ 发布成功后进程在标记 `published` 前崩溃，lease 过期后事件会被重新发布。下游消费者通过 Inbox 按 `consumer_name + event_id` 去重，并结合状态机 / 业务唯一约束，把重复投递收敛为 effectively-once side effects；这不是 exactly-once delivery。
 
 ## 14. 可观测性设计
 
@@ -378,12 +428,15 @@ flowchart LR
   - `/metrics`
   - `/healthz`
   - `/readyz`
+- API Gateway 已拆分为 `internal/gateway/server.go`、`router.go`、`clients.go`、`handler/`、`middleware/` 与 `response/`；所有业务 handler 统一使用 `response.WriteGRPCError` 映射 gRPC 错误。
+- gRPC -> HTTP 映射：`InvalidArgument=400`、`Unauthenticated=401`、`PermissionDenied=403`、`NotFound=404`、`AlreadyExists/FailedPrecondition=409`、`ResourceExhausted=429`、`DeadlineExceeded=504`、`Unavailable=503`、`Internal=500`。错误体包含 `code`、`message`、兼容字段 `error` 与 `request_id`。
+- CORS 不再使用 `Allow-Origin=*` 搭配 credentials；默认允许 `http://localhost:5173`，可通过 `CORS_ALLOWED_ORIGINS` 配置逗号分隔 Origin。
 - 事件模型会携带请求关联 ID，便于异步链路回溯。
 - 各服务均暴露独立健康检查端点。
 
 ### 14.2 当前不足
 
-- `UnaryServerInterceptor`、统一指标对象、Outbox gauge 等能力已经在公共包中出现，但尚未全部接入服务入口。
+- API Gateway 已接入统一 HTTP/gRPC 指标，Outbox worker 已接入 claim、publish、retry、failed、lease recovery 指标；完整 OpenTelemetry 追踪尚未接入。
 - 目前更准确的说法是“链路关联 ID”，而不是完整分布式追踪。
 - 仓库未提供 Prometheus / Grafana Compose 组件。
 
@@ -423,6 +476,7 @@ flowchart TB
     MERCHANT --> MYSQL
     PAYMENT --> MYSQL
     OUTBOX --> MYSQL
+    NOTIFY --> MYSQL
     CART --> REDIS
 ```
 
@@ -432,9 +486,8 @@ flowchart TB
 | --- | --- |
 | 服务共享同库 | 逐步明确数据库边界与迁移策略 |
 | 观测能力未全量落地 | 接入统一日志、gRPC 指标、Prometheus、Grafana、OpenTelemetry |
-| 取消 / 支付成功未实现完整幂等回放 | 复用幂等表机制补齐 |
+| 更多写接口尚未实现完整幂等回放 | 复用幂等表机制按需补齐 |
 | 公开商家列表、用户订单列表未暴露分页 | 补齐网关层查询参数 |
-| 网关错误码映射不完全统一 | 统一使用 gRPC -> HTTP 映射 |
 | 支付仍为 mock | 接入真实支付渠道沙箱或适配层 |
 
 ## 17. 参考代码位置
@@ -447,6 +500,8 @@ flowchart TB
 | 支付成功消费 | `internal/order/payment_consumer.go` |
 | 库存扣减 | `internal/product/stock.go` |
 | 幂等记录 | `internal/idempotency/` |
+| Inbox | `internal/inbox/` |
 | Outbox | `internal/outbox/` |
 | 商家权限 | `internal/merchant/service.go` |
-| 网关路由 | `cmd/api-gateway/main.go` |
+| 网关路由与错误映射 | `internal/gateway/` |
+| 网关进程入口 | `cmd/api-gateway/main.go` |

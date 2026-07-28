@@ -16,6 +16,8 @@ import (
 	pbOrder "go-commerce/api/order"
 	pbPayment "go-commerce/api/payment"
 	pbProduct "go-commerce/api/product"
+	gwHandler "go-commerce/internal/gateway/handler"
+	gwMiddleware "go-commerce/internal/gateway/middleware"
 	appjwt "go-commerce/pkg/jwt"
 )
 
@@ -87,11 +89,11 @@ func TestHandleCreateOrderIgnoresForgedClientFields(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	client := &fakeOrderClient{}
-	gateway := &APIGateway{orderClient: client}
+	gateway := gwHandler.New(gwHandler.Clients{Order: client})
 	router := gin.New()
 	router.POST("/api/orders", func(c *gin.Context) {
 		c.Set("user_id", int64(1))
-		gateway.handleCreateOrder(c)
+		gateway.CreateOrder(c)
 	})
 
 	req := httptest.NewRequest(
@@ -125,11 +127,11 @@ func TestHandleCreateOrderIgnoresForgedClientFields(t *testing.T) {
 func TestHandleCreateOrderRequiresIdempotencyKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	gateway := &APIGateway{orderClient: &fakeOrderClient{}}
+	gateway := gwHandler.New(gwHandler.Clients{Order: &fakeOrderClient{}})
 	router := gin.New()
 	router.POST("/api/orders", func(c *gin.Context) {
 		c.Set("user_id", int64(1))
-		gateway.handleCreateOrder(c)
+		gateway.CreateOrder(c)
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/orders", strings.NewReader(`{"items":[{"product_id":1,"quantity":1}]}`))
@@ -146,11 +148,11 @@ func TestHandleCreateOrderForwardsIdempotencyKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	client := &fakeOrderClient{}
-	gateway := &APIGateway{orderClient: client}
+	gateway := gwHandler.New(gwHandler.Clients{Order: client})
 	router := gin.New()
 	router.POST("/api/orders", func(c *gin.Context) {
 		c.Set("user_id", int64(1))
-		gateway.handleCreateOrder(c)
+		gateway.CreateOrder(c)
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/orders", strings.NewReader(`{"items":[{"product_id":1,"quantity":1}]}`))
@@ -170,11 +172,11 @@ func TestHandleCreateOrderForwardsIdempotencyKey(t *testing.T) {
 func TestHandleCreateOrderMapsIdempotencyConflictToHTTP409(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	gateway := &APIGateway{orderClient: &conflictOrderClient{}}
+	gateway := gwHandler.New(gwHandler.Clients{Order: &conflictOrderClient{}})
 	router := gin.New()
 	router.POST("/api/orders", func(c *gin.Context) {
 		c.Set("user_id", int64(1))
-		gateway.handleCreateOrder(c)
+		gateway.CreateOrder(c)
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/orders", strings.NewReader(`{"items":[{"product_id":1,"quantity":1}]}`))
@@ -192,12 +194,12 @@ func TestRequestContextMiddlewareReusesHeaderAndExposesResponseID(t *testing.T) 
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
-	router.Use(requestContextMiddleware())
+	router.Use(gwMiddleware.RequestContext())
 	router.GET("/ping", func(c *gin.Context) {
-		if got, want := c.GetString(requestIDContextKey), "req-from-client"; got != want {
+		if got, want := c.GetString(gwMiddleware.RequestIDContextKey), "req-from-client"; got != want {
 			t.Fatalf("unexpected request id in gin context: got %q want %q", got, want)
 		}
-		if got, want := c.GetString(traceIDContextKey), "req-from-client"; got != want {
+		if got, want := c.GetString(gwMiddleware.TraceIDContextKey), "req-from-client"; got != want {
 			t.Fatalf("unexpected trace id in gin context: got %q want %q", got, want)
 		}
 		c.Status(http.StatusNoContent)
@@ -324,9 +326,9 @@ func (f *fakeProductClient) DeleteProduct(context.Context, *pbProduct.DeleteProd
 func TestMerchantWriteRoutesRequireAuthentication(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	gateway := &APIGateway{merchantClient: &fakeMerchantClient{}}
+	gateway := gwHandler.New(gwHandler.Clients{Merchant: &fakeMerchantClient{}})
 	router := gin.New()
-	router.POST("/api/merchants", gateway.authMiddleware(), gateway.requireRole("merchant", "admin"), gateway.handleCreateMerchant)
+	router.POST("/api/merchants", gwMiddleware.Auth(), gwMiddleware.RequireRole("merchant", "admin"), gateway.CreateMerchant)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/merchants", strings.NewReader(`{"name":"Shop","contact_info":"shop@example.com"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -346,9 +348,9 @@ func TestCustomerCannotAccessMerchantWriteRoutes(t *testing.T) {
 		t.Fatalf("failed to generate token: %v", err)
 	}
 
-	gateway := &APIGateway{merchantClient: &fakeMerchantClient{}}
+	gateway := gwHandler.New(gwHandler.Clients{Merchant: &fakeMerchantClient{}})
 	router := gin.New()
-	router.POST("/api/merchants", gateway.authMiddleware(), gateway.requireRole("merchant", "admin"), gateway.handleCreateMerchant)
+	router.POST("/api/merchants", gwMiddleware.Auth(), gwMiddleware.RequireRole("merchant", "admin"), gateway.CreateMerchant)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/merchants", strings.NewReader(`{"name":"Shop","contact_info":"shop@example.com"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -369,9 +371,9 @@ func TestCustomerCannotAccessMerchantConsoleRoutes(t *testing.T) {
 		t.Fatalf("failed to generate token: %v", err)
 	}
 
-	gateway := &APIGateway{merchantClient: &fakeMerchantClient{}}
+	gateway := gwHandler.New(gwHandler.Clients{Merchant: &fakeMerchantClient{}})
 	router := gin.New()
-	router.GET("/api/merchant/profile", gateway.authMiddleware(), gateway.requireRole("merchant", "admin"), gateway.handleCurrentMerchantProfile)
+	router.GET("/api/merchant/profile", gwMiddleware.Auth(), gwMiddleware.RequireRole("merchant", "admin"), gateway.CurrentMerchantProfile)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/merchant/profile", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -392,9 +394,9 @@ func TestMerchantCreateRouteInjectsCurrentUserAsOwner(t *testing.T) {
 	}
 
 	client := &fakeMerchantClient{}
-	gateway := &APIGateway{merchantClient: client}
+	gateway := gwHandler.New(gwHandler.Clients{Merchant: client})
 	router := gin.New()
-	router.POST("/api/merchants", gateway.authMiddleware(), gateway.requireRole("merchant", "admin"), gateway.handleCreateMerchant)
+	router.POST("/api/merchants", gwMiddleware.Auth(), gwMiddleware.RequireRole("merchant", "admin"), gateway.CreateMerchant)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/merchants", strings.NewReader(`{"name":"Shop","contact_info":"shop@example.com"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -416,9 +418,9 @@ func TestMerchantCreateRouteInjectsCurrentUserAsOwner(t *testing.T) {
 func TestPublicMerchantReadRoutesRemainAccessible(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	gateway := &APIGateway{merchantClient: &fakeMerchantClient{}}
+	gateway := gwHandler.New(gwHandler.Clients{Merchant: &fakeMerchantClient{}})
 	router := gin.New()
-	router.GET("/api/merchants", gateway.handleListMerchants)
+	router.GET("/api/merchants", gateway.ListMerchants)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/merchants", nil)
 	resp := httptest.NewRecorder()
@@ -433,11 +435,11 @@ func TestHandleCreatePaymentInjectsCurrentUser(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	client := &fakePaymentClient{}
-	gateway := &APIGateway{paymentClient: client}
+	gateway := gwHandler.New(gwHandler.Clients{Payment: client})
 	router := gin.New()
 	router.POST("/api/payments", func(c *gin.Context) {
 		c.Set("user_id", int64(7))
-		gateway.handleCreatePayment(c)
+		gateway.CreatePayment(c)
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/payments", strings.NewReader(`{"order_id":1,"payment_method":"mock_balance","user_id":999}`))
@@ -460,9 +462,9 @@ func TestHandleListProductsForwardsQueryParameters(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	client := &fakeProductClient{}
-	gateway := &APIGateway{productClient: client}
+	gateway := gwHandler.New(gwHandler.Clients{Product: client})
 	router := gin.New()
-	router.GET("/api/products", gateway.handleListProducts)
+	router.GET("/api/products", gateway.ListProducts)
 
 	req := httptest.NewRequest(
 		http.MethodGet,
@@ -504,15 +506,15 @@ func TestHandleListProductsForwardsQueryParameters(t *testing.T) {
 	}
 }
 
-func TestHandleListProductsSanitizesInvalidPaginationAndSort(t *testing.T) {
+func TestHandleListProductsCapsLargePageSizeAndSanitizesSort(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	client := &fakeProductClient{}
-	gateway := &APIGateway{productClient: client}
+	gateway := gwHandler.New(gwHandler.Clients{Product: client})
 	router := gin.New()
-	router.GET("/api/products", gateway.handleListProducts)
+	router.GET("/api/products", gateway.ListProducts)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/products?page=0&page_size=999&sort_by=name&order=random", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/products?page=1&page_size=999&sort_by=name&order=random", nil)
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 
@@ -533,26 +535,28 @@ func TestHandleListProductsSanitizesInvalidPaginationAndSort(t *testing.T) {
 	}
 }
 
-func TestHandleListProductsUsesDefaultPageSizeForNonPositiveValues(t *testing.T) {
+func TestHandleListProductsRejectsNonPositivePagination(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	client := &fakeProductClient{}
-	gateway := &APIGateway{productClient: client}
-	router := gin.New()
-	router.GET("/api/products", gateway.handleListProducts)
+	for _, target := range []string{
+		"/api/products?page=-3&page_size=10",
+		"/api/products?page=1&page_size=-5",
+	} {
+		client := &fakeProductClient{}
+		gateway := gwHandler.New(gwHandler.Clients{Product: client})
+		router := gin.New()
+		router.GET("/api/products", gateway.ListProducts)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/products?page=-3&page_size=-5", nil)
-	resp := httptest.NewRecorder()
-	router.ServeHTTP(resp, req)
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
 
-	if got, want := resp.Code, http.StatusOK; got != want {
-		t.Fatalf("unexpected status code: got %d want %d", got, want)
-	}
-	if got, want := client.lastListProductsReq.Page, int32(1); got != want {
-		t.Fatalf("unexpected default page: got %d want %d", got, want)
-	}
-	if got, want := client.lastListProductsReq.PageSize, int32(10); got != want {
-		t.Fatalf("unexpected default page size: got %d want %d", got, want)
+		if got, want := resp.Code, http.StatusBadRequest; got != want {
+			t.Fatalf("%s unexpected status code: got %d want %d", target, got, want)
+		}
+		if client.lastListProductsReq != nil {
+			t.Fatalf("%s expected ListProducts not to be called", target)
+		}
 	}
 }
 
@@ -560,9 +564,9 @@ func TestHandleListProductsRejectsInvalidPriceRange(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	client := &fakeProductClient{}
-	gateway := &APIGateway{productClient: client}
+	gateway := gwHandler.New(gwHandler.Clients{Product: client})
 	router := gin.New()
-	router.GET("/api/products", gateway.handleListProducts)
+	router.GET("/api/products", gateway.ListProducts)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/products?min_price=100&max_price=10", nil)
 	resp := httptest.NewRecorder()
@@ -579,11 +583,11 @@ func TestHandleListProductsRejectsInvalidPriceRange(t *testing.T) {
 func TestHandleMarkPaymentSucceededRequiresIdempotencyKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	gateway := &APIGateway{paymentClient: &fakePaymentClient{}}
+	gateway := gwHandler.New(gwHandler.Clients{Payment: &fakePaymentClient{}})
 	router := gin.New()
 	router.POST("/api/payments/:id/success", func(c *gin.Context) {
 		c.Set("user_id", int64(1))
-		gateway.handleMarkPaymentSucceeded(c)
+		gateway.MarkPaymentSucceeded(c)
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/payments/1/success", nil)
@@ -599,11 +603,11 @@ func TestHandleMarkPaymentSucceededForwardsIdempotencyKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	client := &fakePaymentClient{}
-	gateway := &APIGateway{paymentClient: client}
+	gateway := gwHandler.New(gwHandler.Clients{Payment: client})
 	router := gin.New()
 	router.POST("/api/payments/:id/success", func(c *gin.Context) {
 		c.Set("user_id", int64(1))
-		gateway.handleMarkPaymentSucceeded(c)
+		gateway.MarkPaymentSucceeded(c)
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/payments/1/success", nil)
@@ -622,11 +626,11 @@ func TestHandleMarkPaymentSucceededForwardsIdempotencyKey(t *testing.T) {
 func TestHandleCancelOrderRequiresIdempotencyKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	gateway := &APIGateway{orderClient: &fakeOrderClient{}}
+	gateway := gwHandler.New(gwHandler.Clients{Order: &fakeOrderClient{}})
 	router := gin.New()
 	router.PUT("/api/orders/:id/cancel", func(c *gin.Context) {
 		c.Set("user_id", int64(1))
-		gateway.handleCancelOrder(c)
+		gateway.CancelOrder(c)
 	})
 
 	req := httptest.NewRequest(http.MethodPut, "/api/orders/1/cancel", nil)
@@ -642,11 +646,11 @@ func TestHandleCancelOrderForwardsIdempotencyKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	client := &fakeOrderClient{}
-	gateway := &APIGateway{orderClient: client}
+	gateway := gwHandler.New(gwHandler.Clients{Order: client})
 	router := gin.New()
 	router.PUT("/api/orders/:id/cancel", func(c *gin.Context) {
 		c.Set("user_id", int64(1))
-		gateway.handleCancelOrder(c)
+		gateway.CancelOrder(c)
 	})
 
 	req := httptest.NewRequest(http.MethodPut, "/api/orders/1/cancel", nil)
@@ -665,11 +669,11 @@ func TestHandleCancelOrderForwardsIdempotencyKey(t *testing.T) {
 func TestHandleCancelOrderMapsIdempotencyConflictToHTTP409(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	gateway := &APIGateway{orderClient: &conflictOrderClient{}}
+	gateway := gwHandler.New(gwHandler.Clients{Order: &conflictOrderClient{}})
 	router := gin.New()
 	router.PUT("/api/orders/:id/cancel", func(c *gin.Context) {
 		c.Set("user_id", int64(1))
-		gateway.handleCancelOrder(c)
+		gateway.CancelOrder(c)
 	})
 
 	req := httptest.NewRequest(http.MethodPut, "/api/orders/1/cancel", nil)
@@ -690,9 +694,9 @@ func TestCustomerCannotShipOrder(t *testing.T) {
 		t.Fatalf("failed to generate token: %v", err)
 	}
 
-	gateway := &APIGateway{orderClient: &fakeOrderClient{}}
+	gateway := gwHandler.New(gwHandler.Clients{Order: &fakeOrderClient{}})
 	router := gin.New()
-	router.PUT("/api/orders/:id/ship", gateway.authMiddleware(), gateway.requireRole("merchant", "admin"), gateway.handleShipOrder)
+	router.PUT("/api/orders/:id/ship", gwMiddleware.Auth(), gwMiddleware.RequireRole("merchant", "admin"), gateway.ShipOrder)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/orders/1/ship", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -713,9 +717,9 @@ func TestShipOrderInjectsCurrentActor(t *testing.T) {
 	}
 
 	client := &fakeOrderClient{}
-	gateway := &APIGateway{orderClient: client}
+	gateway := gwHandler.New(gwHandler.Clients{Order: client})
 	router := gin.New()
-	router.PUT("/api/orders/:id/ship", gateway.authMiddleware(), gateway.requireRole("merchant", "admin"), gateway.handleShipOrder)
+	router.PUT("/api/orders/:id/ship", gwMiddleware.Auth(), gwMiddleware.RequireRole("merchant", "admin"), gateway.ShipOrder)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/orders/1/ship", nil)
 	req.Header.Set("Authorization", "Bearer "+token)

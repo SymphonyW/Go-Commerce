@@ -153,9 +153,8 @@ services:
       context: .
       dockerfile: ./cmd/outbox-worker/Dockerfile
       pull: false
-    container_name: ecommerce-outbox-worker
-    ports:
-      - "8088:8088"
+    expose:
+      - "8088"
     depends_on:
       mysql:
         condition: service_healthy
@@ -170,6 +169,7 @@ services:
       OUTBOX_BATCH_SIZE: "100"
       OUTBOX_MAX_RETRY: "5"
       OUTBOX_RETRY_BASE_DELAY: "1s"
+      OUTBOX_LEASE_DURATION: "30s"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8088/readyz"]
       interval: 10s
@@ -239,10 +239,13 @@ services:
     ports:
       - "8087:8087"
     depends_on:
+      mysql:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
     environment:
       NOTIFICATION_HEALTH_ADDR: ":8087"
+      DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
       RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
       EVENT_EXCHANGE: "ecommerce.events"
     healthcheck:
@@ -282,6 +285,7 @@ services:
       MERCHANT_SERVICE_ADDR: "merchant-service:50055"
       PAYMENT_SERVICE_ADDR: "payment-service:50056"
       GATEWAY_GRPC_TIMEOUT: "3s"
+      CORS_ALLOWED_ORIGINS: "http://localhost:5173"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
       interval: 10s

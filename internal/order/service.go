@@ -559,6 +559,32 @@ func (s *Service) GetOrder(ctx context.Context, req *pb.GetOrderRequest) (*pb.Ge
 //	*pb.CancelOrderResponse: 取消订单响应，包含取消结果和消息
 //	error: 错误信息
 func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (*pb.CancelOrderResponse, error) {
+	if req.IdempotencyKey == "" {
+		return nil, status.Error(codes.InvalidArgument, "idempotency key required")
+	}
+
+	requestHash, err := idempotency.HashPayload(newCancelOrderFingerprint(req.UserId, req.Id))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to hash cancel order request: %v", err)
+	}
+
+	idempotencyResult, err := s.idempotency.Begin(ctx, idempotency.BeginRequest{
+		UserID:         uint(req.UserId),
+		RequestPath:    cancelOrderRequestPath,
+		IdempotencyKey: req.IdempotencyKey,
+		RequestHash:    requestHash,
+	})
+	if err != nil {
+		return nil, orderIdempotencyError(err)
+	}
+	if idempotencyResult.Action == idempotency.ActionReplay {
+		var replay pb.CancelOrderResponse
+		if err := idempotency.ReplayInto(idempotencyResult.Record, &replay); err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to replay cancel order response: %v", err)
+		}
+		return &replay, nil
+	}
+
 	_, changed, err := cancelOrderWithReason(s.db, req.Id, req.UserId, OrderCancelReasonUserCancelled, func(tx *gorm.DB, order *Order) error {
 		event := events.OrderCancelledEvent{
 			BaseEvent: events.NewBaseEventWithContext(ctx, events.OrderCancelledType, time.Now()),
@@ -574,38 +600,62 @@ func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (
 		})
 		return err
 	})
+	var response *pb.CancelOrderResponse
 	if err != nil {
 		switch {
 		case errors.Is(err, gorm.ErrRecordNotFound):
-			return &pb.CancelOrderResponse{
+			response = &pb.CancelOrderResponse{
 				Success: false,
 				Message: "订单不存在",
-			}, nil
+			}
 		case errors.Is(err, ErrInvalidOrderTransition):
-			return &pb.CancelOrderResponse{
+			response = &pb.CancelOrderResponse{
 				Success: false,
 				Message: err.Error(),
-			}, nil
+			}
 		default:
+			_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 			return &pb.CancelOrderResponse{
 				Success: false,
 				Message: "取消订单失败",
 			}, nil
 		}
-	}
-	if !changed {
-		return &pb.CancelOrderResponse{
+	} else if !changed {
+		response = &pb.CancelOrderResponse{
 			Success: false,
 			Message: "订单已取消",
-		}, nil
+		}
+	} else {
+		// 返回取消订单响应
+		response = &pb.CancelOrderResponse{
+			Success: true,
+			Message: "订单取消成功",
+		}
 	}
 
-	// 取消成功后再发布领域事件；发布失败不回滚订单，只记录日志等待后续可靠消息机制补强。
-	// 返回取消订单响应
-	return &pb.CancelOrderResponse{
-		Success: true,
-		Message: "订单取消成功",
-	}, nil
+	if err := s.idempotency.Complete(ctx, idempotencyResult.Record.ID, http.StatusOK, response); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to finalize cancel order idempotency record: %v", err)
+	}
+	return response, nil
+}
+
+const (
+	cancelOrderRequestPath = "/api/orders/:id/cancel"
+	cancelOrderOperation   = "cancel_order"
+)
+
+type cancelOrderFingerprint struct {
+	Operation string `json:"operation"`
+	UserID    int64  `json:"user_id"`
+	OrderID   int64  `json:"order_id"`
+}
+
+func newCancelOrderFingerprint(userID, orderID int64) cancelOrderFingerprint {
+	return cancelOrderFingerprint{
+		Operation: cancelOrderOperation,
+		UserID:    userID,
+		OrderID:   orderID,
+	}
 }
 
 const (
@@ -616,20 +666,68 @@ const (
 // cancelOrderWithReason 是人工取消与超时取消共用的核心路径。
 // 只有首次把 pending 推进到 cancelled 时才会回补库存，因此天然支持重复消息幂等。
 func cancelOrderWithReason(db *gorm.DB, orderID, userID int64, reason string, afterChange func(tx *gorm.DB, order *Order) error) (*Order, bool, error) {
-	var order Order
+	var order *Order
 	changed := false
 
 	err := db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id = ? AND user_id = ?", orderID, userID).
-			First(&order).Error; err != nil {
-			return err
-		}
+		updated, didChange, err := cancelOrderWithReasonInTx(tx, orderID, userID, reason, afterChange)
+		order = updated
+		changed = didChange
+		return err
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return order, changed, nil
+}
 
-		if order.Status == OrderStatusCancelled {
-			return nil
+func cancelOrderWithReasonInTx(tx *gorm.DB, orderID, userID int64, reason string, afterChange func(tx *gorm.DB, order *Order) error) (*Order, bool, error) {
+	var order Order
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id = ? AND user_id = ?", orderID, userID).
+		First(&order).Error; err != nil {
+		return nil, false, err
+	}
+
+	if order.Status == OrderStatusCancelled {
+		return &order, false, nil
+	}
+	if err := ValidateTransition(order.Status, OrderStatusCancelled); err != nil {
+		return nil, false, err
+	}
+
+	var orderItems []OrderItem
+	if err := tx.Where("order_id = ?", order.ID).Find(&orderItems).Error; err != nil {
+		return nil, false, err
+	}
+
+	for _, item := range orderItems {
+		if err := product.RestoreStock(tx, item.ProductID, item.Quantity); err != nil {
+			return nil, false, err
 		}
-		if err := ValidateTransition(order.Status, OrderStatusCancelled); err != nil {
+	}
+
+	if err := TransitionTo(&order, OrderStatusCancelled); err != nil {
+		return nil, false, err
+	}
+	order.CancelReason = reason
+	if err := tx.Save(&order).Error; err != nil {
+		return nil, false, err
+	}
+	if afterChange != nil {
+		if err := afterChange(tx, &order); err != nil {
+			return nil, false, err
+		}
+	}
+	return &order, true, nil
+}
+
+// ShipOrder 允许具备权限的商家或管理员把已支付订单推进到已发货。
+func (s *Service) ShipOrder(ctx context.Context, req *pb.ShipOrderRequest) (*pb.ShipOrderResponse, error) {
+	var order Order
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&order, req.Id).Error; err != nil {
 			return err
 		}
 
@@ -637,61 +735,18 @@ func cancelOrderWithReason(db *gorm.DB, orderID, userID int64, reason string, af
 		if err := tx.Where("order_id = ?", order.ID).Find(&orderItems).Error; err != nil {
 			return err
 		}
-
-		for _, item := range orderItems {
-			if err := product.RestoreStock(tx, item.ProductID, item.Quantity); err != nil {
-				return err
-			}
-		}
-
-		if err := TransitionTo(&order, OrderStatusCancelled); err != nil {
+		if err := s.authorizeShipmentWithDB(tx, uint(req.ActorUserId), orderItems); err != nil {
 			return err
 		}
-		order.CancelReason = reason
+
+		fromStatus := order.Status
+		if err := TransitionTo(&order, OrderStatusShipped); err != nil {
+			return err
+		}
 		if err := tx.Save(&order).Error; err != nil {
 			return err
 		}
-		if afterChange != nil {
-			if err := afterChange(tx, &order); err != nil {
-				return err
-			}
-		}
-		changed = true
-		return nil
-	})
-	if err != nil {
-		return nil, false, err
-	}
-	return &order, changed, nil
-}
-
-// ShipOrder 允许具备权限的商家或管理员把已支付订单推进到已发货。
-func (s *Service) ShipOrder(ctx context.Context, req *pb.ShipOrderRequest) (*pb.ShipOrderResponse, error) {
-	var order Order
-	if err := s.db.First(&order, req.Id).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, status.Error(codes.NotFound, "order not found")
-		}
-		return nil, status.Errorf(codes.Internal, "failed to fetch order: %v", err)
-	}
-
-	var orderItems []OrderItem
-	if err := s.db.Where("order_id = ?", order.ID).Find(&orderItems).Error; err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to fetch order items: %v", err)
-	}
-	if err := s.authorizeShipment(uint(req.ActorUserId), orderItems); err != nil {
-		return nil, orderStatusError(err)
-	}
-
-	fromStatus := order.Status
-	if err := TransitionTo(&order, OrderStatusShipped); err != nil {
-		return nil, orderStatusError(err)
-	}
-	statusEvent := newOrderStatusChangedEvent(ctx, events.OrderShippedType, &order, fromStatus, OrderStatusShipped)
-	if err := s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Save(&order).Error; err != nil {
-			return err
-		}
+		statusEvent := newOrderStatusChangedEvent(ctx, events.OrderShippedType, &order, fromStatus, OrderStatusShipped)
 		_, err := s.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
 			AggregateType: "order",
 			AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
@@ -700,6 +755,12 @@ func (s *Service) ShipOrder(ctx context.Context, req *pb.ShipOrderRequest) (*pb.
 		})
 		return err
 	}); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "order not found")
+		}
+		if isOrderStatusError(err) {
+			return nil, orderStatusError(err)
+		}
 		return nil, status.Errorf(codes.Internal, "failed to update order status: %v", err)
 	}
 
@@ -709,22 +770,21 @@ func (s *Service) ShipOrder(ctx context.Context, req *pb.ShipOrderRequest) (*pb.
 // CompleteOrder 仅允许订单所属用户确认收货，把已发货订单推进到已完成。
 func (s *Service) CompleteOrder(ctx context.Context, req *pb.CompleteOrderRequest) (*pb.CompleteOrderResponse, error) {
 	var order Order
-	if err := s.db.Where("id = ? AND user_id = ?", req.Id, req.UserId).First(&order).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, status.Error(codes.NotFound, "order not found")
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND user_id = ?", req.Id, req.UserId).
+			First(&order).Error; err != nil {
+			return err
 		}
-		return nil, status.Errorf(codes.Internal, "failed to fetch order: %v", err)
-	}
 
-	fromStatus := order.Status
-	if err := TransitionTo(&order, OrderStatusCompleted); err != nil {
-		return nil, orderStatusError(err)
-	}
-	statusEvent := newOrderStatusChangedEvent(ctx, events.OrderCompletedType, &order, fromStatus, OrderStatusCompleted)
-	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		fromStatus := order.Status
+		if err := TransitionTo(&order, OrderStatusCompleted); err != nil {
+			return err
+		}
 		if err := tx.Save(&order).Error; err != nil {
 			return err
 		}
+		statusEvent := newOrderStatusChangedEvent(ctx, events.OrderCompletedType, &order, fromStatus, OrderStatusCompleted)
 		_, err := s.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
 			AggregateType: "order",
 			AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
@@ -733,6 +793,12 @@ func (s *Service) CompleteOrder(ctx context.Context, req *pb.CompleteOrderReques
 		})
 		return err
 	}); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, status.Error(codes.NotFound, "order not found")
+		}
+		if isOrderStatusError(err) {
+			return nil, orderStatusError(err)
+		}
 		return nil, status.Errorf(codes.Internal, "failed to update order status: %v", err)
 	}
 
@@ -740,8 +806,12 @@ func (s *Service) CompleteOrder(ctx context.Context, req *pb.CompleteOrderReques
 }
 
 func (s *Service) authorizeShipment(actorUserID uint, orderItems []OrderItem) error {
+	return s.authorizeShipmentWithDB(s.db, actorUserID, orderItems)
+}
+
+func (s *Service) authorizeShipmentWithDB(db *gorm.DB, actorUserID uint, orderItems []OrderItem) error {
 	var actor auth.User
-	if err := s.db.First(&actor, actorUserID).Error; err != nil {
+	if err := db.First(&actor, actorUserID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return merchant.ErrUserNotFound
 		}
@@ -759,7 +829,7 @@ func (s *Service) authorizeShipment(actorUserID uint, orderItems []OrderItem) er
 		}
 
 		var merchants []merchant.Merchant
-		if err := s.db.Where("id IN ?", merchantIDs).Find(&merchants).Error; err != nil {
+		if err := db.Where("id IN ?", merchantIDs).Find(&merchants).Error; err != nil {
 			return err
 		}
 		if len(merchants) != len(merchantIDs) {
@@ -891,4 +961,11 @@ func orderStatusError(err error) error {
 	default:
 		return status.Errorf(codes.Internal, "order operation failed: %v", err)
 	}
+}
+
+func isOrderStatusError(err error) bool {
+	return errors.Is(err, ErrInvalidOrderTransition) ||
+		errors.Is(err, merchant.ErrPermissionDenied) ||
+		errors.Is(err, merchant.ErrUserNotFound) ||
+		errors.Is(err, merchant.ErrMerchantNotFound)
 }

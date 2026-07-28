@@ -501,6 +501,7 @@ paths:
     put:
       tags: [Order]
       summary: Cancel pending order
+      description: Requires Idempotency-Key. Repeating the same key for the same user and order replays the first cancel response; reusing the key with a different order returns 409.
       security:
         - bearerAuth: []
       parameters:
@@ -517,6 +518,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Idempotency key is already processing or was reused with a different cancel request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalServerError'
   /api/orders/{id}/ship:
@@ -617,6 +624,7 @@ paths:
     post:
       tags: [Payment]
       summary: Mark payment succeeded
+      description: Requires Idempotency-Key. Repeating the same key for the same user and payment replays the first success response; reusing the key with a different payment returns 409.
       security:
         - bearerAuth: []
       parameters:
@@ -639,7 +647,11 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          $ref: '#/components/responses/Conflict'
+          description: Payment is not actionable, the idempotency key is already processing, or the key was reused with a different payment success request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalServerError'
   /api/payments/{id}/fail:
@@ -830,6 +842,7 @@ components:
       name: Idempotency-Key
       in: header
       required: true
+      description: Required idempotency key for write operations. Reuse with the same request replays the first response; reuse with a different request returns 409.
       schema:
         type: string
   responses:

@@ -28,11 +28,11 @@ const withIdempotencyKey = (scope) => ({
 
 export const getAPIErrorMessage = (error, fallback) => {
   const data = error?.response?.data;
-  if (typeof data?.error === 'string' && data.error.trim()) {
-    return data.error;
-  }
   if (typeof data?.message === 'string' && data.message.trim()) {
     return data.message;
+  }
+  if (typeof data?.error === 'string' && data.error.trim()) {
+    return data.error;
   }
   if (typeof data === 'string' && data.trim()) {
     return data;

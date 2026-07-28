@@ -3,9 +3,11 @@ package payment
 import (
 	"context"
 	"errors"
+	"net/http"
 	"time"
 
 	pb "go-commerce/api/payment"
+	"go-commerce/internal/idempotency"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -38,11 +40,42 @@ func (s *GRPCService) GetPayment(ctx context.Context, req *pb.GetPaymentRequest)
 }
 
 func (s *GRPCService) MarkPaymentSucceeded(ctx context.Context, req *pb.PaymentActionRequest) (*pb.PaymentActionResponse, error) {
+	if req.IdempotencyKey == "" {
+		return nil, status.Error(codes.InvalidArgument, "idempotency key required")
+	}
+
+	requestHash, err := idempotency.HashPayload(newPaymentSuccessFingerprint(req.UserId, req.Id))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to hash payment success request: %v", err)
+	}
+
+	idempotencyResult, err := s.core.idempotency.Begin(ctx, idempotency.BeginRequest{
+		UserID:         uint(req.UserId),
+		RequestPath:    paymentSuccessRequestPath,
+		IdempotencyKey: req.IdempotencyKey,
+		RequestHash:    requestHash,
+	})
+	if err != nil {
+		return nil, paymentIdempotencyError(err)
+	}
+	if idempotencyResult.Action == idempotency.ActionReplay {
+		var replay pb.PaymentActionResponse
+		if err := idempotency.ReplayInto(idempotencyResult.Record, &replay); err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to replay payment success response: %v", err)
+		}
+		return &replay, nil
+	}
+
 	payment, err := s.core.SucceedPayment(ctx, uint(req.UserId), uint(req.Id))
 	if err != nil {
+		_ = s.core.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 		return nil, paymentStatusError(err)
 	}
-	return &pb.PaymentActionResponse{Payment: convertToPBPayment(payment)}, nil
+	response := &pb.PaymentActionResponse{Payment: convertToPBPayment(payment)}
+	if err := s.core.idempotency.Complete(ctx, idempotencyResult.Record.ID, http.StatusOK, response); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to finalize payment success idempotency record: %v", err)
+	}
+	return response, nil
 }
 
 func (s *GRPCService) MarkPaymentFailed(ctx context.Context, req *pb.PaymentActionRequest) (*pb.PaymentActionResponse, error) {
@@ -67,6 +100,25 @@ func convertToPBPayment(payment *Payment) *pb.Payment {
 	}
 }
 
+const (
+	paymentSuccessRequestPath = "/api/payments/:id/success"
+	paymentSuccessAction      = "payment_success"
+)
+
+type paymentSuccessFingerprint struct {
+	Action    string `json:"action"`
+	UserID    int64  `json:"user_id"`
+	PaymentID int64  `json:"payment_id"`
+}
+
+func newPaymentSuccessFingerprint(userID, paymentID int64) paymentSuccessFingerprint {
+	return paymentSuccessFingerprint{
+		Action:    paymentSuccessAction,
+		UserID:    userID,
+		PaymentID: paymentID,
+	}
+}
+
 func paymentStatusError(err error) error {
 	switch {
 	case errors.Is(err, ErrInvalidPaymentMethod):
@@ -77,5 +129,16 @@ func paymentStatusError(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	default:
 		return status.Errorf(codes.Internal, "payment operation failed: %v", err)
+	}
+}
+
+func paymentIdempotencyError(err error) error {
+	switch {
+	case errors.Is(err, idempotency.ErrConflict):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, idempotency.ErrInProgress):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	default:
+		return status.Errorf(codes.Internal, "idempotency operation failed: %v", err)
 	}
 }

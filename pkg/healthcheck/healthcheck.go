@@ -36,13 +36,16 @@ func Handler(dependencies ...Dependency) http.Handler {
 		defer cancel()
 
 		failures := make(map[string]string)
+		dependencyStatus := make(map[string]string)
 		for _, dependency := range dependencies {
 			if dependency.Check == nil {
 				continue
 			}
 			if err := dependency.Check(ctx); err != nil {
 				failures[dependency.Name] = err.Error()
+				continue
 			}
+			dependencyStatus[dependency.Name] = "ok"
 		}
 		if len(failures) > 0 {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
@@ -51,7 +54,10 @@ func Handler(dependencies ...Dependency) http.Handler {
 			})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":       "ready",
+			"dependencies": dependencyStatus,
+		})
 	})
 	return mux
 }
