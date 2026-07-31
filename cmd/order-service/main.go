@@ -41,6 +41,9 @@ func main() {
 	if err := db.AutoMigrate(&order.Order{}, &order.OrderItem{}, &idempotency.Record{}, &outbox.Event{}, &inbox.ConsumedEvent{}); err != nil {
 		log.Fatalf("mysql_migrate_failed error=%v", err)
 	}
+	if err := order.EnsureOrderIndexes(db); err != nil {
+		log.Fatalf("mysql_order_index_migrate_failed error=%v", err)
+	}
 
 	paymentTimeout, err := order.ParseOrderPaymentTimeoutMinutes(serviceutil.Env("ORDER_PAYMENT_TIMEOUT_MINUTES", "15"))
 	if err != nil {

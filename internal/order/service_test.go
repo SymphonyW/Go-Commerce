@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // newTestService 为订单服务创建独立的内存数据库，避免测试之间互相污染。
@@ -43,11 +44,45 @@ func newTestService(t *testing.T) (*Service, *gorm.DB) {
 		t.Fatalf("failed to open test database: %v", err)
 	}
 
+	migrateTestOrderSchema(t, db)
+
+	return NewService(db, nil), db
+}
+
+type selectCountingLogger struct {
+	selects atomic.Int64
+}
+
+func (l *selectCountingLogger) LogMode(logger.LogLevel) logger.Interface {
+	return l
+}
+
+func (l *selectCountingLogger) Info(context.Context, string, ...interface{}) {}
+
+func (l *selectCountingLogger) Warn(context.Context, string, ...interface{}) {}
+
+func (l *selectCountingLogger) Error(context.Context, string, ...interface{}) {}
+
+func (l *selectCountingLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	sql, _ := fc()
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sql)), "SELECT") {
+		l.selects.Add(1)
+	}
+}
+
+func (l *selectCountingLogger) Count() int64 {
+	return l.selects.Load()
+}
+
+func migrateTestOrderSchema(t *testing.T, db *gorm.DB) {
+	t.Helper()
+
 	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}, &inbox.ConsumedEvent{}); err != nil {
 		t.Fatalf("failed to migrate test database: %v", err)
 	}
-
-	return NewService(db, nil), db
+	if err := EnsureOrderIndexes(db); err != nil {
+		t.Fatalf("failed to migrate order indexes: %v", err)
+	}
 }
 
 type publishedEvent struct {
@@ -98,9 +133,7 @@ func newTestServiceWithPublisher(t *testing.T, publisher mq.Publisher) (*Service
 		t.Fatalf("failed to open test database: %v", err)
 	}
 
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}, &inbox.ConsumedEvent{}); err != nil {
-		t.Fatalf("failed to migrate test database: %v", err)
-	}
+	migrateTestOrderSchema(t, db)
 
 	return NewService(db, publisher), db
 }
@@ -117,9 +150,7 @@ func newTestServiceWithTimeout(t *testing.T, publisher mq.Publisher, scheduler T
 		t.Fatalf("failed to open test database: %v", err)
 	}
 
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}, &inbox.ConsumedEvent{}); err != nil {
-		t.Fatalf("failed to migrate test database: %v", err)
-	}
+	migrateTestOrderSchema(t, db)
 
 	return NewServiceWithTimeout(db, publisher, scheduler, timeout), db
 }
@@ -132,9 +163,7 @@ func newConcurrentTestService(t *testing.T) (*Service, *gorm.DB) {
 	if err != nil {
 		t.Fatalf("failed to open concurrent test database: %v", err)
 	}
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}, &Order{}, &OrderItem{}, &idempotency.Record{}, &outbox.Event{}, &inbox.ConsumedEvent{}); err != nil {
-		t.Fatalf("failed to migrate concurrent test database: %v", err)
-	}
+	migrateTestOrderSchema(t, db)
 
 	sqlDB, err := db.DB()
 	if err != nil {
@@ -1548,6 +1577,7 @@ func TestListMerchantOrdersOnlyReturnsRelatedOrders(t *testing.T) {
 	if err := db.Create(&[]OrderItem{
 		{OrderID: ownOrder.ID, ProductID: 1, MerchantID: ownShop.ID, ProductName: "Own Item", Price: 10, Quantity: 1},
 		{OrderID: ownOrder.ID, ProductID: 2, MerchantID: otherShop.ID, ProductName: "Other Item", Price: 20, Quantity: 1},
+		{OrderID: ownOrder.ID, ProductID: 4, ProductName: "Legacy Item", Price: 5, Quantity: 1},
 	}).Error; err != nil {
 		t.Fatalf("failed to create mixed order items: %v", err)
 	}
@@ -1579,10 +1609,288 @@ func TestListMerchantOrdersOnlyReturnsRelatedOrders(t *testing.T) {
 	if got, want := resp.Orders[0].Id, int64(ownOrder.ID); got != want {
 		t.Fatalf("unexpected order id: got %d want %d", got, want)
 	}
+	if got, want := resp.Orders[0].TotalAmount, float32(10); got != want {
+		t.Fatalf("unexpected merchant-visible total amount: got %.2f want %.2f", got, want)
+	}
 	if got, want := len(resp.Orders[0].Items), 1; got != want {
 		t.Fatalf("unexpected merchant order item count: got %d want %d", got, want)
 	}
 	if got, want := resp.Orders[0].Items[0].ProductName, "Own Item"; got != want {
 		t.Fatalf("unexpected merchant order item: got %q want %q", got, want)
+	}
+}
+
+func TestListOrdersBatchLoadsItemsAndPreservesPageOrder(t *testing.T) {
+	service, db := newTestService(t)
+	baseTime := time.Now().Add(-time.Hour)
+
+	oldOrder := Order{
+		Model:       gorm.Model{CreatedAt: baseTime},
+		UserID:      42,
+		TotalAmount: 25,
+		Status:      OrderStatusPaid,
+		OrderDate:   baseTime,
+	}
+	if err := db.Create(&oldOrder).Error; err != nil {
+		t.Fatalf("failed to create old order: %v", err)
+	}
+	newOrder := Order{
+		Model:       gorm.Model{CreatedAt: baseTime.Add(2 * time.Minute)},
+		UserID:      42,
+		TotalAmount: 30,
+		Status:      OrderStatusPaid,
+		OrderDate:   baseTime.Add(2 * time.Minute),
+	}
+	if err := db.Create(&newOrder).Error; err != nil {
+		t.Fatalf("failed to create new order: %v", err)
+	}
+	otherUserOrder := Order{
+		Model:       gorm.Model{CreatedAt: baseTime.Add(3 * time.Minute)},
+		UserID:      99,
+		TotalAmount: 99,
+		Status:      OrderStatusPaid,
+		OrderDate:   baseTime.Add(3 * time.Minute),
+	}
+	if err := db.Create(&otherUserOrder).Error; err != nil {
+		t.Fatalf("failed to create other user order: %v", err)
+	}
+	if err := db.Create(&[]OrderItem{
+		{OrderID: oldOrder.ID, ProductID: 1, MerchantID: 1, ProductName: "Old A", Price: 10, Quantity: 2},
+		{OrderID: oldOrder.ID, ProductID: 2, MerchantID: 1, ProductName: "Old B", Price: 5, Quantity: 1},
+		{OrderID: newOrder.ID, ProductID: 3, MerchantID: 2, ProductName: "New A", Price: 30, Quantity: 1},
+		{OrderID: otherUserOrder.ID, ProductID: 4, MerchantID: 2, ProductName: "Other", Price: 99, Quantity: 1},
+	}).Error; err != nil {
+		t.Fatalf("failed to create order items: %v", err)
+	}
+
+	resp, err := service.ListOrders(context.Background(), &pb.ListOrdersRequest{
+		UserId:   42,
+		Page:     1,
+		PageSize: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListOrders returned error: %v", err)
+	}
+	if got, want := resp.Total, int64(2); got != want {
+		t.Fatalf("unexpected total: got %d want %d", got, want)
+	}
+	if got, want := len(resp.Orders), 2; got != want {
+		t.Fatalf("unexpected order count: got %d want %d", got, want)
+	}
+	if got, want := resp.Orders[0].Id, int64(newOrder.ID); got != want {
+		t.Fatalf("unexpected first order id: got %d want %d", got, want)
+	}
+	if got, want := len(resp.Orders[0].Items), 1; got != want {
+		t.Fatalf("unexpected new order item count: got %d want %d", got, want)
+	}
+	if got, want := resp.Orders[0].Items[0].ProductName, "New A"; got != want {
+		t.Fatalf("unexpected new order item: got %q want %q", got, want)
+	}
+	if got, want := resp.Orders[1].Id, int64(oldOrder.ID); got != want {
+		t.Fatalf("unexpected second order id: got %d want %d", got, want)
+	}
+	if got, want := len(resp.Orders[1].Items), 2; got != want {
+		t.Fatalf("unexpected old order item count: got %d want %d", got, want)
+	}
+	if got, want := resp.Orders[1].Items[0].ProductName, "Old A"; got != want {
+		t.Fatalf("unexpected first old order item: got %q want %q", got, want)
+	}
+	if got, want := resp.Orders[1].Items[1].ProductName, "Old B"; got != want {
+		t.Fatalf("unexpected second old order item: got %q want %q", got, want)
+	}
+}
+
+func TestListMerchantOrdersAdminSeesCompleteOrderItems(t *testing.T) {
+	service, db := newTestService(t)
+	adminUser := createTestUser(t, db, auth.RoleAdmin)
+	merchantUser := createTestUser(t, db, auth.RoleMerchant)
+	otherUser := createTestUser(t, db, auth.RoleMerchant)
+	ownShop := createTestMerchant(t, db, merchantUser.ID)
+	otherShop := createTestMerchant(t, db, otherUser.ID)
+
+	mixedOrder := Order{UserID: 10, TotalAmount: 35, Status: OrderStatusPaid, OrderDate: time.Now()}
+	if err := db.Create(&mixedOrder).Error; err != nil {
+		t.Fatalf("failed to create mixed order: %v", err)
+	}
+	if err := db.Create(&[]OrderItem{
+		{OrderID: mixedOrder.ID, ProductID: 1, MerchantID: ownShop.ID, ProductName: "Own Item", Price: 10, Quantity: 1},
+		{OrderID: mixedOrder.ID, ProductID: 2, MerchantID: otherShop.ID, ProductName: "Other Item", Price: 20, Quantity: 1},
+		{OrderID: mixedOrder.ID, ProductID: 3, ProductName: "Legacy Item", Price: 5, Quantity: 1},
+	}).Error; err != nil {
+		t.Fatalf("failed to create mixed order items: %v", err)
+	}
+	merchantID := int64(ownShop.ID)
+
+	resp, err := service.ListMerchantOrders(context.Background(), &pb.ListMerchantOrdersRequest{
+		ActorUserId: int64(adminUser.ID),
+		MerchantId:  &merchantID,
+		Page:        1,
+		PageSize:    10,
+	})
+	if err != nil {
+		t.Fatalf("ListMerchantOrders returned error: %v", err)
+	}
+	if got, want := resp.Total, int64(1); got != want {
+		t.Fatalf("unexpected total: got %d want %d", got, want)
+	}
+	if got, want := len(resp.Orders), 1; got != want {
+		t.Fatalf("unexpected order count: got %d want %d", got, want)
+	}
+	if got, want := resp.Orders[0].TotalAmount, float32(35); got != want {
+		t.Fatalf("unexpected admin total amount: got %.2f want %.2f", got, want)
+	}
+	if got, want := len(resp.Orders[0].Items), 3; got != want {
+		t.Fatalf("unexpected admin item count: got %d want %d", got, want)
+	}
+	if got, want := resp.Orders[0].Items[2].ProductName, "Legacy Item"; got != want {
+		t.Fatalf("unexpected admin legacy item: got %q want %q", got, want)
+	}
+}
+
+func TestListOrdersEmptyResultSkipsItemQuery(t *testing.T) {
+	_, db := newTestService(t)
+	counter := &selectCountingLogger{}
+	service := NewService(db.Session(&gorm.Session{Logger: counter}), nil)
+
+	resp, err := service.ListOrders(context.Background(), &pb.ListOrdersRequest{
+		UserId:   404,
+		Page:     1,
+		PageSize: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListOrders returned error: %v", err)
+	}
+	if got, want := resp.Total, int64(0); got != want {
+		t.Fatalf("unexpected total: got %d want %d", got, want)
+	}
+	if got, want := len(resp.Orders), 0; got != want {
+		t.Fatalf("unexpected order count: got %d want %d", got, want)
+	}
+	if got, want := counter.Count(), int64(2); got != want {
+		t.Fatalf("unexpected SELECT count for empty list: got %d want %d", got, want)
+	}
+}
+
+func TestListOrdersQueryCountDoesNotGrowWithOrderCount(t *testing.T) {
+	var baseline int64
+	for _, orderCount := range []int{1, 100} {
+		t.Run(fmt.Sprintf("%d_orders", orderCount), func(t *testing.T) {
+			_, db := newTestService(t)
+			seedListOrders(t, db, 77, orderCount)
+
+			counter := &selectCountingLogger{}
+			service := NewService(db.Session(&gorm.Session{Logger: counter}), nil)
+			resp, err := service.ListOrders(context.Background(), &pb.ListOrdersRequest{
+				UserId:   77,
+				Page:     1,
+				PageSize: 100,
+			})
+			if err != nil {
+				t.Fatalf("ListOrders returned error: %v", err)
+			}
+			if got, want := len(resp.Orders), orderCount; got != want {
+				t.Fatalf("unexpected order count: got %d want %d", got, want)
+			}
+			queryCount := counter.Count()
+			if queryCount > 3 {
+				t.Fatalf("ListOrders used too many SELECT queries: got %d want <= 3", queryCount)
+			}
+			if baseline == 0 {
+				baseline = queryCount
+			} else if queryCount != baseline {
+				t.Fatalf("query count changed with row count: got %d want %d", queryCount, baseline)
+			}
+		})
+	}
+}
+
+func TestListMerchantOrdersQueryCountDoesNotGrowWithOrderCount(t *testing.T) {
+	var baseline int64
+	for _, orderCount := range []int{1, 100} {
+		t.Run(fmt.Sprintf("%d_orders", orderCount), func(t *testing.T) {
+			_, db := newTestService(t)
+			merchantUser := createTestUser(t, db, auth.RoleMerchant)
+			shop := createTestMerchant(t, db, merchantUser.ID)
+			seedMerchantListOrders(t, db, shop.ID, orderCount)
+
+			counter := &selectCountingLogger{}
+			service := NewService(db.Session(&gorm.Session{Logger: counter}), nil)
+			resp, err := service.ListMerchantOrders(context.Background(), &pb.ListMerchantOrdersRequest{
+				ActorUserId: int64(merchantUser.ID),
+				Page:        1,
+				PageSize:    100,
+			})
+			if err != nil {
+				t.Fatalf("ListMerchantOrders returned error: %v", err)
+			}
+			if got, want := len(resp.Orders), orderCount; got != want {
+				t.Fatalf("unexpected merchant order count: got %d want %d", got, want)
+			}
+			queryCount := counter.Count()
+			if queryCount > 5 {
+				t.Fatalf("ListMerchantOrders used too many SELECT queries: got %d want <= 5", queryCount)
+			}
+			if baseline == 0 {
+				baseline = queryCount
+			} else if queryCount != baseline {
+				t.Fatalf("merchant query count changed with row count: got %d want %d", queryCount, baseline)
+			}
+		})
+	}
+}
+
+func seedListOrders(t *testing.T, db *gorm.DB, userID uint, orderCount int) {
+	t.Helper()
+
+	baseTime := time.Now().Add(-time.Duration(orderCount) * time.Minute)
+	for i := 0; i < orderCount; i++ {
+		orderInfo := Order{
+			Model:       gorm.Model{CreatedAt: baseTime.Add(time.Duration(i) * time.Minute)},
+			UserID:      userID,
+			TotalAmount: float64(i + 2),
+			Status:      OrderStatusPaid,
+			OrderDate:   baseTime.Add(time.Duration(i) * time.Minute),
+		}
+		if err := db.Create(&orderInfo).Error; err != nil {
+			t.Fatalf("failed to create order %d: %v", i, err)
+		}
+		if err := db.Create(&OrderItem{
+			OrderID:     orderInfo.ID,
+			ProductID:   int64(i + 1),
+			MerchantID:  1,
+			ProductName: fmt.Sprintf("Item %d", i),
+			Price:       float64(i + 2),
+			Quantity:    1,
+		}).Error; err != nil {
+			t.Fatalf("failed to create order item %d: %v", i, err)
+		}
+	}
+}
+
+func seedMerchantListOrders(t *testing.T, db *gorm.DB, merchantID uint, orderCount int) {
+	t.Helper()
+
+	baseTime := time.Now().Add(-time.Duration(orderCount) * time.Minute)
+	for i := 0; i < orderCount; i++ {
+		orderInfo := Order{
+			Model:       gorm.Model{CreatedAt: baseTime.Add(time.Duration(i) * time.Minute)},
+			UserID:      uint(100 + i),
+			TotalAmount: float64(i + 1),
+			Status:      OrderStatusPaid,
+			OrderDate:   baseTime.Add(time.Duration(i) * time.Minute),
+		}
+		if err := db.Create(&orderInfo).Error; err != nil {
+			t.Fatalf("failed to create merchant order %d: %v", i, err)
+		}
+		if err := db.Create(&OrderItem{
+			OrderID:     orderInfo.ID,
+			ProductID:   int64(i + 1),
+			MerchantID:  merchantID,
+			ProductName: fmt.Sprintf("Merchant Item %d", i),
+			Price:       float64(i + 1),
+			Quantity:    1,
+		}).Error; err != nil {
+			t.Fatalf("failed to create merchant order item %d: %v", i, err)
+		}
 	}
 }

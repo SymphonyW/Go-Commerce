@@ -31,6 +31,7 @@ func TestMySQLOrderPersistsAndDeductsStock(t *testing.T) {
 	if err := db.AutoMigrate(&product.Product{}, &order.Order{}, &order.OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
 		t.Fatalf("failed to migrate integration schema: %v", err)
 	}
+	ensureIntegrationOrderIndexes(t, db)
 
 	item := product.Product{
 		Name:        "integration-order-" + uniqueSuffix(t),
@@ -90,6 +91,7 @@ func TestMySQLCancelOrderIdempotencyReplaysWithoutDuplicateSideEffects(t *testin
 	if err := db.AutoMigrate(&product.Product{}, &order.Order{}, &order.OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
 		t.Fatalf("failed to migrate integration schema: %v", err)
 	}
+	ensureIntegrationOrderIndexes(t, db)
 
 	item := product.Product{
 		Name:        "integration-cancel-" + uniqueSuffix(t),
@@ -165,6 +167,7 @@ func TestMySQLConcurrentShipOrderSerializesTransition(t *testing.T) {
 	if err := db.AutoMigrate(&auth.User{}, &order.Order{}, &order.OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
 		t.Fatalf("failed to migrate integration schema: %v", err)
 	}
+	ensureIntegrationOrderIndexes(t, db)
 
 	admin := createIntegrationUser(t, db, auth.RoleAdmin)
 	placed := order.Order{
@@ -213,6 +216,7 @@ func TestMySQLConcurrentCompleteOrderSerializesTransition(t *testing.T) {
 	if err := db.AutoMigrate(&order.Order{}, &order.OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
 		t.Fatalf("failed to migrate integration schema: %v", err)
 	}
+	ensureIntegrationOrderIndexes(t, db)
 
 	placed := order.Order{
 		UserID:      7,
@@ -260,6 +264,7 @@ func TestMySQLConcurrentShipAndCancelKeepsInventoryConsistent(t *testing.T) {
 	if err := db.AutoMigrate(&auth.User{}, &product.Product{}, &order.Order{}, &order.OrderItem{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
 		t.Fatalf("failed to migrate integration schema: %v", err)
 	}
+	ensureIntegrationOrderIndexes(t, db)
 
 	item := product.Product{
 		Name:        "integration-ship-cancel-" + uniqueSuffix(t),
