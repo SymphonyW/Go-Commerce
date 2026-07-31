@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	orderdomain "go-commerce/internal/order"
+
 	"github.com/go-redis/redis/v8"
 	gomysql "github.com/go-sql-driver/mysql"
 	"github.com/streadway/amqp"
@@ -84,6 +86,14 @@ func openIntegrationDB(t *testing.T) *gorm.DB {
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	return db
+}
+
+func ensureIntegrationOrderIndexes(t *testing.T, db *gorm.DB) {
+	t.Helper()
+
+	if err := orderdomain.EnsureOrderIndexes(db); err != nil {
+		t.Fatalf("failed to migrate integration order indexes: %v", err)
+	}
 }
 
 func openIntegrationRedis(t *testing.T) *redis.Client {

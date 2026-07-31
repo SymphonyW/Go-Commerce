@@ -125,6 +125,9 @@ func migratePaymentTestDB(t *testing.T, db *gorm.DB) {
 	if err := db.AutoMigrate(&orderdomain.Order{}, &idempotency.Record{}, &outbox.Event{}); err != nil {
 		t.Fatalf("failed to migrate test support tables: %v", err)
 	}
+	if err := orderdomain.EnsureOrderIndexes(db); err != nil {
+		t.Fatalf("failed to migrate order test indexes: %v", err)
+	}
 	if err := Migrate(db); err != nil {
 		t.Fatalf("failed to migrate payment test database: %v", err)
 	}

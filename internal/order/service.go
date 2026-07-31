@@ -392,6 +392,38 @@ func convertToPBOrder(order *Order, items []OrderItem) *pb.Order {
 	}
 }
 
+func collectOrderIDs(orders []Order) []uint {
+	if len(orders) == 0 {
+		return nil
+	}
+	orderIDs := make([]uint, len(orders))
+	for i, order := range orders {
+		orderIDs[i] = order.ID
+	}
+	return orderIDs
+}
+
+func fetchOrderItemsForOrders(db *gorm.DB, orderIDs []uint, merchantIDs []uint) (map[uint][]OrderItem, error) {
+	itemsByOrderID := make(map[uint][]OrderItem, len(orderIDs))
+	if len(orderIDs) == 0 {
+		return itemsByOrderID, nil
+	}
+
+	var orderItems []OrderItem
+	query := db.Where("order_id IN ?", orderIDs)
+	if len(merchantIDs) > 0 {
+		query = query.Where("merchant_id IN ?", merchantIDs)
+	}
+	if err := query.Order("order_id ASC").Order("id ASC").Find(&orderItems).Error; err != nil {
+		return nil, err
+	}
+
+	for _, item := range orderItems {
+		itemsByOrderID[item.OrderID] = append(itemsByOrderID[item.OrderID], item)
+	}
+	return itemsByOrderID, nil
+}
+
 // ListOrders 获取用户订单列表
 // 功能：根据用户ID获取订单列表
 // 参数：
@@ -404,39 +436,36 @@ func convertToPBOrder(order *Order, items []OrderItem) *pb.Order {
 //	*pb.ListOrdersResponse: 订单列表响应，包含订单列表和总数
 //	error: 错误信息
 func (s *Service) ListOrders(ctx context.Context, req *pb.ListOrdersRequest) (*pb.ListOrdersResponse, error) {
+	if req == nil {
+		req = &pb.ListOrdersRequest{}
+	}
+	page, pageSize := normalizeOrderPagination(req.Page, req.PageSize)
+
 	// 从数据库查询用户订单
 	var orders []Order
 	var total int64
-
-	// 计算偏移量
-	offset := (req.Page - 1) * req.PageSize
-	if req.Page <= 0 {
-		req.Page = 1
-		offset = 0
-	}
-	if req.PageSize <= 0 {
-		req.PageSize = 10
-	}
+	db := s.db.WithContext(ctx)
 
 	// 查询订单总数
-	if err := s.db.Model(&Order{}).Where("user_id = ?", req.UserId).Count(&total).Error; err != nil {
+	if err := db.Model(&Order{}).Where("user_id = ?", req.UserId).Count(&total).Error; err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to count orders: %v", err)
 	}
 
 	// 查询订单列表
-	if err := s.db.Where("user_id = ?", req.UserId).Order("created_at DESC").Offset(int(offset)).Limit(int(req.PageSize)).Find(&orders).Error; err != nil {
+	offset := (page - 1) * pageSize
+	if err := db.Where("user_id = ?", req.UserId).Order("created_at DESC").Offset(int(offset)).Limit(int(pageSize)).Find(&orders).Error; err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to fetch orders: %v", err)
+	}
+
+	itemsByOrderID, err := fetchOrderItemsForOrders(db, collectOrderIDs(orders), nil)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to fetch order items: %v", err)
 	}
 
 	// 转换为proto对象
 	pbOrders := make([]*pb.Order, len(orders))
 	for i, order := range orders {
-		// 查询订单项
-		var orderItems []OrderItem
-		if err := s.db.Where("order_id = ?", order.ID).Find(&orderItems).Error; err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to fetch order items: %v", err)
-		}
-		pbOrders[i] = convertToPBOrder(&order, orderItems)
+		pbOrders[i] = convertToPBOrder(&order, itemsByOrderID[order.ID])
 	}
 
 	// 返回订单列表响应
@@ -461,48 +490,44 @@ func (s *Service) ListMerchantOrders(ctx context.Context, req *pb.ListMerchantOr
 
 	var orders []Order
 	var total int64
+	db := s.db.WithContext(ctx)
 
 	if len(merchantIDs) == 0 && restrictedItems {
 		return &pb.ListMerchantOrdersResponse{}, nil
 	}
 
-	if !restrictedItems {
-		if err := s.db.Model(&Order{}).Count(&total).Error; err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to count merchant orders: %v", err)
-		}
-		offset := (page - 1) * pageSize
-		if err := s.db.Order("created_at DESC").Order("id DESC").Offset(int(offset)).Limit(int(pageSize)).Find(&orders).Error; err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to fetch merchant orders: %v", err)
-		}
-	} else {
-		orderIDSubQuery := s.db.Model(&OrderItem{}).
+	orderQuery := db.Model(&Order{})
+	if len(merchantIDs) > 0 {
+		orderIDSubQuery := db.Model(&OrderItem{}).
 			Select("DISTINCT order_id").
 			Where("merchant_id IN ?", merchantIDs)
-		if err := s.db.Model(&Order{}).Where("id IN (?)", orderIDSubQuery).Count(&total).Error; err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to count merchant orders: %v", err)
-		}
-		offset := (page - 1) * pageSize
-		if err := s.db.
-			Where("id IN (?)", orderIDSubQuery).
-			Order("created_at DESC").
-			Order("id DESC").
-			Offset(int(offset)).
-			Limit(int(pageSize)).
-			Find(&orders).Error; err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to fetch merchant orders: %v", err)
-		}
+		orderQuery = orderQuery.Where("id IN (?)", orderIDSubQuery)
+	}
+	if err := orderQuery.Count(&total).Error; err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to count merchant orders: %v", err)
+	}
+	offset := (page - 1) * pageSize
+	if err := orderQuery.
+		Order("created_at DESC").
+		Order("id DESC").
+		Offset(int(offset)).
+		Limit(int(pageSize)).
+		Find(&orders).Error; err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to fetch merchant orders: %v", err)
+	}
+
+	var itemMerchantIDs []uint
+	if restrictedItems {
+		itemMerchantIDs = merchantIDs
+	}
+	itemsByOrderID, err := fetchOrderItemsForOrders(db, collectOrderIDs(orders), itemMerchantIDs)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to fetch merchant order items: %v", err)
 	}
 
 	pbOrders := make([]*pb.Order, len(orders))
 	for i, orderInfo := range orders {
-		var orderItems []OrderItem
-		itemQuery := s.db.Where("order_id = ?", orderInfo.ID)
-		if restrictedItems {
-			itemQuery = itemQuery.Where("merchant_id IN ?", merchantIDs)
-		}
-		if err := itemQuery.Find(&orderItems).Error; err != nil {
-			return nil, status.Errorf(codes.Internal, "failed to fetch merchant order items: %v", err)
-		}
+		orderItems := itemsByOrderID[orderInfo.ID]
 
 		visibleOrder := orderInfo
 		if restrictedItems {
@@ -896,7 +921,7 @@ func (s *Service) resolveMerchantOrderScope(actorUserID uint, requestedMerchantI
 			}
 			return nil, false, err
 		}
-		return []uint{shop.ID}, true, nil
+		return []uint{shop.ID}, false, nil
 	case auth.RoleMerchant:
 		query := s.db.Where("owner_user_id = ?", actorUserID)
 		if requestedMerchantID != nil {

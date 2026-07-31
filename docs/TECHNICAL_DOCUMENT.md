@@ -263,6 +263,24 @@ flowchart TD
 - 订单项会在下单时保存 `merchant_id` 快照。
 - 商家查看订单时，按 `order_items.merchant_id` 过滤。
 - 混合商家订单会裁剪成当前商家可见的部分，并重新计算展示金额。
+- `admin` 可以按商家筛选订单集合，但订单详情仍返回完整订单项；历史订单项缺少 `merchant_id` 时仅在 admin 完整视图中可见。
+
+### 9.4 订单列表查询性能
+
+`ListOrders` 和 `ListMerchantOrders` 已避免逐订单加载 `order_items`。列表查询稳定拆为少量固定 SQL：
+
+1. `COUNT` 计算总数。
+2. 分页查询 `orders`，保持原有 `created_at DESC` 排序；商家订单继续追加 `id DESC` 保持稳定。
+3. 对当前页 `order_id` 使用一条 `WHERE order_id IN ?` 批量读取 `order_items`，再在内存中按 `order_id` 分组；空列表不会执行无意义的 `IN ()`。
+
+索引用途：
+
+| 索引 | 用途 |
+| --- | --- |
+| `orders.user_id` | 用户订单列表按用户过滤。 |
+| `orders.created_at` | 订单列表按创建时间倒序分页。 |
+| `order_items.order_id` | 当前页订单项批量加载。 |
+| `order_items.merchant_id` | 商家订单集合筛选与商家可见订单项过滤。 |
 
 ## 10. 库存扣减防超卖设计
 

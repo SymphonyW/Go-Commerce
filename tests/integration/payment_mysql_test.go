@@ -98,6 +98,7 @@ func TestMySQLPaymentSuccessIdempotencyReplaysWithoutDuplicateSideEffects(t *tes
 	if err := db.AutoMigrate(&product.Product{}, &orderdomain.Order{}, &orderdomain.OrderItem{}, &idempotency.Record{}, &outbox.Event{}, &inbox.ConsumedEvent{}); err != nil {
 		t.Fatalf("failed to migrate integration schema: %v", err)
 	}
+	ensureIntegrationOrderIndexes(t, db)
 	if err := payment.Migrate(db); err != nil {
 		t.Fatalf("failed to migrate payment schema: %v", err)
 	}
@@ -233,6 +234,7 @@ func TestMySQLConcurrentCreatePaymentAllowsOnlyOneActivePayment(t *testing.T) {
 	if err := db.AutoMigrate(&orderdomain.Order{}, &outbox.Event{}); err != nil {
 		t.Fatalf("failed to migrate integration schema: %v", err)
 	}
+	ensureIntegrationOrderIndexes(t, db)
 	if err := payment.Migrate(db); err != nil {
 		t.Fatalf("failed to migrate payment schema: %v", err)
 	}
@@ -287,6 +289,7 @@ func TestMySQLDuplicateActivePaymentMapsToFailedPrecondition(t *testing.T) {
 	if err := db.AutoMigrate(&orderdomain.Order{}, &outbox.Event{}); err != nil {
 		t.Fatalf("failed to migrate integration schema: %v", err)
 	}
+	ensureIntegrationOrderIndexes(t, db)
 	if err := payment.Migrate(db); err != nil {
 		t.Fatalf("failed to migrate payment schema: %v", err)
 	}
@@ -313,6 +316,7 @@ func TestMySQLConcurrentPaymentSuccessAndFailOnlyOneWins(t *testing.T) {
 	if err := db.AutoMigrate(&orderdomain.Order{}, &outbox.Event{}); err != nil {
 		t.Fatalf("failed to migrate integration schema: %v", err)
 	}
+	ensureIntegrationOrderIndexes(t, db)
 	if err := payment.Migrate(db); err != nil {
 		t.Fatalf("failed to migrate payment schema: %v", err)
 	}
