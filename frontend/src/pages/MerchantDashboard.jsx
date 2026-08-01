@@ -6,7 +6,7 @@ import MerchantConsoleNav from '../components/MerchantConsoleNav';
 import StatCard from '../components/StatCard';
 import StatusBadge from '../components/StatusBadge';
 import { merchantAPI } from '../services/api';
-import { formatCurrency, formatDateTime, getOrderStatusLabel } from '../utils/display';
+import { formatMoney, formatDateTime, getOrderStatusLabel } from '../utils/display';
 
 const MerchantDashboard = () => {
   const navigate = useNavigate();
@@ -134,7 +134,7 @@ const MerchantDashboard = () => {
                   <div key={order.id} className="merchant-table-row">
                     <span>#{order.id}</span>
                     <StatusBadge status={order.status} label={getOrderStatusLabel(order.status, order.cancel_reason)} />
-                    <span>{formatCurrency(order.total_amount)}</span>
+                    <span>{formatMoney(order.total_amount_cents)}</span>
                     <span>{formatDateTime(order.created_at)}</span>
                   </div>
                 ))}

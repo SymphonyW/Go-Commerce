@@ -129,7 +129,7 @@ func TestMySQLPaymentSuccessIdempotencyReplaysWithoutDuplicateSideEffects(t *tes
 	item := product.Product{
 		Name:        "integration-payment-" + uniqueSuffix(t),
 		Description: "mysql payment idempotency fixture",
-		Price:       40,
+		PriceCents:  4000,
 		Stock:       5,
 		MerchantID:  1,
 	}
@@ -239,7 +239,7 @@ func TestMySQLConcurrentCreatePaymentAllowsOnlyOneActivePayment(t *testing.T) {
 		t.Fatalf("failed to migrate payment schema: %v", err)
 	}
 
-	placed := createIntegrationPaymentOrder(t, db, 7, orderdomain.OrderStatusPending, 99)
+	placed := createIntegrationPaymentOrder(t, db, 7, orderdomain.OrderStatusPending, 9900)
 	service := payment.NewService(db, nil, nil)
 
 	var successes int32
@@ -294,7 +294,7 @@ func TestMySQLDuplicateActivePaymentMapsToFailedPrecondition(t *testing.T) {
 		t.Fatalf("failed to migrate payment schema: %v", err)
 	}
 
-	placed := createIntegrationPaymentOrder(t, db, 7, orderdomain.OrderStatusPending, 99)
+	placed := createIntegrationPaymentOrder(t, db, 7, orderdomain.OrderStatusPending, 9900)
 	grpcService := payment.NewGRPCService(payment.NewService(db, nil, nil))
 	req := &pbPayment.CreatePaymentRequest{
 		UserId:        int64(placed.UserID),
@@ -321,7 +321,7 @@ func TestMySQLConcurrentPaymentSuccessAndFailOnlyOneWins(t *testing.T) {
 		t.Fatalf("failed to migrate payment schema: %v", err)
 	}
 
-	placed := createIntegrationPaymentOrder(t, db, 7, orderdomain.OrderStatusPending, 99)
+	placed := createIntegrationPaymentOrder(t, db, 7, orderdomain.OrderStatusPending, 9900)
 	service := payment.NewService(db, nil, nil)
 	created, err := service.CreatePayment(ctx, int64(placed.UserID), int64(placed.ID), payment.PaymentMethodMockBalance)
 	if err != nil {
@@ -383,14 +383,14 @@ func TestMySQLConcurrentPaymentSuccessAndFailOnlyOneWins(t *testing.T) {
 	}
 }
 
-func createIntegrationPaymentOrder(t *testing.T, db *gorm.DB, userID uint, status string, amount float64) orderdomain.Order {
+func createIntegrationPaymentOrder(t *testing.T, db *gorm.DB, userID uint, status string, amountCents int64) orderdomain.Order {
 	t.Helper()
 
 	placed := orderdomain.Order{
-		UserID:      userID,
-		TotalAmount: amount,
-		Status:      status,
-		OrderDate:   time.Now(),
+		UserID:           userID,
+		TotalAmountCents: amountCents,
+		Status:           status,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&placed).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)

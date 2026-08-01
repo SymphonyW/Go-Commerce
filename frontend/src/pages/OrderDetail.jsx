@@ -6,7 +6,7 @@ import PageHeader from '../components/PageHeader';
 import SectionCard from '../components/SectionCard';
 import StatusBadge from '../components/StatusBadge';
 import { orderAPI, paymentAPI } from '../services/api';
-import { formatCurrency, formatDateTime, getOrderStatusLabel } from '../utils/display';
+import { formatMoney, formatDateTime, getOrderStatusLabel } from '../utils/display';
 
 const OrderDetail = () => {
   const { id } = useParams();
@@ -188,7 +188,7 @@ const OrderDetail = () => {
           </div>
           <div>
             <p>订单总额</p>
-            <strong>{formatCurrency(order.total_amount)}</strong>
+            <strong>{formatMoney(order.total_amount_cents)}</strong>
           </div>
         </div>
 
@@ -235,8 +235,8 @@ const OrderDetail = () => {
               <div key={index} className="order-item">
                 <div className="order-item-name">{item.product_name}</div>
                 <div>数量：{item.quantity}</div>
-                <div>单价：{formatCurrency(item.price)}</div>
-                <div>小计：{formatCurrency(item.price * item.quantity)}</div>
+                <div>单价：{formatMoney(item.price_cents)}</div>
+                <div>小计：{formatMoney(item.price_cents * item.quantity)}</div>
               </div>
             ))}
           </div>

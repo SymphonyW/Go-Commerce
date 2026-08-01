@@ -59,7 +59,7 @@ func (c *PaymentSucceededConsumer) HandleDelivery(delivery amqp.Delivery) error 
 
 	changed := false
 	processed, err := inbox.ProcessOnce(context.Background(), c.db, paymentSucceededConsumerName, event.EventID, event.EventType, func(tx *gorm.DB) error {
-		_, paidChanged, err := markOrderPaidInTx(tx, event.OrderID, event.UserID, event.Amount, func(tx *gorm.DB, order *Order) error {
+		_, paidChanged, err := markOrderPaidInTx(tx, event.OrderID, event.UserID, event.AmountCents, func(tx *gorm.DB, order *Order) error {
 			statusEvent := newOrderStatusChangedEvent(context.Background(), events.OrderPaidType, order, OrderStatusPending, OrderStatusPaid)
 			_, err := c.outboxRepo.Create(context.Background(), tx, outbox.NewEventInput{
 				AggregateType: "order",
@@ -113,12 +113,12 @@ func (c *PaymentSucceededConsumer) HandleDelivery(delivery amqp.Delivery) error 
 }
 
 // MarkOrderPaid 只允许金额一致的 pending 订单进入 paid；重复事件保持幂等。
-func MarkOrderPaid(db *gorm.DB, orderID, userID int64, amount float64, afterChange func(tx *gorm.DB, order *Order) error) (*Order, bool, error) {
+func MarkOrderPaid(db *gorm.DB, orderID, userID int64, amountCents int64, afterChange func(tx *gorm.DB, order *Order) error) (*Order, bool, error) {
 	var order *Order
 	changed := false
 
 	err := db.Transaction(func(tx *gorm.DB) error {
-		updated, didChange, err := markOrderPaidInTx(tx, orderID, userID, amount, afterChange)
+		updated, didChange, err := markOrderPaidInTx(tx, orderID, userID, amountCents, afterChange)
 		order = updated
 		changed = didChange
 		return err
@@ -129,14 +129,14 @@ func MarkOrderPaid(db *gorm.DB, orderID, userID int64, amount float64, afterChan
 	return order, changed, nil
 }
 
-func markOrderPaidInTx(tx *gorm.DB, orderID, userID int64, amount float64, afterChange func(tx *gorm.DB, order *Order) error) (*Order, bool, error) {
+func markOrderPaidInTx(tx *gorm.DB, orderID, userID int64, amountCents int64, afterChange func(tx *gorm.DB, order *Order) error) (*Order, bool, error) {
 	var order Order
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("id = ? AND user_id = ?", orderID, userID).
 		First(&order).Error; err != nil {
 		return nil, false, err
 	}
-	if order.TotalAmount != amount {
+	if order.TotalAmountCents != amountCents {
 		return nil, false, ErrOrderPaymentMismatch
 	}
 	if order.Status == OrderStatusPaid {

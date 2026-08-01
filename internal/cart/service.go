@@ -81,7 +81,7 @@ func (s *Service) AddCartItem(ctx context.Context, req *pb.AddCartItemRequest) (
 		existingItem = pb.CartItem{
 			ProductId:   productResp.Product.Id,
 			ProductName: productResp.Product.Name,
-			Price:       productResp.Product.Price,
+			PriceCents:  productResp.Product.PriceCents,
 			Quantity:    req.Quantity,
 			ImageUrl:    productResp.Product.ImageUrl,
 		}
@@ -123,18 +123,18 @@ func (s *Service) GetCart(ctx context.Context, req *pb.GetCartRequest) (*pb.GetC
 
 	// 解析商品并计算总金额
 	items := make([]*pb.CartItem, 0)
-	var totalAmount float32
+	var totalAmountCents int64
 	for _, itemJSON := range itemsJSON {
 		var item pb.CartItem
 		json.Unmarshal([]byte(itemJSON), &item)
 		items = append(items, &item)
-		totalAmount += item.Price * float32(item.Quantity)
+		totalAmountCents += item.PriceCents * int64(item.Quantity)
 	}
 
 	// 确保返回的响应包含空数组而不是nil
 	response := &pb.GetCartResponse{
-		Items:       items,
-		TotalAmount: totalAmount,
+		Items:            items,
+		TotalAmountCents: totalAmountCents,
 	}
 
 	// 返回获取购物车响应

@@ -12,11 +12,11 @@ import (
 // queries page by the newest rows first.
 type Order struct {
 	gorm.Model
-	UserID       uint      `gorm:"not null;index"`
-	TotalAmount  float64   `gorm:"not null"`
-	Status       string    `gorm:"not null;default:'pending'"`
-	CancelReason string    `gorm:"size:64"`
-	OrderDate    time.Time `gorm:"not null"`
+	UserID           uint      `gorm:"not null;index"`
+	TotalAmountCents int64     `gorm:"not null"`
+	Status           string    `gorm:"not null;default:'pending'"`
+	CancelReason     string    `gorm:"size:64"`
+	OrderDate        time.Time `gorm:"not null"`
 }
 
 // OrderItem stores immutable product snapshots captured at order creation.
@@ -24,12 +24,12 @@ type Order struct {
 // merchant attribution existed.
 type OrderItem struct {
 	gorm.Model
-	OrderID     uint    `gorm:"not null;index"`
-	ProductID   int64   `gorm:"not null"`
-	MerchantID  uint    `gorm:"index"`
-	ProductName string  `gorm:"not null"`
-	Price       float64 `gorm:"not null"`
-	Quantity    int32   `gorm:"not null"`
+	OrderID     uint   `gorm:"not null;index"`
+	ProductID   int64  `gorm:"not null"`
+	MerchantID  uint   `gorm:"index"`
+	ProductName string `gorm:"not null"`
+	PriceCents  int64  `gorm:"not null"`
+	Quantity    int32  `gorm:"not null"`
 }
 
 // EnsureOrderIndexes creates indexes that cannot be declared directly on

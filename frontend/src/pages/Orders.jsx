@@ -5,7 +5,7 @@ import LoadingState from '../components/LoadingState';
 import PageHeader from '../components/PageHeader';
 import StatusBadge from '../components/StatusBadge';
 import { orderAPI } from '../services/api';
-import { formatCurrency, formatDateTime, getOrderStatusLabel } from '../utils/display';
+import { formatMoney, formatDateTime, getOrderStatusLabel } from '../utils/display';
 
 const Orders = () => {
   const [orders, setOrders] = useState([]);
@@ -75,7 +75,7 @@ const Orders = () => {
               <div className="order-card-meta">
                 <div>
                   <p>总金额</p>
-                  <strong>{formatCurrency(order.total_amount)}</strong>
+                  <strong>{formatMoney(order.total_amount_cents)}</strong>
                 </div>
                 <div>
                   <p>下单时间</p>

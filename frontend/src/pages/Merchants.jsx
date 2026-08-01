@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { merchantAPI, productAPI } from '../services/api';
+import { formatMoney, parseMoneyToCents } from '../utils/display';
 
 // 处理图片URL，将维基百科页面URL转换为实际图片文件URL
 const processImageUrl = (url) => {
@@ -82,15 +83,22 @@ const Merchants = () => {
   // 商户添加产品
   const handleAddProduct = async (e) => {
     e.preventDefault();
+    const priceCents = parseMoneyToCents(newProduct.price);
+    if (priceCents === null) {
+      setError('价格必须是大于等于 0 的金额，最多两位小数');
+      return;
+    }
+
     try {
       setLoading(true);
       // 转换类型
       const productData = {
         ...newProduct,
         merchant_id: parseInt(newProduct.merchant_id),
-        price: parseFloat(newProduct.price),
+        price_cents: priceCents,
         stock: parseInt(newProduct.stock)
       };
+      delete productData.price;
       await merchantAPI.addProduct(productData);
       setNewProduct({
         merchant_id: '',
@@ -265,7 +273,7 @@ const Merchants = () => {
                   style={{ width: '100px', height: '100px' }}
                 />
                 <p>描述: {product.description}</p>
-                <p>价格: ¥{product.price}</p>
+                <p>价格: {formatMoney(product.price_cents)}</p>
                 <p>库存: {product.stock}</p>
                 <p>分类: {product.category}</p>
                 <p>商户ID: {product.merchant_id}</p>

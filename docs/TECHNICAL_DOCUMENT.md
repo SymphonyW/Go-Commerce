@@ -203,7 +203,7 @@ sequenceDiagram
 
 ### 关键点
 
-- 支付金额直接取自订单总金额，不接收客户端金额。
+- 支付金额直接取自订单总金额，不接收客户端金额；交易金额统一存储和计算为 `int64` 分，避免二进制浮点累计和比较误差。
 - 同一订单不能同时存在多条活跃支付单：`created` 与 `succeeded` 的 `active_order_id=order_id`，`failed` 的 `active_order_id=NULL`。
 - `payments.active_order_id` 上有唯一索引，数据库负责最终兜底；MySQL 与 SQLite 都允许多个 `NULL`，因此失败支付不会阻塞后续重试。
 - 创建支付时锁定订单行、校验订单仍为 `pending`，再插入带 `active_order_id` 的支付单；唯一索引冲突映射为明确的 `active payment already exists` 业务错误。

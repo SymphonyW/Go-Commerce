@@ -149,7 +149,7 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 	}()
 
 	// ??????????????????????????????????????
-	orderItems, totalAmount, err := buildOrderSnapshots(tx, aggregatedItems)
+	orderItems, totalAmountCents, err := buildOrderSnapshots(tx, aggregatedItems)
 	if err != nil {
 		if strings.Contains(status.Convert(err).Message(), "insufficient stock") {
 			s.metrics.RecordInsufficientStock()
@@ -160,10 +160,10 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 	}
 
 	order := Order{
-		UserID:      uint(req.UserId),
-		TotalAmount: totalAmount,
-		Status:      OrderStatusPending,
-		OrderDate:   time.Now(),
+		UserID:           uint(req.UserId),
+		TotalAmountCents: totalAmountCents,
+		Status:           OrderStatusPending,
+		OrderDate:        time.Now(),
 	}
 	if err := tx.Create(&order).Error; err != nil {
 		tx.Rollback()
@@ -182,7 +182,7 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 	}
 
 	// 订单事件与订单、订单项、库存扣减同事务提交，避免业务成功后事件丢失。
-	orderEvent := newOrderCreatedEvent(ctx, &order, req.UserId, totalAmount, orderItems)
+	orderEvent := newOrderCreatedEvent(ctx, &order, req.UserId, totalAmountCents, orderItems)
 	if _, err := s.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
 		AggregateType: "order",
 		AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
@@ -242,24 +242,24 @@ func newCreateOrderFingerprint(userID int64, items []aggregatedCreateOrderItem) 
 	return createOrderFingerprint{UserID: userID, Items: fingerprintItems}
 }
 
-func newOrderCreatedEvent(ctx context.Context, order *Order, userID int64, totalAmount float64, items []OrderItem) events.OrderCreatedEvent {
+func newOrderCreatedEvent(ctx context.Context, order *Order, userID int64, totalAmountCents int64, items []OrderItem) events.OrderCreatedEvent {
 	eventItems := make([]events.OrderItemSnapshot, len(items))
 	for i, item := range items {
 		eventItems[i] = events.OrderItemSnapshot{
 			ProductID:   item.ProductID,
 			MerchantID:  int64(item.MerchantID),
 			ProductName: item.ProductName,
-			Price:       item.Price,
+			PriceCents:  item.PriceCents,
 			Quantity:    item.Quantity,
 		}
 	}
 
 	return events.OrderCreatedEvent{
-		BaseEvent:   events.NewBaseEventWithContext(ctx, events.OrderCreatedType, time.Now()),
-		OrderID:     int64(order.ID),
-		UserID:      userID,
-		TotalAmount: totalAmount,
-		Items:       eventItems,
+		BaseEvent:        events.NewBaseEventWithContext(ctx, events.OrderCreatedType, time.Now()),
+		OrderID:          int64(order.ID),
+		UserID:           userID,
+		TotalAmountCents: totalAmountCents,
+		Items:            eventItems,
 	}
 }
 
@@ -320,9 +320,9 @@ func aggregateCreateOrderItems(items []*pb.CreateOrderItem) ([]aggregatedCreateO
 }
 
 // buildOrderSnapshots 基于数据库中的真实商品信息生成订单项快照，并在同一事务内完成库存扣减。
-func buildOrderSnapshots(tx *gorm.DB, items []aggregatedCreateOrderItem) ([]OrderItem, float64, error) {
+func buildOrderSnapshots(tx *gorm.DB, items []aggregatedCreateOrderItem) ([]OrderItem, int64, error) {
 	orderItems := make([]OrderItem, 0, len(items))
-	var totalAmount float64
+	var totalAmountCents int64
 
 	for _, item := range items {
 		var productInfo product.Product
@@ -338,10 +338,17 @@ func buildOrderSnapshots(tx *gorm.DB, items []aggregatedCreateOrderItem) ([]Orde
 			ProductID:   int64(productInfo.ID),
 			MerchantID:  productInfo.MerchantID,
 			ProductName: productInfo.Name,
-			Price:       productInfo.Price,
+			PriceCents:  productInfo.PriceCents,
 			Quantity:    item.Quantity,
 		})
-		totalAmount += productInfo.Price * float64(item.Quantity)
+		lineAmountCents, err := checkedLineAmountCents(productInfo.PriceCents, item.Quantity)
+		if err != nil {
+			return nil, 0, err
+		}
+		totalAmountCents, err = checkedAddAmountCents(totalAmountCents, lineAmountCents)
+		if err != nil {
+			return nil, 0, err
+		}
 
 		// 库存扣减使用数据库条件更新，确保并发下 stock 不会被扣成负数。
 		if err := product.DeductStock(tx, item.ProductID, item.Quantity); err != nil {
@@ -358,7 +365,27 @@ func buildOrderSnapshots(tx *gorm.DB, items []aggregatedCreateOrderItem) ([]Orde
 		}
 	}
 
-	return orderItems, totalAmount, nil
+	return orderItems, totalAmountCents, nil
+}
+
+func checkedLineAmountCents(priceCents int64, quantity int32) (int64, error) {
+	if priceCents < 0 {
+		return 0, status.Error(codes.InvalidArgument, "price_cents must be non-negative")
+	}
+	if quantity <= 0 {
+		return 0, status.Error(codes.InvalidArgument, "quantity must be greater than zero")
+	}
+	if priceCents > math.MaxInt64/int64(quantity) {
+		return 0, status.Error(codes.InvalidArgument, "order amount is too large")
+	}
+	return priceCents * int64(quantity), nil
+}
+
+func checkedAddAmountCents(total, add int64) (int64, error) {
+	if add < 0 || total > math.MaxInt64-add {
+		return 0, status.Error(codes.InvalidArgument, "order amount is too large")
+	}
+	return total + add, nil
 }
 
 // convertToPBOrder 转换订单模型为proto对象
@@ -374,21 +401,21 @@ func convertToPBOrder(order *Order, items []OrderItem) *pb.Order {
 	pbItems := make([]*pb.OrderItem, len(items))
 	for i, item := range items {
 		pbItems[i] = &pb.OrderItem{
-			ProductId:   item.ProductID,      // 产品ID
-			ProductName: item.ProductName,    // 产品名称
-			Price:       float32(item.Price), // 产品价格
-			Quantity:    item.Quantity,       // 产品数量
+			ProductId:   item.ProductID,   // 产品ID
+			ProductName: item.ProductName, // 产品名称
+			PriceCents:  item.PriceCents,  // 产品价格
+			Quantity:    item.Quantity,    // 产品数量
 		}
 	}
 
 	return &pb.Order{
-		Id:           int64(order.ID),                      // 订单ID
-		UserId:       int64(order.UserID),                  // 用户ID
-		Items:        pbItems,                              // 订单商品列表
-		TotalAmount:  float32(order.TotalAmount),           // 订单总金额
-		Status:       order.Status,                         // 订单状态
-		CreatedAt:    order.OrderDate.Format(time.RFC3339), // 订单创建时间
-		CancelReason: order.CancelReason,                   // 取消原因
+		Id:               int64(order.ID),                      // 订单ID
+		UserId:           int64(order.UserID),                  // 用户ID
+		Items:            pbItems,                              // 订单商品列表
+		TotalAmountCents: order.TotalAmountCents,               // 订单总金额
+		Status:           order.Status,                         // 订单状态
+		CreatedAt:        order.OrderDate.Format(time.RFC3339), // 订单创建时间
+		CancelReason:     order.CancelReason,                   // 取消原因
 	}
 }
 
@@ -531,7 +558,7 @@ func (s *Service) ListMerchantOrders(ctx context.Context, req *pb.ListMerchantOr
 
 		visibleOrder := orderInfo
 		if restrictedItems {
-			visibleOrder.TotalAmount = sumOrderItems(orderItems)
+			visibleOrder.TotalAmountCents = sumOrderItems(orderItems)
 		}
 		pbOrders[i] = convertToPBOrder(&visibleOrder, orderItems)
 	}
@@ -944,10 +971,17 @@ func (s *Service) resolveMerchantOrderScope(actorUserID uint, requestedMerchantI
 	}
 }
 
-func sumOrderItems(items []OrderItem) float64 {
-	var total float64
+func sumOrderItems(items []OrderItem) int64 {
+	var total int64
 	for _, item := range items {
-		total += item.Price * float64(item.Quantity)
+		lineAmountCents, err := checkedLineAmountCents(item.PriceCents, item.Quantity)
+		if err != nil {
+			return 0
+		}
+		total, err = checkedAddAmountCents(total, lineAmountCents)
+		if err != nil {
+			return 0
+		}
 	}
 	return total
 }

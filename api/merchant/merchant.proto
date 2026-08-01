@@ -44,7 +44,7 @@ message AddProductRequest {
   int64 merchant_id = 1;
   string name = 2;
   string description = 3;
-  float price = 4;
+  int64 price_cents = 4;
   int32 stock = 5;
   string category = 6;
   string image_url = 7;
@@ -78,7 +78,7 @@ message MerchantProduct {
   int64 id = 1;
   string name = 2;
   string description = 3;
-  float price = 4;
+  int64 price_cents = 4;
   int32 stock = 5;
   string category = 6;
   string image_url = 7;
@@ -103,7 +103,7 @@ message UpdateMerchantProductRequest {
   optional int64 merchant_id = 3;
   optional string name = 4;
   optional string description = 5;
-  optional float price = 6;
+  optional int64 price_cents = 6;
   optional int32 stock = 7;
   optional string category = 8;
   optional string image_url = 9;

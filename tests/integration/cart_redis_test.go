@@ -47,10 +47,10 @@ func TestRedisCartRoundTrip(t *testing.T) {
 
 	service := cart.NewService(redisClient, &integrationProductClient{
 		product: &pbProduct.Product{
-			Id:       101,
-			Name:     "Integration Keyboard",
-			Price:    299,
-			ImageUrl: "https://example.com/keyboard.png",
+			Id:         101,
+			Name:       "Integration Keyboard",
+			PriceCents: 29900,
+			ImageUrl:   "https://example.com/keyboard.png",
 		},
 	})
 
@@ -75,7 +75,7 @@ func TestRedisCartRoundTrip(t *testing.T) {
 	if got, want := resp.Items[0].Quantity, int32(2); got != want {
 		t.Fatalf("unexpected quantity: got %d want %d", got, want)
 	}
-	if got, want := resp.TotalAmount, float32(598); got != want {
-		t.Fatalf("unexpected total amount: got %.2f want %.2f", got, want)
+	if got, want := resp.TotalAmountCents, int64(59800); got != want {
+		t.Fatalf("unexpected total AmountCents: got %d want %d", got, want)
 	}
 }

@@ -9,7 +9,7 @@ message Payment {
   string payment_no = 2;
   int64 order_id = 3;
   int64 user_id = 4;
-  float amount = 5;
+  int64 amount_cents = 5;
   string status = 6;
   string payment_method = 7;
   string created_at = 8;

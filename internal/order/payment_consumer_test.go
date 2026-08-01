@@ -37,10 +37,10 @@ func (f *fakeAcknowledger) Reject(uint64, bool) error {
 func TestPaymentSucceededConsumerMarksOrderPaid(t *testing.T) {
 	_, db := newTestService(t)
 	order := Order{
-		UserID:      1,
-		TotalAmount: 99,
-		Status:      OrderStatusPending,
-		OrderDate:   time.Now(),
+		UserID:           1,
+		TotalAmountCents: 9900,
+		Status:           OrderStatusPending,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)
@@ -52,9 +52,9 @@ func TestPaymentSucceededConsumerMarksOrderPaid(t *testing.T) {
 			EventType:  events.PaymentSucceededType,
 			OccurredAt: time.Now().UTC().Format(time.RFC3339Nano),
 		},
-		OrderID: int64(order.ID),
-		UserID:  1,
-		Amount:  99,
+		OrderID:     int64(order.ID),
+		UserID:      1,
+		AmountCents: 9900,
 	})
 	if err != nil {
 		t.Fatalf("failed to marshal event: %v", err)
@@ -94,10 +94,10 @@ func TestPaymentSucceededConsumerMarksOrderPaid(t *testing.T) {
 func TestPaymentSucceededConsumerSkipsDuplicateEventAndAcks(t *testing.T) {
 	_, db := newTestService(t)
 	order := Order{
-		UserID:      1,
-		TotalAmount: 99,
-		Status:      OrderStatusPending,
-		OrderDate:   time.Now(),
+		UserID:           1,
+		TotalAmountCents: 9900,
+		Status:           OrderStatusPending,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)
@@ -109,9 +109,9 @@ func TestPaymentSucceededConsumerSkipsDuplicateEventAndAcks(t *testing.T) {
 			EventType:  events.PaymentSucceededType,
 			OccurredAt: time.Now().UTC().Format(time.RFC3339Nano),
 		},
-		OrderID: int64(order.ID),
-		UserID:  1,
-		Amount:  99,
+		OrderID:     int64(order.ID),
+		UserID:      1,
+		AmountCents: 9900,
 	})
 	if err != nil {
 		t.Fatalf("failed to marshal event: %v", err)
@@ -163,10 +163,10 @@ func TestPaymentSucceededConsumerNacksMissingEventIDWithoutRequeue(t *testing.T)
 	consumer := NewPaymentSucceededConsumer(nil, nil, nil)
 	ack := &fakeAcknowledger{}
 	body, err := json.Marshal(events.PaymentSucceededEvent{
-		BaseEvent: events.BaseEvent{EventType: events.PaymentSucceededType},
-		OrderID:   1,
-		UserID:    1,
-		Amount:    99,
+		BaseEvent:   events.BaseEvent{EventType: events.PaymentSucceededType},
+		OrderID:     1,
+		UserID:      1,
+		AmountCents: 9900,
 	})
 	if err != nil {
 		t.Fatalf("failed to marshal event: %v", err)
@@ -193,9 +193,9 @@ func TestPaymentSucceededConsumerNacksTemporaryDatabaseErrorWithRequeue(t *testi
 			EventType:  events.PaymentSucceededType,
 			OccurredAt: time.Now().UTC().Format(time.RFC3339Nano),
 		},
-		OrderID: 1,
-		UserID:  1,
-		Amount:  99,
+		OrderID:     1,
+		UserID:      1,
+		AmountCents: 9900,
 	})
 	if err != nil {
 		t.Fatalf("failed to marshal event: %v", err)
@@ -216,10 +216,10 @@ func TestPaymentSucceededConsumerNacksTemporaryDatabaseErrorWithRequeue(t *testi
 func TestMarkOrderPaidRejectsCancelledOrder(t *testing.T) {
 	_, db := newTestService(t)
 	order := Order{
-		UserID:      1,
-		TotalAmount: 99,
-		Status:      OrderStatusCancelled,
-		OrderDate:   time.Now(),
+		UserID:           1,
+		TotalAmountCents: 9900,
+		Status:           OrderStatusCancelled,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)

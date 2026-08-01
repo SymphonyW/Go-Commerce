@@ -4,7 +4,7 @@ import ErrorState from '../components/ErrorState';
 import LoadingState from '../components/LoadingState';
 import StatusBadge from '../components/StatusBadge';
 import { cartAPI, getAPIErrorMessage, orderAPI, productAPI } from '../services/api';
-import { formatCurrency, getProductImageUrl, getStockMeta } from '../utils/display';
+import { formatMoney, getProductImageUrl, getStockMeta } from '../utils/display';
 
 const ProductDetail = () => {
   const { id } = useParams();
@@ -111,7 +111,7 @@ const ProductDetail = () => {
           </div>
 
           <h1>{product.name}</h1>
-          <p className="product-detail-price">{formatCurrency(product.price)}</p>
+          <p className="product-detail-price">{formatMoney(product.price_cents)}</p>
 
           <div className="product-detail-description">
             <h3>商品描述</h3>

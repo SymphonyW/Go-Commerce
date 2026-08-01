@@ -7,7 +7,7 @@ option go_package = "go-commerce/api/cart";
 message CartItem {
   int64 product_id = 1;
   string product_name = 2;
-  float price = 3;
+  int64 price_cents = 3;
   int32 quantity = 4;
   string image_url = 5;
 }
@@ -28,7 +28,7 @@ message GetCartRequest {
 
 message GetCartResponse {
   repeated CartItem items = 1;
-  float total_amount = 2;
+  int64 total_amount_cents = 2;
 }
 
 message UpdateCartItemRequest {

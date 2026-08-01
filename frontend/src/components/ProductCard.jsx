@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { formatCurrency, getProductImageUrl, getStockMeta } from '../utils/display';
+import { formatMoney, getProductImageUrl, getStockMeta } from '../utils/display';
 
 const ProductCard = ({ product }) => {
   const stock = getStockMeta(product.stock);
@@ -15,7 +15,7 @@ const ProductCard = ({ product }) => {
           <span className={`stock-chip tone-${stock.tone}`}>{stock.label}</span>
         </div>
         <h3>{product.name}</h3>
-        <p className="product-price">{formatCurrency(product.price)}</p>
+        <p className="product-price">{formatMoney(product.price_cents)}</p>
         <Link to={`/products/${product.id}`} className="btn btn-secondary btn-sm">
           查看详情
         </Link>

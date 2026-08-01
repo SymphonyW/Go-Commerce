@@ -37,20 +37,20 @@ func (e BaseEvent) GetEventID() string {
 
 // OrderItemSnapshot 表示下单瞬间的商品快照。
 type OrderItemSnapshot struct {
-	ProductID   int64   `json:"product_id"`
-	MerchantID  int64   `json:"merchant_id"`
-	ProductName string  `json:"product_name"`
-	Price       float64 `json:"price"`
-	Quantity    int32   `json:"quantity"`
+	ProductID   int64  `json:"product_id"`
+	MerchantID  int64  `json:"merchant_id"`
+	ProductName string `json:"product_name"`
+	PriceCents  int64  `json:"price_cents"`
+	Quantity    int32  `json:"quantity"`
 }
 
 // OrderCreatedEvent 表示订单创建成功后的领域事件。
 type OrderCreatedEvent struct {
 	BaseEvent
-	OrderID     int64               `json:"order_id"`
-	UserID      int64               `json:"user_id"`
-	TotalAmount float64             `json:"total_amount"`
-	Items       []OrderItemSnapshot `json:"items,omitempty"`
+	OrderID          int64               `json:"order_id"`
+	UserID           int64               `json:"user_id"`
+	TotalAmountCents int64               `json:"total_amount_cents"`
+	Items            []OrderItemSnapshot `json:"items,omitempty"`
 }
 
 // OrderCancelledEvent 表示订单取消成功后的领域事件。
@@ -91,11 +91,11 @@ type OrderStatusChangedEvent struct {
 // PaymentSucceededEvent 表示一次支付已经成功完成。
 type PaymentSucceededEvent struct {
 	BaseEvent
-	PaymentID int64   `json:"payment_id"`
-	PaymentNo string  `json:"payment_no"`
-	OrderID   int64   `json:"order_id"`
-	UserID    int64   `json:"user_id"`
-	Amount    float64 `json:"amount"`
+	PaymentID   int64  `json:"payment_id"`
+	PaymentNo   string `json:"payment_no"`
+	OrderID     int64  `json:"order_id"`
+	UserID      int64  `json:"user_id"`
+	AmountCents int64  `json:"amount_cents"`
 }
 
 // NewBaseEvent 统一生成事件元数据，时间使用 UTC RFC3339Nano。

@@ -56,7 +56,7 @@ Idempotency-Key: order-20260517-0001
 
 | 场景 | 参数 |
 | --- | --- |
-| 商品列表 | `page`、`page_size`、`category`、`keyword`、`sort_by`、`order`、`min_price`、`max_price` |
+| 商品列表 | `page`、`page_size`、`category`、`keyword`、`sort_by`、`order`、`min_price_cents`、`max_price_cents` |
 | 商家控制台商品 | `page`、`page_size`、`merchant_id`（仅 `admin` 需要） |
 | 商家控制台订单 | `page`、`page_size`、`merchant_id`（`admin` 可选） |
 
@@ -64,6 +64,12 @@ Idempotency-Key: order-20260517-0001
 
 - `GET /api/merchants` 在网关层固定返回第 `1` 页、每页 `10` 条，尚未暴露查询参数。
 - `GET /api/orders` 在网关层没有传分页参数，因此当前等价于返回第 `1` 页、每页 `10` 条。
+
+### 1.5 金额字段
+
+所有交易金额都使用整数分，字段名统一为 `price_cents`、`total_amount_cents`、`amount_cents`。请求创建订单时仍然只提交 `product_id + quantity`，后端读取商品真实价格并重新计算总金额；客户端不得提交订单总价。
+
+后端不使用二进制浮点数保存、累计或比较金额。很多十进制小数无法被 `float32/float64` 精确表示，多商品累计和支付金额比较容易产生误差。
 
 ## 2. 接口总览
 
@@ -175,15 +181,15 @@ Idempotency-Key: order-20260517-0001
 | `page_size` | int | `10` | 每页条数，最大 `100` |
 | `category` | string | - | 精确分类筛选 |
 | `keyword` | string | - | 模糊匹配商品名或描述 |
-| `sort_by` | string | `created_at` | 可选 `created_at / price / stock` |
+| `sort_by` | string | `created_at` | 可选 `created_at / price_cents / stock` |
 | `order` | string | `desc` | 可选 `asc / desc` |
-| `min_price` | number | - | 最低价 |
-| `max_price` | number | - | 最高价 |
+| `min_price_cents` | int64 | - | 最低价，单位分 |
+| `max_price_cents` | int64 | - | 最高价，单位分 |
 
 示例：
 
 ```bash
-curl "http://localhost:8080/api/products?page=2&page_size=20&category=book&keyword=Go&sort_by=price&order=asc&min_price=50&max_price=120"
+curl "http://localhost:8080/api/products?page=2&page_size=20&category=book&keyword=Go&sort_by=price_cents&order=asc&min_price_cents=5000&max_price_cents=12000"
 ```
 
 响应：
@@ -195,7 +201,7 @@ curl "http://localhost:8080/api/products?page=2&page_size=20&category=book&keywo
       "id": 1,
       "name": "Go in Action",
       "description": "book",
-      "price": 88.8,
+      "price_cents": 8880,
       "stock": 20,
       "category": "book",
       "image_url": "https://example.com/book.png",
@@ -210,7 +216,7 @@ curl "http://localhost:8080/api/products?page=2&page_size=20&category=book&keywo
 
 | 状态码 | 场景 |
 | --- | --- |
-| `400` | `min_price > max_price` |
+| `400` | `min_price_cents > max_price_cents` |
 | `500` | 服务内部错误 |
 
 ### 4.2 商品详情
@@ -226,7 +232,7 @@ curl "http://localhost:8080/api/products?page=2&page_size=20&category=book&keywo
     "id": 1,
     "name": "Go in Action",
     "description": "book",
-    "price": 88.8,
+    "price_cents": 8880,
     "stock": 20,
     "category": "book",
     "image_url": "https://example.com/book.png",
@@ -295,7 +301,7 @@ curl "http://localhost:8080/api/products?page=2&page_size=20&category=book&keywo
   "merchant_id": 1,
   "name": "Demo Product",
   "description": "desc",
-  "price": 99.9,
+  "price_cents": 9990,
   "stock": 10,
   "category": "book",
   "image_url": "https://example.com/product.png"
@@ -351,7 +357,7 @@ curl "http://localhost:8080/api/products?page=2&page_size=20&category=book&keywo
 {
   "name": "Demo Product",
   "description": "desc",
-  "price": 99.9,
+  "price_cents": 9990,
   "stock": 10,
   "category": "book",
   "image_url": "https://example.com/product.png"
@@ -368,7 +374,7 @@ curl "http://localhost:8080/api/products?page=2&page_size=20&category=book&keywo
 
 ```json
 {
-  "price": 88.8,
+  "price_cents": 8880,
   "stock": 20
 }
 ```
@@ -428,11 +434,11 @@ curl "http://localhost:8080/api/products?page=2&page_size=20&category=book&keywo
       {
         "product_id": 1,
         "product_name": "Demo Product",
-        "price": 99.9,
+        "price_cents": 9990,
         "quantity": 2
       }
     ],
-    "total_amount": 199.8,
+    "total_amount_cents": 19980,
     "status": "pending",
     "created_at": "2026-05-17T08:00:00Z",
     "cancel_reason": ""
@@ -537,7 +543,7 @@ curl "http://localhost:8080/api/products?page=2&page_size=20&category=book&keywo
     "payment_no": "pay-0123456789abcdef",
     "order_id": 1,
     "user_id": 8,
-    "amount": 199.8,
+    "amount_cents": 19980,
     "status": "created",
     "payment_method": "mock_balance",
     "created_at": "2026-05-17T08:00:00Z",
@@ -614,12 +620,12 @@ curl "http://localhost:8080/api/products?page=2&page_size=20&category=book&keywo
     {
       "product_id": 1,
       "product_name": "Demo Product",
-      "price": 99.9,
+      "price_cents": 9990,
       "quantity": 1,
       "image_url": "https://example.com/product.png"
     }
   ],
-  "total_amount": 99.9
+  "total_amount_cents": 9990
 }
 ```
 

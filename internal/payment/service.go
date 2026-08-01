@@ -104,7 +104,7 @@ func (s *Service) CreatePayment(ctx context.Context, userID, orderID int64, meth
 			OrderID:       order.ID,
 			ActiveOrderID: &activeOrderID,
 			UserID:        uint(userID),
-			Amount:        order.TotalAmount,
+			AmountCents:   order.TotalAmountCents,
 			Status:        PaymentStatusCreated,
 			PaymentMethod: method,
 		}
@@ -146,7 +146,7 @@ func (s *Service) SucceedPayment(ctx context.Context, userID, paymentID uint) (*
 		if err != nil {
 			return err
 		}
-		if order.Status != orderdomain.OrderStatusPending || order.TotalAmount != payment.Amount {
+		if order.Status != orderdomain.OrderStatusPending || order.TotalAmountCents != payment.AmountCents {
 			return ErrOrderNotPayable
 		}
 
@@ -160,12 +160,12 @@ func (s *Service) SucceedPayment(ctx context.Context, userID, paymentID uint) (*
 			return err
 		}
 		event := events.PaymentSucceededEvent{
-			BaseEvent: events.NewBaseEvent(events.PaymentSucceededType, time.Now()),
-			PaymentID: int64(payment.ID),
-			PaymentNo: payment.PaymentNo,
-			OrderID:   int64(payment.OrderID),
-			UserID:    int64(payment.UserID),
-			Amount:    payment.Amount,
+			BaseEvent:   events.NewBaseEvent(events.PaymentSucceededType, time.Now()),
+			PaymentID:   int64(payment.ID),
+			PaymentNo:   payment.PaymentNo,
+			OrderID:     int64(payment.OrderID),
+			UserID:      int64(payment.UserID),
+			AmountCents: payment.AmountCents,
 		}
 		_, err = s.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
 			AggregateType: "payment",

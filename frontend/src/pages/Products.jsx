@@ -11,7 +11,7 @@ import { productAPI } from '../services/api';
 const DEFAULT_PAGE = 1;
 const DEFAULT_PAGE_SIZE = 10;
 const DEFAULT_SORT = 'created_at:desc';
-const SORT_VALUES = ['created_at:desc', 'price:asc', 'price:desc', 'stock:asc', 'stock:desc'];
+const SORT_VALUES = ['created_at:desc', 'price_cents:asc', 'price_cents:desc', 'stock:asc', 'stock:desc'];
 
 const readPositiveInt = (value, fallback) => {
   const parsed = Number.parseInt(value || '', 10);
@@ -147,8 +147,8 @@ const Products = () => {
           />
           <select value={sortValue} onChange={handleSortChange} aria-label="商品排序">
             <option value="created_at:desc">最新上架</option>
-            <option value="price:asc">价格从低到高</option>
-            <option value="price:desc">价格从高到低</option>
+            <option value="price_cents:asc">价格从低到高</option>
+            <option value="price_cents:desc">价格从高到低</option>
             <option value="stock:desc">库存从高到低</option>
             <option value="stock:asc">库存从低到高</option>
           </select>

@@ -20,8 +20,8 @@ type Payment struct {
 	PaymentNo     string `gorm:"size:64;not null;unique"`
 	OrderID       uint   `gorm:"not null;index"`
 	ActiveOrderID *uint
-	UserID        uint    `gorm:"not null;index"`
-	Amount        float64 `gorm:"not null"`
-	Status        string  `gorm:"not null;default:'created';index"`
-	PaymentMethod string  `gorm:"not null"`
+	UserID        uint   `gorm:"not null;index"`
+	AmountCents   int64  `gorm:"not null"`
+	Status        string `gorm:"not null;default:'created';index"`
+	PaymentMethod string `gorm:"not null"`
 }

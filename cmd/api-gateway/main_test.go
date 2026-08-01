@@ -41,11 +41,11 @@ func (f *fakeOrderClient) CreateOrder(ctx context.Context, in *pbOrder.CreateOrd
 				{
 					ProductId:   in.Items[0].ProductId,
 					ProductName: "真实商品",
-					Price:       99,
+					PriceCents:  9900,
 					Quantity:    in.Items[0].Quantity,
 				},
 			},
-			TotalAmount: 99,
+			TotalAmountCents: 9900,
 		},
 	}, nil
 }
@@ -99,7 +99,7 @@ func TestHandleCreateOrderIgnoresForgedClientFields(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/api/orders",
-		strings.NewReader(`{"items":[{"product_id":1,"product_name":"伪造商品","price":0.01,"quantity":2}]}`),
+		strings.NewReader(`{"items":[{"product_id":1,"product_name":"伪造商品","price_cents":1,"quantity":2}]}`),
 	)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", "order-key")
@@ -468,7 +468,7 @@ func TestHandleListProductsForwardsQueryParameters(t *testing.T) {
 
 	req := httptest.NewRequest(
 		http.MethodGet,
-		"/api/products?page=2&page_size=25&category=book&keyword=Go&sort_by=price&order=asc&min_price=10.5&max_price=99.9",
+		"/api/products?page=2&page_size=25&category=book&keyword=Go&sort_by=price&order=asc&min_price_cents=1050&max_price_cents=9990",
 		nil,
 	)
 	resp := httptest.NewRecorder()
@@ -492,17 +492,17 @@ func TestHandleListProductsForwardsQueryParameters(t *testing.T) {
 	if got, want := client.lastListProductsReq.Keyword, "Go"; got != want {
 		t.Fatalf("unexpected keyword: got %q want %q", got, want)
 	}
-	if got, want := client.lastListProductsReq.SortBy, "price"; got != want {
+	if got, want := client.lastListProductsReq.SortBy, "price_cents"; got != want {
 		t.Fatalf("unexpected sort_by: got %q want %q", got, want)
 	}
 	if got, want := client.lastListProductsReq.Order, "asc"; got != want {
 		t.Fatalf("unexpected order: got %q want %q", got, want)
 	}
-	if client.lastListProductsReq.MinPrice == nil || *client.lastListProductsReq.MinPrice != float32(10.5) {
-		t.Fatalf("unexpected min_price: got %v want 10.5", client.lastListProductsReq.MinPrice)
+	if client.lastListProductsReq.MinPriceCents == nil || *client.lastListProductsReq.MinPriceCents != int64(1050) {
+		t.Fatalf("unexpected min_price_cents: got %v want 1050", client.lastListProductsReq.MinPriceCents)
 	}
-	if client.lastListProductsReq.MaxPrice == nil || *client.lastListProductsReq.MaxPrice != float32(99.9) {
-		t.Fatalf("unexpected max_price: got %v want 99.9", client.lastListProductsReq.MaxPrice)
+	if client.lastListProductsReq.MaxPriceCents == nil || *client.lastListProductsReq.MaxPriceCents != int64(9990) {
+		t.Fatalf("unexpected max_price_cents: got %v want 9990", client.lastListProductsReq.MaxPriceCents)
 	}
 }
 
@@ -568,7 +568,7 @@ func TestHandleListProductsRejectsInvalidPriceRange(t *testing.T) {
 	router := gin.New()
 	router.GET("/api/products", gateway.ListProducts)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/products?min_price=100&max_price=10", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/products?min_price_cents=10000&max_price_cents=1000", nil)
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 

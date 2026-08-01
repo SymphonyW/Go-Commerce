@@ -68,7 +68,7 @@ flowchart LR
 
 | 亮点 | 当前实现 |
 | --- | --- |
-| 后端定价 | 创建订单只接收 `product_id + quantity`，订单服务基于真实商品数据计算总价并保存商品快照。 |
+| 后端定价 | 创建订单只接收 `product_id + quantity`，订单服务基于真实商品 `price_cents` 用整数分计算总价并保存商品快照。 |
 | 防超卖库存扣减 | 使用 `UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?` 做数据库条件更新。 |
 | 订单状态机 | 统一约束 `pending -> paid -> shipped -> completed` 与 `pending -> cancelled`，避免非法跳转。 |
 | 订单列表性能 | 用户订单和商家订单列表批量加载订单项，避免随订单数量增长的 N+1 查询。 |
@@ -274,6 +274,8 @@ go run ./cmd/api-gateway
 
 手动启动时，程序直接读取系统环境变量；仓库没有内置 `.env` 自动加载器。完整参考配置见 [.env.example](.env.example)。使用 Docker Compose 启动时，默认环境变量已在 [docker-compose.yml](docker-compose.yml) 中配置。API Gateway 的 CORS 默认只允许 `http://localhost:5173`，可通过 `CORS_ALLOWED_ORIGINS` 配置逗号分隔的允许 Origin。
 
+金额字段统一使用 `int64` 分，REST / gRPC / 数据库字段为 `price_cents`、`total_amount_cents`、`amount_cents`。二进制浮点数不能精确表示很多十进制小数，容易在 `0.1 + 0.2`、多商品累计和支付金额比较时产生误差；因此后端所有金额计算、比较和持久化都只使用整数分。当前演示项目不保留旧本地浮点金额数据，升级后建议重建数据库；如需迁移历史数据，规则为 `ROUND(old_amount * 100)` 写入对应 `*_cents` 字段。
+
 Outbox worker 支持多实例并行运行。每个 worker 会在短事务中 claim due 事件并写入 `processing / locked_by / locked_at / lease_expires_at`，事务提交后再发布 RabbitMQ；`MarkPublished` 与 `MarkRetry` 只允许当前 lease owner 更新。`OUTBOX_WORKER_ID` 未配置时使用 `hostname + UUID` 自动生成，`OUTBOX_LEASE_DURATION` 控制 worker 崩溃后的可恢复窗口。即使有 claim/lease，整体消息语义仍是 at-least-once delivery，下游消费者仍需保持幂等。
 
 Outbox worker 的 `/readyz` 会暴露 `outbox_worker_polling` 依赖状态，`/metrics` 暴露 `go_commerce_outbox_claimed_total`、`go_commerce_outbox_published_total`、`go_commerce_outbox_retry_total`、`go_commerce_outbox_failed_total` 和 `go_commerce_outbox_lease_recovered_total`。
@@ -311,7 +313,7 @@ curl -X POST http://localhost:8080/api/login \
 ### 查询商品
 
 ```bash
-curl "http://localhost:8080/api/products?page=1&page_size=10&keyword=Go&sort_by=price&order=asc"
+curl "http://localhost:8080/api/products?page=1&page_size=10&keyword=Go&sort_by=price_cents&order=asc"
 ```
 
 ### 创建订单

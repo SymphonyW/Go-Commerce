@@ -157,7 +157,7 @@ func (s *Service) ListProductsForUser(actorUserID uint, requestedMerchantID *uin
 type ProductUpdate struct {
 	Name        *string
 	Description *string
-	Price       *float32
+	PriceCents  *int64
 	Stock       *int32
 	Category    *string
 	ImageURL    *string
@@ -186,8 +186,8 @@ func (s *Service) UpdateProductForUser(actorUserID uint, requestedMerchantID *ui
 	if update.Description != nil {
 		updates["description"] = *update.Description
 	}
-	if update.Price != nil {
-		updates["price"] = float64(*update.Price)
+	if update.PriceCents != nil {
+		updates["price_cents"] = *update.PriceCents
 	}
 	if update.Stock != nil {
 		updates["stock"] = *update.Stock

@@ -179,7 +179,7 @@ func (c *apiClient) addProduct(t *testing.T, token string, merchantID int64, nam
 		"merchant_id": merchantID,
 		"name":        name,
 		"description": "e2e product",
-		"price":       99.9,
+		"price_cents": 9990,
 		"stock":       5,
 		"category":    "e2e",
 		"image_url":   "https://example.com/e2e.png",
