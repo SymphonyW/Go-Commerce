@@ -347,6 +347,12 @@ curl -X POST http://localhost:8080/api/payments/1/success \
 make test
 make test-integration
 make test-e2e
+
+cd frontend
+npm ci
+npm run lint
+npm run test
+npm run build
 ```
 
 | 命令 | 当前行为 |
@@ -354,6 +360,10 @@ make test-e2e
 | `make test` | 执行 `go test ./...`。 |
 | `make test-integration` | 启动 MySQL、Redis、RabbitMQ，然后执行 `go test ./... -tags=integration`。 |
 | `make test-e2e` | `docker compose up -d --build` 启动完整后端栈，然后执行 `go test ./tests/e2e -tags=e2e -v`。 |
+| `npm run lint` | 在 `frontend/` 内执行 ESLint，覆盖 React、React Hooks 和 JavaScript/TypeScript 代码。 |
+| `npm run test` | 在 `frontend/` 内执行 `node:test` 前端单元测试。 |
+| `npm run build` | 在 `frontend/` 内执行 `tsc && vite build`。 |
+| `npm run test:coverage` | 在 `frontend/` 内执行 Node.js 测试覆盖率报告。 |
 
 | 测试层级 | 覆盖内容 |
 | --- | --- |
@@ -368,11 +378,12 @@ make test-e2e
 | Job | 内容 |
 | --- | --- |
 | `backend-check` | `go mod download`、`gofmt` 检查、`go vet`、带 coverage profile 的 `go test ./...`、`go build ./...`、`golangci-lint`。 |
-| `frontend-check` | Node.js 22、`npm ci`、存在 lint 脚本时执行 lint、`npm run build`。 |
+| `frontend-check` | Node.js 22、`npm ci`、`npm run lint`、`npm run test`、`npm run build`。 |
 | `docker-build` | 分别构建主要后端服务镜像。 |
 | `integration-test` | 启动 MySQL、Redis、RabbitMQ，执行 `go test -tags=integration -v ./...`。 |
+| `Checkout E2E` | 依赖 `backend-check`、`frontend-check` 和 `docker-build`；启动完整 Docker Compose 栈、执行 `go run ./cmd/seed-data`，再运行 `go test -tags=e2e -v ./tests/e2e`。 |
 
-E2E 测试已提供为本地命令，但尚未纳入默认 GitHub Actions 工作流。
+PR 合并前建议在分支保护中要求 `Backend check`、`Frontend check`、`Docker build (...)`、`Integration test` 和 `Checkout E2E` 均通过。`Checkout E2E` 失败时 CI 会保留 Docker Compose 状态、主要服务日志、MySQL 与 RabbitMQ 健康状态，便于定位交易主链路回归。
 
 ## 监控与运维
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import EmptyState from '../components/EmptyState';
 import LoadingState from '../components/LoadingState';
@@ -50,12 +50,7 @@ const MerchantProducts = () => {
     [explicitMerchantId],
   );
 
-  useEffect(() => {
-    loadProducts(page);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, explicitMerchantId]);
-
-  const loadProducts = async (targetPage = page) => {
+  const loadProducts = useCallback(async (targetPage = page) => {
     try {
       setLoading(true);
       setError('');
@@ -71,7 +66,11 @@ const MerchantProducts = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [page, params]);
+
+  useEffect(() => {
+    loadProducts(page);
+  }, [loadProducts, page]);
 
   const handleChange = (event) => {
     const { name, value } = event.target;

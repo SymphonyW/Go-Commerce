@@ -10,6 +10,25 @@ beforeEach(() => {
   };
 });
 
+test('auth token is injected into requests', async () => {
+  let capturedConfig;
+  api.defaults.adapter = async (config) => {
+    capturedConfig = config;
+    return {
+      data: { orders: [] },
+      status: 200,
+      statusText: 'OK',
+      headers: {},
+      config,
+    };
+  };
+
+  await orderAPI.listOrders();
+
+  assert.equal(capturedConfig.url, '/orders');
+  assert.equal(capturedConfig.headers.get('Authorization'), 'Bearer test-token');
+});
+
 test('createOrder sends an idempotency key header', async () => {
   let capturedConfig;
   api.defaults.adapter = async (config) => {
@@ -96,4 +115,17 @@ test('getAPIErrorMessage prefers backend error payloads', () => {
     'order not payable',
   );
   assert.equal(getAPIErrorMessage(new Error('network'), 'fallback'), 'fallback');
+});
+
+test('api base URL is read from the environment', async () => {
+  process.env.VITE_API_BASE_URL = 'http://example.test/api';
+  try {
+    const moduleURL = new URL('./api.js', import.meta.url);
+    moduleURL.searchParams.set('cache_bust', Date.now().toString());
+    const { default: isolatedAPI } = await import(moduleURL.href);
+
+    assert.equal(isolatedAPI.defaults.baseURL, 'http://example.test/api');
+  } finally {
+    delete process.env.VITE_API_BASE_URL;
+  }
 });

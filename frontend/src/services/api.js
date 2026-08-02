@@ -2,7 +2,21 @@
 import axios from 'axios';
 
 // API基础URL
-const API_BASE_URL = 'http://localhost:8080/api';
+export const readAPIBaseURL = () => {
+  const viteBaseURL = import.meta.env?.VITE_API_BASE_URL;
+  if (typeof viteBaseURL === 'string' && viteBaseURL.trim()) {
+    return viteBaseURL.trim();
+  }
+
+  const nodeBaseURL = globalThis.process?.env?.VITE_API_BASE_URL;
+  if (typeof nodeBaseURL === 'string' && nodeBaseURL.trim()) {
+    return nodeBaseURL.trim();
+  }
+
+  return 'http://localhost:8080/api';
+};
+
+export const API_BASE_URL = readAPIBaseURL();
 
 // 创建axios实例
 const api = axios.create({

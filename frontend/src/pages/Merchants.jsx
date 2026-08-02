@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { merchantAPI, productAPI } from '../services/api';
 import { formatMoney, parseMoneyToCents } from '../utils/display';
 
@@ -35,13 +35,8 @@ const Merchants = () => {
   const [error, setError] = useState(null);
 
   // 加载商户列表
-  useEffect(() => {
-    fetchMerchants();
-    fetchProducts();
-  }, []);
-
   // 获取商户列表
-  const fetchMerchants = async () => {
+  const fetchMerchants = useCallback(async () => {
     try {
       setLoading(true);
       const data = await merchantAPI.listMerchants();
@@ -52,17 +47,22 @@ const Merchants = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   // 获取产品列表
-  const fetchProducts = async () => {
+  const fetchProducts = useCallback(async () => {
     try {
       const data = await productAPI.listProducts();
       setProducts(data.products || []);
     } catch (err) {
       console.error('Error fetching products:', err);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchMerchants();
+    fetchProducts();
+  }, [fetchMerchants, fetchProducts]);
 
   // 创建商户
   const handleCreateMerchant = async (e) => {
