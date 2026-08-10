@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"os"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -21,10 +19,15 @@ func main() {
 	ctx, stop := serviceutil.SignalContext()
 	defer stop()
 
-	logger := observability.NewLogger("api-gateway")
-	slog.SetDefault(logger)
-	registry := prometheus.NewRegistry()
-	metrics := observability.NewMetrics("api-gateway", registry)
+	telemetry := observability.SetupService(ctx, "api-gateway")
+	logger := telemetry.Logger
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetry.Shutdown(shutdownCtx); err != nil {
+			logger.Error("otel_shutdown_failed", "error", err)
+		}
+	}()
 
 	grpcTimeout := serviceutil.DurationEnv("GATEWAY_GRPC_TIMEOUT", 3*time.Second)
 	clients, conns, err := gateway.DialClients(
@@ -52,8 +55,8 @@ func main() {
 		HTTPAddr:           serviceutil.Env("HTTP_ADDR", ":8080"),
 		Clients:            clients,
 		Logger:             logger,
-		Registry:           registry,
-		Metrics:            metrics,
+		Registry:           telemetry.Registry,
+		Metrics:            telemetry.Metrics,
 		CORSAllowedOrigins: middleware.ParseAllowedOrigins(serviceutil.Env("CORS_ALLOWED_ORIGINS", "")),
 		HealthDependencies: conns.HealthDependencies(),
 	})

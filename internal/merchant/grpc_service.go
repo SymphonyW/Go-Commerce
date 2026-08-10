@@ -157,12 +157,12 @@ func (s *GRPCService) ListMerchants(ctx context.Context, req *pb.ListMerchantsRe
 //	error: 错误信息
 func (s *GRPCService) AddProduct(ctx context.Context, req *pb.AddProductRequest) (*pb.AddProductResponse, error) {
 	productID, err := s.core.AddProductForUser(uint(req.ActorUserId), uint(req.MerchantId), product.Product{
-		Name:        req.Name,           // 商品名称
-		Description: req.Description,    // 商品描述
-		Price:       float64(req.Price), // 商品价格
-		Stock:       req.Stock,          // 商品库存
-		Category:    req.Category,       // 商品分类
-		ImageURL:    req.ImageUrl,       // 商品图片URL
+		Name:        req.Name,        // 商品名称
+		Description: req.Description, // 商品描述
+		PriceCents:  req.PriceCents,  // 商品价格
+		Stock:       req.Stock,       // 商品库存
+		Category:    req.Category,    // 商品分类
+		ImageURL:    req.ImageUrl,    // 商品图片URL
 	})
 	if err != nil {
 		return nil, merchantStatusError(err, "failed to create product")
@@ -232,7 +232,7 @@ func (s *GRPCService) UpdateMerchantProduct(ctx context.Context, req *pb.UpdateM
 		ProductUpdate{
 			Name:        req.Name,
 			Description: req.Description,
-			Price:       req.Price,
+			PriceCents:  req.PriceCents,
 			Stock:       req.Stock,
 			Category:    req.Category,
 			ImageURL:    req.ImageUrl,
@@ -266,7 +266,7 @@ func convertToPBMerchantProduct(productInfo *product.Product) *pb.MerchantProduc
 		Id:          int64(productInfo.ID),
 		Name:        productInfo.Name,
 		Description: productInfo.Description,
-		Price:       float32(productInfo.Price),
+		PriceCents:  productInfo.PriceCents,
 		Stock:       productInfo.Stock,
 		Category:    productInfo.Category,
 		ImageUrl:    productInfo.ImageURL,

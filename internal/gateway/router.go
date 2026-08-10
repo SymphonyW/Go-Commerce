@@ -34,6 +34,7 @@ func NewRouter(config RouterConfig) *gin.Engine {
 	r.Use(
 		gin.Recovery(),
 		middleware.RequestContext(),
+		middleware.Tracing("api-gateway"),
 		middleware.CORS(config.CORSAllowedOrigins),
 		middleware.Metrics(config.Metrics),
 		middleware.Logging(config.Logger),

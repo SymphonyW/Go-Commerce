@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import EmptyState from '../components/EmptyState';
 import LoadingState from '../components/LoadingState';
@@ -6,7 +6,7 @@ import MerchantConsoleNav from '../components/MerchantConsoleNav';
 import PageHeader from '../components/PageHeader';
 import SectionCard from '../components/SectionCard';
 import { merchantAPI } from '../services/api';
-import { formatCurrency } from '../utils/display';
+import { centsToInputValue, formatMoney, parseMoneyToCents } from '../utils/display';
 
 const emptyForm = {
   name: '',
@@ -50,12 +50,7 @@ const MerchantProducts = () => {
     [explicitMerchantId],
   );
 
-  useEffect(() => {
-    loadProducts(page);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, explicitMerchantId]);
-
-  const loadProducts = async (targetPage = page) => {
+  const loadProducts = useCallback(async (targetPage = page) => {
     try {
       setLoading(true);
       setError('');
@@ -71,7 +66,11 @@ const MerchantProducts = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [page, params]);
+
+  useEffect(() => {
+    loadProducts(page);
+  }, [loadProducts, page]);
 
   const handleChange = (event) => {
     const { name, value } = event.target;
@@ -81,7 +80,7 @@ const MerchantProducts = () => {
   const validateForm = () => {
     if (!formData.name.trim()) return '请输入商品名称';
     if (!formData.category.trim()) return '请输入商品分类';
-    if (formData.price === '' || Number(formData.price) < 0) return '价格必须大于等于 0';
+    if (parseMoneyToCents(formData.price) === null) return '价格必须是大于等于 0 的金额，最多两位小数';
     if (formData.stock === '' || Number(formData.stock) < 0) return '库存必须大于等于 0';
     return '';
   };
@@ -94,13 +93,13 @@ const MerchantProducts = () => {
       return;
     }
 
+    const priceCents = parseMoneyToCents(formData.price);
     const payload = {
-      ...formData,
       name: formData.name.trim(),
       description: formData.description.trim(),
       category: formData.category.trim(),
       image_url: formData.image_url.trim(),
-      price: Number(formData.price),
+      price_cents: priceCents,
       stock: Number(formData.stock),
     };
 
@@ -130,7 +129,7 @@ const MerchantProducts = () => {
     setFormData({
       name: product.name || '',
       description: product.description || '',
-      price: product.price ?? '',
+      price: centsToInputValue(product.price_cents),
       stock: product.stock ?? '',
       category: product.category || '',
       image_url: product.image_url || '',
@@ -258,7 +257,7 @@ const MerchantProducts = () => {
                       <small>{product.description || '暂无描述'}</small>
                     </span>
                     <span>{product.category}</span>
-                    <span>{formatCurrency(product.price)}</span>
+                    <span>{formatMoney(product.price_cents)}</span>
                     <span>{product.stock}</span>
                     <span className="inline-actions">
                       <button type="button" className="btn btn-secondary btn-sm" onClick={() => startEditing(product)}>

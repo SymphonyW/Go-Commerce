@@ -15,18 +15,18 @@ func seedListProducts(t *testing.T) *Service {
 	db := newStockTestDB(t)
 	baseTime := time.Date(2026, 5, 16, 8, 0, 0, 0, time.UTC)
 	products := []Product{
-		{Name: "Go 入门", Description: "适合新手", Price: 39, Stock: 8, Category: "book", MerchantID: 1, Model: modelAt(baseTime.Add(1 * time.Minute))},
-		{Name: "机械键盘", Description: "适合 Go 开发", Price: 299, Stock: 15, Category: "digital", MerchantID: 1, Model: modelAt(baseTime.Add(2 * time.Minute))},
-		{Name: "咖啡豆", Description: "深烘焙风味", Price: 59, Stock: 30, Category: "food", MerchantID: 1, Model: modelAt(baseTime.Add(3 * time.Minute))},
-		{Name: "Go 高级编程", Description: "覆盖并发与网络", Price: 79, Stock: 6, Category: "book", MerchantID: 1, Model: modelAt(baseTime.Add(4 * time.Minute))},
-		{Name: "鼠标", Description: "轻量无线", Price: 129, Stock: 20, Category: "digital", MerchantID: 1, Model: modelAt(baseTime.Add(5 * time.Minute))},
-		{Name: "显示器", Description: "4K 面板", Price: 1299, Stock: 4, Category: "digital", MerchantID: 1, Model: modelAt(baseTime.Add(6 * time.Minute))},
-		{Name: "算法书", Description: "包含 Go 语言示例", Price: 89, Stock: 9, Category: "book", MerchantID: 1, Model: modelAt(baseTime.Add(7 * time.Minute))},
-		{Name: "茶具", Description: "陶瓷套装", Price: 159, Stock: 12, Category: "home", MerchantID: 1, Model: modelAt(baseTime.Add(8 * time.Minute))},
-		{Name: "保温杯", Description: "304 不锈钢", Price: 69, Stock: 18, Category: "home", MerchantID: 1, Model: modelAt(baseTime.Add(9 * time.Minute))},
-		{Name: "台灯", Description: "护眼阅读灯", Price: 199, Stock: 7, Category: "home", MerchantID: 1, Model: modelAt(baseTime.Add(10 * time.Minute))},
-		{Name: "路由器", Description: "WiFi 6", Price: 349, Stock: 11, Category: "digital", MerchantID: 1, Model: modelAt(baseTime.Add(11 * time.Minute))},
-		{Name: "Go 实战", Description: "项目驱动", Price: 99, Stock: 5, Category: "book", MerchantID: 1, Model: modelAt(baseTime.Add(12 * time.Minute))},
+		{Name: "Go 入门", Description: "适合新手", PriceCents: 3900, Stock: 8, Category: "book", MerchantID: 1, Model: modelAt(baseTime.Add(1 * time.Minute))},
+		{Name: "机械键盘", Description: "适合 Go 开发", PriceCents: 29900, Stock: 15, Category: "digital", MerchantID: 1, Model: modelAt(baseTime.Add(2 * time.Minute))},
+		{Name: "咖啡豆", Description: "深烘焙风味", PriceCents: 5900, Stock: 30, Category: "food", MerchantID: 1, Model: modelAt(baseTime.Add(3 * time.Minute))},
+		{Name: "Go 高级编程", Description: "覆盖并发与网络", PriceCents: 7900, Stock: 6, Category: "book", MerchantID: 1, Model: modelAt(baseTime.Add(4 * time.Minute))},
+		{Name: "鼠标", Description: "轻量无线", PriceCents: 12900, Stock: 20, Category: "digital", MerchantID: 1, Model: modelAt(baseTime.Add(5 * time.Minute))},
+		{Name: "显示器", Description: "4K 面板", PriceCents: 129900, Stock: 4, Category: "digital", MerchantID: 1, Model: modelAt(baseTime.Add(6 * time.Minute))},
+		{Name: "算法书", Description: "包含 Go 语言示例", PriceCents: 8900, Stock: 9, Category: "book", MerchantID: 1, Model: modelAt(baseTime.Add(7 * time.Minute))},
+		{Name: "茶具", Description: "陶瓷套装", PriceCents: 15900, Stock: 12, Category: "home", MerchantID: 1, Model: modelAt(baseTime.Add(8 * time.Minute))},
+		{Name: "保温杯", Description: "304 不锈钢", PriceCents: 6900, Stock: 18, Category: "home", MerchantID: 1, Model: modelAt(baseTime.Add(9 * time.Minute))},
+		{Name: "台灯", Description: "护眼阅读灯", PriceCents: 19900, Stock: 7, Category: "home", MerchantID: 1, Model: modelAt(baseTime.Add(10 * time.Minute))},
+		{Name: "路由器", Description: "WiFi 6", PriceCents: 34900, Stock: 11, Category: "digital", MerchantID: 1, Model: modelAt(baseTime.Add(11 * time.Minute))},
+		{Name: "Go 实战", Description: "项目驱动", PriceCents: 9900, Stock: 5, Category: "book", MerchantID: 1, Model: modelAt(baseTime.Add(12 * time.Minute))},
 	}
 
 	if err := db.Create(&products).Error; err != nil {
@@ -64,7 +64,7 @@ func TestCreateProductPersistsProductSnapshot(t *testing.T) {
 	resp, err := service.CreateProduct(context.Background(), &pb.CreateProductRequest{
 		Name:        "测试商品",
 		Description: "来自 create-product 单测",
-		Price:       88.5,
+		PriceCents:  8850,
 		Stock:       6,
 		Category:    "book",
 		ImageUrl:    "https://example.com/test.png",
@@ -84,8 +84,44 @@ func TestCreateProductPersistsProductSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProduct returned error: %v", err)
 	}
-	if got.Product.Name != "测试商品" || got.Product.Price != float32(88.5) || got.Product.Stock != 6 {
+	if got.Product.Name != "测试商品" || got.Product.PriceCents != 8850 || got.Product.Stock != 6 {
 		t.Fatalf("unexpected persisted product: %+v", got.Product)
+	}
+}
+
+func TestCreateProductAcceptsZeroAndOneCent(t *testing.T) {
+	service := seedListProducts(t)
+
+	for _, priceCents := range []int64{0, 1} {
+		resp, err := service.CreateProduct(context.Background(), &pb.CreateProductRequest{
+			Name:        "edge price",
+			Description: "money edge case",
+			PriceCents:  priceCents,
+			Stock:       1,
+			Category:    "book",
+			MerchantId:  9,
+		})
+		if err != nil {
+			t.Fatalf("CreateProduct(%d) returned error: %v", priceCents, err)
+		}
+		if got := resp.Product.PriceCents; got != priceCents {
+			t.Fatalf("unexpected price_cents: got %d want %d", got, priceCents)
+		}
+	}
+}
+
+func TestCreateProductRejectsNegativePriceCents(t *testing.T) {
+	service := seedListProducts(t)
+
+	_, err := service.CreateProduct(context.Background(), &pb.CreateProductRequest{
+		Name:       "invalid price",
+		PriceCents: -1,
+		Stock:      1,
+		Category:   "book",
+		MerchantId: 9,
+	})
+	if err == nil {
+		t.Fatal("expected negative price_cents to be rejected")
 	}
 }
 
@@ -153,11 +189,11 @@ func TestListProductsSearchesKeywordByDescription(t *testing.T) {
 
 func TestListProductsFiltersByPriceRange(t *testing.T) {
 	service := seedListProducts(t)
-	minPrice, maxPrice := float32(60), float32(100)
+	minPriceCents, maxPriceCents := int64(6000), int64(10000)
 
 	resp, err := service.ListProducts(context.Background(), &pb.ListProductsRequest{
-		MinPrice: &minPrice,
-		MaxPrice: &maxPrice,
+		MinPriceCents: &minPriceCents,
+		MaxPriceCents: &maxPriceCents,
 	})
 	if err != nil {
 		t.Fatalf("ListProducts returned error: %v", err)
@@ -166,8 +202,8 @@ func TestListProductsFiltersByPriceRange(t *testing.T) {
 		t.Fatalf("unexpected total: got %d want %d", got, want)
 	}
 	for _, product := range resp.Products {
-		if product.Price < minPrice || product.Price > maxPrice {
-			t.Fatalf("price out of range: got %.2f want between %.2f and %.2f", product.Price, minPrice, maxPrice)
+		if product.PriceCents < minPriceCents || product.PriceCents > maxPriceCents {
+			t.Fatalf("price_cents out of range: got %d want between %d and %d", product.PriceCents, minPriceCents, maxPriceCents)
 		}
 	}
 }
@@ -206,13 +242,13 @@ func TestListProductsFallsBackToDefaultSortForInvalidSortBy(t *testing.T) {
 
 func TestListProductsCountsOnlyFilteredRows(t *testing.T) {
 	service := seedListProducts(t)
-	minPrice, maxPrice := float32(70), float32(100)
+	minPriceCents, maxPriceCents := int64(7000), int64(10000)
 
 	resp, err := service.ListProducts(context.Background(), &pb.ListProductsRequest{
-		Category: "book",
-		Keyword:  "Go",
-		MinPrice: &minPrice,
-		MaxPrice: &maxPrice,
+		Category:      "book",
+		Keyword:       "Go",
+		MinPriceCents: &minPriceCents,
+		MaxPriceCents: &maxPriceCents,
 	})
 	if err != nil {
 		t.Fatalf("ListProducts returned error: %v", err)

@@ -6,7 +6,7 @@ import LoadingState from '../components/LoadingState';
 import PageHeader from '../components/PageHeader';
 import SectionCard from '../components/SectionCard';
 import { cartAPI, getAPIErrorMessage, orderAPI } from '../services/api';
-import { formatCurrency, getProductImageUrl } from '../utils/display';
+import { formatMoney, getProductImageUrl } from '../utils/display';
 
 const Cart = () => {
   const [cart, setCart] = useState(null);
@@ -26,7 +26,7 @@ const Cart = () => {
 
       try {
         const data = await cartAPI.getCart();
-        setCart(data?.items ? data : { items: [], total_amount: 0 });
+        setCart(data?.items ? data : { items: [], total_amount_cents: 0 });
       } catch (fetchError) {
         console.error('Failed to fetch cart:', fetchError);
         setError('获取购物车失败');
@@ -88,7 +88,7 @@ const Cart = () => {
       setUpdating(true);
       setFeedback(null);
       await cartAPI.clearCart();
-      setCart({ items: [], total_amount: 0 });
+      setCart({ items: [], total_amount_cents: 0 });
       setFeedback({ type: 'success', text: '购物车已清空。' });
     } catch (actionError) {
       console.error('Failed to clear cart:', actionError);
@@ -165,7 +165,7 @@ const Cart = () => {
                 </div>
                 <div className="cart-item-info">
                   <h3>{item.product_name}</h3>
-                  <p>{formatCurrency(item.price)} / 件</p>
+                  <p>{formatMoney(item.price_cents)} / 件</p>
                 </div>
                 <div className="cart-item-quantity" aria-label={`${item.product_name} 数量`}>
                   <button
@@ -186,7 +186,7 @@ const Cart = () => {
                     +
                   </button>
                 </div>
-                <div className="cart-item-total">{formatCurrency(item.price * item.quantity)}</div>
+                <div className="cart-item-total">{formatMoney(item.price_cents * item.quantity)}</div>
                 <button
                   type="button"
                   onClick={() => handleDeleteItem(item.product_id)}
@@ -206,7 +206,7 @@ const Cart = () => {
             </div>
             <div className="cart-summary-row cart-summary-total">
               <span>合计</span>
-              <strong>{formatCurrency(cart.total_amount)}</strong>
+              <strong>{formatMoney(cart.total_amount_cents)}</strong>
             </div>
             <div className="cart-actions">
               <Link to="/products" className="btn btn-secondary">

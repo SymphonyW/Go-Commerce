@@ -46,9 +46,9 @@ func TestRabbitMQPublisherPublishesJSONMessage(t *testing.T) {
 			EventType:  events.OrderCreatedType,
 			OccurredAt: fixedTime.Format(time.RFC3339Nano),
 		},
-		OrderID:     10,
-		UserID:      20,
-		TotalAmount: 99.9,
+		OrderID:          10,
+		UserID:           20,
+		TotalAmountCents: 9990,
 	}
 
 	if err := publisher.Publish(context.Background(), events.OrderCreatedType, event); err != nil {

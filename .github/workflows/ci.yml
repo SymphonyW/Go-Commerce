@@ -6,7 +6,6 @@ on:
       - main
       - master
       - dev
-    # TODO: 后续如需发布镜像，可补充 tags 触发 release build。
   pull_request:
 
 permissions:
@@ -37,7 +36,6 @@ jobs:
       - name: Check gofmt
         shell: bash
         run: |
-          # gofmt 输出任何文件都表示格式需要修正，直接让 CI 明确失败。
           unformatted="$(gofmt -l .)"
           if [[ -n "${unformatted}" ]]; then
             echo "The following Go files are not formatted:"
@@ -91,15 +89,11 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Run frontend lint when available
-        shell: bash
-        run: |
-          # 当前项目没有 lint 脚本时跳过，未来一旦补上脚本即可自动纳入门禁。
-          if node -e "process.exit(require('./package.json').scripts?.lint ? 0 : 1)"; then
-            npm run lint
-          else
-            echo "No lint script configured; skipping."
-          fi
+      - name: Lint frontend
+        run: npm run lint
+
+      - name: Run frontend tests
+        run: npm run test
 
       - name: Build frontend
         run: npm run build
@@ -162,5 +156,78 @@ jobs:
         run: go test -tags=integration -v ./...
 
       - name: Stop integration dependencies
+        if: always()
+        run: docker compose down -v
+
+  e2e-test:
+    name: Checkout E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - backend-check
+      - frontend-check
+      - docker-build
+    env:
+      DB_DSN: root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local
+      E2E_BASE_URL: http://127.0.0.1:8080
+      E2E_DB_DSN: root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local
+      E2E_READY_TIMEOUT: 90s
+      E2E_ORDER_STATUS_TIMEOUT: 45s
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Start application stack
+        run: docker compose up -d --build --wait
+
+      - name: Show application status
+        run: docker compose ps
+
+      - name: Seed demo data
+        run: go run ./cmd/seed-data
+
+      - name: Run checkout E2E tests
+        run: go test -tags=e2e -v ./tests/e2e
+
+      - name: Collect E2E diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p e2e-logs
+          docker compose ps | tee e2e-logs/docker-compose-ps.txt || true
+          docker compose logs --tail=200 --no-color > e2e-logs/docker-compose.log || true
+          docker compose logs --tail=200 --no-color \
+            api-gateway auth-service product-service order-service payment-service \
+            cart-service merchant-service outbox-worker notification-service \
+            > e2e-logs/services.log || true
+          docker compose exec -T mysql mysqladmin ping -h localhost -uroot -ppassword \
+            | tee e2e-logs/mysql-health.txt || true
+          docker compose exec -T rabbitmq rabbitmq-diagnostics -q check_running \
+            | tee e2e-logs/rabbitmq-running.txt || true
+          docker compose exec -T rabbitmq rabbitmq-diagnostics -q check_local_alarms \
+            | tee e2e-logs/rabbitmq-alarms.txt || true
+          docker inspect ecommerce-mysql --format='{{json .State.Health}}' \
+            | tee e2e-logs/mysql-container-health.json || true
+          docker inspect ecommerce-rabbitmq --format='{{json .State.Health}}' \
+            | tee e2e-logs/rabbitmq-container-health.json || true
+
+      - name: Upload E2E diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: e2e-diagnostics
+          path: e2e-logs
+
+      - name: Stop application stack
         if: always()
         run: docker compose down -v

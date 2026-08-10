@@ -24,22 +24,22 @@ func (h *Handler) ListProducts(c *gin.Context) {
 		return
 	}
 	sortBy, order := normalizeProductSortQuery(c.Query("sort_by"), c.Query("order"))
-	minPrice, hasMinPrice := parseProductPriceQuery(c.Query("min_price"))
-	maxPrice, hasMaxPrice := parseProductPriceQuery(c.Query("max_price"))
-	if hasMinPrice && hasMaxPrice && minPrice > maxPrice {
-		response.BadRequest(c, "min_price must be less than or equal to max_price")
+	minPriceCents, hasMinPrice := parseProductPriceCentsQuery(c.Query("min_price_cents"))
+	maxPriceCents, hasMaxPrice := parseProductPriceCentsQuery(c.Query("max_price_cents"))
+	if hasMinPrice && hasMaxPrice && minPriceCents > maxPriceCents {
+		response.BadRequest(c, "min_price_cents must be less than or equal to max_price_cents")
 		return
 	}
 
 	resp, err := h.productClient.ListProducts(middleware.GatewayContext(c), &pbProduct.ListProductsRequest{
-		Page:     page,
-		PageSize: pageSize,
-		Category: strings.TrimSpace(c.Query("category")),
-		Keyword:  strings.TrimSpace(c.Query("keyword")),
-		SortBy:   sortBy,
-		Order:    order,
-		MinPrice: optionalProductPrice(minPrice, hasMinPrice),
-		MaxPrice: optionalProductPrice(maxPrice, hasMaxPrice),
+		Page:          page,
+		PageSize:      pageSize,
+		Category:      strings.TrimSpace(c.Query("category")),
+		Keyword:       strings.TrimSpace(c.Query("keyword")),
+		SortBy:        sortBy,
+		Order:         order,
+		MinPriceCents: optionalProductPriceCents(minPriceCents, hasMinPrice),
+		MaxPriceCents: optionalProductPriceCents(maxPriceCents, hasMaxPrice),
 	})
 	if err != nil {
 		response.WriteGRPCError(c, err)
@@ -66,8 +66,10 @@ func (h *Handler) GetProduct(c *gin.Context) {
 func normalizeProductSortQuery(sortBy, order string) (string, string) {
 	invalidSortBy := false
 	switch strings.TrimSpace(sortBy) {
-	case "created_at", "price", "stock":
+	case "created_at", "price_cents", "stock":
 		sortBy = strings.TrimSpace(sortBy)
+	case "price":
+		sortBy = "price_cents"
 	default:
 		sortBy = "created_at"
 		invalidSortBy = true
@@ -89,15 +91,15 @@ func normalizeProductSortQuery(sortBy, order string) (string, string) {
 	return sortBy, order
 }
 
-func parseProductPriceQuery(raw string) (float32, bool) {
-	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 32)
+func parseProductPriceCentsQuery(raw string) (int64, bool) {
+	value, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	if err != nil || value < 0 {
 		return 0, false
 	}
-	return float32(value), true
+	return value, true
 }
 
-func optionalProductPrice(value float32, present bool) *float32 {
+func optionalProductPriceCents(value int64, present bool) *int64 {
 	if !present {
 		return nil
 	}

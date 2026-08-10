@@ -14,7 +14,38 @@ export const getProductImageUrl = (url, size = 'card') => {
   return url;
 };
 
-export const formatCurrency = (value) => `¥${Number(value || 0).toFixed(2)}`;
+const moneyFormatter = new Intl.NumberFormat('zh-CN', {
+  style: 'currency',
+  currency: 'CNY',
+});
+
+export const formatMoney = (cents) => {
+  const value = Number(cents);
+  return moneyFormatter.format(Number.isFinite(value) ? value / 100 : 0);
+};
+
+export const parseMoneyToCents = (value) => {
+  const normalized = String(value ?? '').trim().replace(/,/g, '');
+  if (!/^\d+(?:\.\d{0,2})?$/.test(normalized)) {
+    return null;
+  }
+
+  const [whole, fraction = ''] = normalized.split('.');
+  const cents = Number.parseInt(whole, 10) * 100 + Number.parseInt(`${fraction}00`.slice(0, 2), 10);
+  return Number.isSafeInteger(cents) ? cents : null;
+};
+
+export const centsToInputValue = (cents) => {
+  const value = Number(cents);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    return '';
+  }
+
+  const whole = Math.trunc(value / 100);
+  const fraction = value % 100;
+  return fraction === 0 ? String(whole) : `${whole}.${String(fraction).padStart(2, '0')}`;
+};
+
 
 export const formatDateTime = (value) => {
   if (!value) return '--';

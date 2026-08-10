@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"log"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/streadway/amqp"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -13,6 +15,7 @@ import (
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/healthcheck"
 	"go-commerce/pkg/mq"
+	"go-commerce/pkg/observability"
 	"go-commerce/pkg/serviceutil"
 )
 
@@ -21,6 +24,15 @@ const notificationQueueName = "notification.order.created"
 func main() {
 	ctx, stop := serviceutil.SignalContext()
 	defer stop()
+	telemetry := observability.SetupService(ctx, "notification-service")
+	logger := telemetry.Logger
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetry.Shutdown(shutdownCtx); err != nil {
+			logger.Error("otel_shutdown_failed", "error", err)
+		}
+	}()
 
 	dsn := serviceutil.Env("DB_DSN", "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local")
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
@@ -70,13 +82,15 @@ func main() {
 	healthServer := serviceutil.StartHTTPServer(
 		"notification health server",
 		serviceutil.Env("NOTIFICATION_HEALTH_ADDR", ":8087"),
-		healthcheck.Handler(
+		healthcheck.HandlerWithMetrics(
+			promhttp.HandlerFor(telemetry.Registry, promhttp.HandlerOpts{}),
 			healthcheck.Dependency{Name: "mysql", Check: healthcheck.SQL(sqlDB)},
 			healthcheck.Dependency{Name: "rabbitmq", Check: healthcheck.AMQP(conn)},
 		),
 	)
 
 	consumer := notification.NewConsumer(db, log.Default())
+	consumer.SetMetrics(telemetry.Metrics)
 	log.Printf("notification service started exchange=%s queue=%s routing_key=%s", exchangeName, queue.Name, events.OrderCreatedType)
 
 	for {

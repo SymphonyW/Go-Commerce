@@ -9,8 +9,11 @@ import (
 	"time"
 
 	"github.com/streadway/amqp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"go-commerce/pkg/events"
+	"go-commerce/pkg/observability"
 )
 
 const (
@@ -67,8 +70,22 @@ func (s *RabbitMQTimeoutScheduler) Schedule(ctx context.Context, event events.Or
 		delay = time.Millisecond
 	}
 
+	ctx, span := observability.StartSpan(ctx,
+		"rabbitmq publish "+events.OrderTimeoutCheckType,
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "rabbitmq"),
+			attribute.String("messaging.destination.name", s.exchange),
+			attribute.String("messaging.rabbitmq.routing_key", events.OrderTimeoutCheckType),
+			attribute.String("event.id", event.EventID),
+			attribute.String("event.type", events.OrderTimeoutCheckType),
+			attribute.Int64("order.id", event.OrderID),
+		),
+	)
+
 	body, err := json.Marshal(event)
 	if err != nil {
+		observability.EndSpan(span, err)
 		return fmt.Errorf("marshal timeout event: %w", err)
 	}
 
@@ -77,14 +94,26 @@ func (s *RabbitMQTimeoutScheduler) Schedule(ctx context.Context, event events.Or
 		ttlMillis = 1
 	}
 
-	return s.channel.Publish(s.exchange, events.OrderTimeoutCheckType, false, false, amqp.Publishing{
-		ContentType:  "application/json",
-		DeliveryMode: amqp.Persistent,
-		MessageId:    event.EventID,
-		Timestamp:    s.now().UTC(),
-		Expiration:   strconv.FormatInt(ttlMillis, 10),
-		Body:         body,
+	headers := observability.InjectIntoAMQP(ctx, amqp.Table{})
+	requestID := observability.RequestIDFromContext(ctx)
+	headers[observability.RequestIDMetadataKey] = requestID
+	headers["request_id"] = requestID
+	headers["correlation_id"] = requestID
+	headers[observability.TraceIDMetadataKey] = observability.TraceIDFromContext(ctx)
+	headers["event_id"] = event.EventID
+	headers["event_type"] = event.EventType
+	err = s.channel.Publish(s.exchange, events.OrderTimeoutCheckType, false, false, amqp.Publishing{
+		ContentType:   "application/json",
+		DeliveryMode:  amqp.Persistent,
+		MessageId:     event.EventID,
+		CorrelationId: requestID,
+		Timestamp:     s.now().UTC(),
+		Expiration:    strconv.FormatInt(ttlMillis, 10),
+		Headers:       headers,
+		Body:          body,
 	})
+	observability.EndSpan(span, err)
+	return err
 }
 
 // ParseOrderPaymentTimeoutMinutes 支持整数和小数分钟，便于本地使用 0.5 分钟快速演示。

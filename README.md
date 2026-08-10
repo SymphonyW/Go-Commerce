@@ -68,14 +68,14 @@ flowchart LR
 
 | 亮点 | 当前实现 |
 | --- | --- |
-| 后端定价 | 创建订单只接收 `product_id + quantity`，订单服务基于真实商品数据计算总价并保存商品快照。 |
+| 后端定价 | 创建订单只接收 `product_id + quantity`，订单服务基于真实商品 `price_cents` 用整数分计算总价并保存商品快照。 |
 | 防超卖库存扣减 | 使用 `UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?` 做数据库条件更新。 |
 | 订单状态机 | 统一约束 `pending -> paid -> shipped -> completed` 与 `pending -> cancelled`，避免非法跳转。 |
 | 订单列表性能 | 用户订单和商家订单列表批量加载订单项，避免随订单数量增长的 N+1 查询。 |
 | RabbitMQ 超时关单 | 创建订单后投递超时检查消息，通过 `TTL + DLX` 触发取消流程并回补库存。 |
 | Outbox / Inbox Pattern | 业务表与 `outbox_events` 同事务提交，由 `outbox-worker` 扫描、发布、重试和失败落库；消费者用 `consumed_events` 按 `consumer_name + event_id` 去重。 |
 | 商家资源归属校验 | API Gateway 做角色拦截，`merchant-service` 再按真实角色和 `owner_user_id` 做细粒度授权。 |
-| 基础可观测性 | API Gateway 提供 `/metrics`、`/healthz`、`/readyz`、请求 ID、Trace ID 与结构化日志。 |
+| 可观测性 | 全服务暴露健康检查和 `/metrics`，通过 OpenTelemetry、OTEL Collector、Tempo、Prometheus 与 Grafana 演示分布式追踪、指标和结构化日志。 |
 | 分层测试 | 已有单元测试、真实依赖集成测试，以及覆盖交易主链路的 E2E 测试。 |
 
 ## 技术栈
@@ -86,7 +86,7 @@ flowchart LR
 | 前端 | React 18.2、Vite 8、Axios、React Router 7 |
 | 数据与缓存 | MySQL 8、Redis 7 |
 | 消息 | RabbitMQ 3 Management、topic exchange、TTL / DLX |
-| 观测 | Prometheus client、结构化日志、健康检查、链路关联 ID |
+| 观测 | OpenTelemetry、OTEL Collector、Prometheus、Grafana、Tempo、结构化日志、健康检查 |
 | 工程化 | Docker Compose、GitHub Actions、Makefile、OpenAPI 3.0 |
 
 ## 系统架构
@@ -137,7 +137,7 @@ flowchart LR
 | 商家后台 | 当前店铺、商品维护、商家订单查看 | 普通商家只能操作自己名下资源，`admin` 可跨店。 |
 | 事件总线 | `order.created`、`payment.succeeded` 等事件 | RabbitMQ topic exchange 承载领域事件。 |
 | 可靠消息 | Outbox 本地消息表、Inbox 消费记录、claim、lease、重试、失败状态 | 支持多个 worker 并行领取；RabbitMQ / Outbox 仍是 at-least-once delivery，消费者侧用 Inbox + 幂等业务控制重复副作用。 |
-| 观测 | 健康检查、就绪检查、网关指标、请求关联 ID | 完整 OpenTelemetry 追踪尚未接入。 |
+| 观测 | 健康检查、就绪检查、全服务 Prometheus 指标、OpenTelemetry tracing、Grafana dashboards | 通过 `observability` profile 启动本地演示栈。 |
 
 ## 目录结构
 
@@ -193,6 +193,19 @@ docker compose ps
 | RabbitMQ 管理台 | `http://localhost:15672`（`guest / guest`） |
 | MySQL | `127.0.0.1:3307` |
 | Redis | `127.0.0.1:6379` |
+
+可选启动观测栈：
+
+```bash
+docker compose --profile observability up -d --build
+```
+
+| 观测入口 | 地址 |
+| --- | --- |
+| Grafana | `http://localhost:3000`（`admin / admin`） |
+| Prometheus | `http://localhost:9090` |
+| Tempo | `http://localhost:3200` |
+| OTEL Collector | `localhost:4317` / `localhost:4318` |
 
 ### 2. 初始化演示数据
 
@@ -274,6 +287,8 @@ go run ./cmd/api-gateway
 
 手动启动时，程序直接读取系统环境变量；仓库没有内置 `.env` 自动加载器。完整参考配置见 [.env.example](.env.example)。使用 Docker Compose 启动时，默认环境变量已在 [docker-compose.yml](docker-compose.yml) 中配置。API Gateway 的 CORS 默认只允许 `http://localhost:5173`，可通过 `CORS_ALLOWED_ORIGINS` 配置逗号分隔的允许 Origin。
 
+金额字段统一使用 `int64` 分，REST / gRPC / 数据库字段为 `price_cents`、`total_amount_cents`、`amount_cents`。二进制浮点数不能精确表示很多十进制小数，容易在 `0.1 + 0.2`、多商品累计和支付金额比较时产生误差；因此后端所有金额计算、比较和持久化都只使用整数分。当前演示项目不保留旧本地浮点金额数据，升级后建议重建数据库；如需迁移历史数据，规则为 `ROUND(old_amount * 100)` 写入对应 `*_cents` 字段。
+
 Outbox worker 支持多实例并行运行。每个 worker 会在短事务中 claim due 事件并写入 `processing / locked_by / locked_at / lease_expires_at`，事务提交后再发布 RabbitMQ；`MarkPublished` 与 `MarkRetry` 只允许当前 lease owner 更新。`OUTBOX_WORKER_ID` 未配置时使用 `hostname + UUID` 自动生成，`OUTBOX_LEASE_DURATION` 控制 worker 崩溃后的可恢复窗口。即使有 claim/lease，整体消息语义仍是 at-least-once delivery，下游消费者仍需保持幂等。
 
 Outbox worker 的 `/readyz` 会暴露 `outbox_worker_polling` 依赖状态，`/metrics` 暴露 `go_commerce_outbox_claimed_total`、`go_commerce_outbox_published_total`、`go_commerce_outbox_retry_total`、`go_commerce_outbox_failed_total` 和 `go_commerce_outbox_lease_recovered_total`。
@@ -311,7 +326,7 @@ curl -X POST http://localhost:8080/api/login \
 ### 查询商品
 
 ```bash
-curl "http://localhost:8080/api/products?page=1&page_size=10&keyword=Go&sort_by=price&order=asc"
+curl "http://localhost:8080/api/products?page=1&page_size=10&keyword=Go&sort_by=price_cents&order=asc"
 ```
 
 ### 创建订单
@@ -345,6 +360,12 @@ curl -X POST http://localhost:8080/api/payments/1/success \
 make test
 make test-integration
 make test-e2e
+
+cd frontend
+npm ci
+npm run lint
+npm run test
+npm run build
 ```
 
 | 命令 | 当前行为 |
@@ -352,6 +373,10 @@ make test-e2e
 | `make test` | 执行 `go test ./...`。 |
 | `make test-integration` | 启动 MySQL、Redis、RabbitMQ，然后执行 `go test ./... -tags=integration`。 |
 | `make test-e2e` | `docker compose up -d --build` 启动完整后端栈，然后执行 `go test ./tests/e2e -tags=e2e -v`。 |
+| `npm run lint` | 在 `frontend/` 内执行 ESLint，覆盖 React、React Hooks 和 JavaScript/TypeScript 代码。 |
+| `npm run test` | 在 `frontend/` 内执行 `node:test` 前端单元测试。 |
+| `npm run build` | 在 `frontend/` 内执行 `tsc && vite build`。 |
+| `npm run test:coverage` | 在 `frontend/` 内执行 Node.js 测试覆盖率报告。 |
 
 | 测试层级 | 覆盖内容 |
 | --- | --- |
@@ -366,11 +391,12 @@ make test-e2e
 | Job | 内容 |
 | --- | --- |
 | `backend-check` | `go mod download`、`gofmt` 检查、`go vet`、带 coverage profile 的 `go test ./...`、`go build ./...`、`golangci-lint`。 |
-| `frontend-check` | Node.js 22、`npm ci`、存在 lint 脚本时执行 lint、`npm run build`。 |
+| `frontend-check` | Node.js 22、`npm ci`、`npm run lint`、`npm run test`、`npm run build`。 |
 | `docker-build` | 分别构建主要后端服务镜像。 |
 | `integration-test` | 启动 MySQL、Redis、RabbitMQ，执行 `go test -tags=integration -v ./...`。 |
+| `Checkout E2E` | 依赖 `backend-check`、`frontend-check` 和 `docker-build`；启动完整 Docker Compose 栈、执行 `go run ./cmd/seed-data`，再运行 `go test -tags=e2e -v ./tests/e2e`。 |
 
-E2E 测试已提供为本地命令，但尚未纳入默认 GitHub Actions 工作流。
+PR 合并前建议在分支保护中要求 `Backend check`、`Frontend check`、`Docker build (...)`、`Integration test` 和 `Checkout E2E` 均通过。`Checkout E2E` 失败时 CI 会保留 Docker Compose 状态、主要服务日志、MySQL 与 RabbitMQ 健康状态，便于定位交易主链路回归。
 
 ## 监控与运维
 
@@ -379,19 +405,13 @@ E2E 测试已提供为本地命令，但尚未纳入默认 GitHub Actions 工作
 | 能力 | 当前状态 |
 | --- | --- |
 | API Gateway 探针 | `/healthz`、`/readyz`。 |
-| API Gateway 指标 | `/metrics` 输出 Prometheus text exposition。 |
-| 内部服务健康检查 | 各服务暴露独立健康检查端口，见 [.env.example](.env.example) 与 [docker-compose.yml](docker-compose.yml)。 |
-| 链路关联 ID | `X-Request-ID` 与 `X-Trace-ID` 在网关生成 / 透传，并进入 gRPC metadata 与事件模型。 |
-| 结构化日志 | API Gateway 使用结构化 JSON 日志。 |
+| Prometheus 指标 | 各服务在健康检查端口暴露 `/metrics`。 |
+| 内部服务健康检查 | 各服务暴露独立 `/healthz` 与 `/readyz`，见 [.env.example](.env.example) 与 [docker-compose.yml](docker-compose.yml)。 |
+| OpenTelemetry tracing | HTTP、gRPC、RabbitMQ producer / consumer span 通过 OTEL Collector 写入 Tempo。 |
+| 链路关联 ID | `X-Request-ID` 与 `X-Trace-ID` 在网关生成 / 透传，并进入 gRPC metadata、RabbitMQ headers 与事件模型。 |
+| 结构化日志 | 各服务使用统一 JSON slog，包含 `service`、`request_id`、`trace_id`、`span_id`。 |
+| Grafana dashboards | `observability` profile 预置 API Gateway、Transaction、Messaging 三个 dashboard。 |
 | RabbitMQ 管理台 | 可通过 `http://localhost:15672` 查看交换机、队列与投递情况。 |
-
-### 尚未实现
-
-| 能力 | 当前边界 |
-| --- | --- |
-| Prometheus / Grafana Compose | 仓库未内置 Prometheus 与 Grafana 服务。 |
-| 全服务统一观测 | 结构化日志、gRPC 指标和统一 trace 传播尚未铺到全部服务入口。 |
-| OpenTelemetry 分布式追踪 | 当前更接近“链路关联 ID”，还不是完整分布式追踪。 |
 
 ## Roadmap
 
@@ -413,7 +433,6 @@ E2E 测试已提供为本地命令，但尚未纳入默认 GitHub Actions 工作
 - 为更多写接口补齐真正落库的幂等重放，而不仅是状态天然幂等。
 - 为公开商家列表、用户订单列表暴露真实分页参数。
 - 将前端自动生成并携带 `Idempotency-Key` 的能力扩展到更多写接口。
-- 将结构化日志、指标和 trace 传播铺到全部服务，并接入 Prometheus / Grafana / OpenTelemetry。
 - 继续明确服务数据库边界与迁移机制。
 - 为 OpenAPI 补充 Swagger UI 或其他可视化调试入口。
 
@@ -423,6 +442,7 @@ E2E 测试已提供为本地命令，但尚未纳入默认 GitHub Actions 工作
 | --- | --- |
 | [文档导航](docs/README.md) | 汇总补充文档，适合作为二级入口。 |
 | [技术文档](docs/TECHNICAL_DOCUMENT.md) | 详细说明架构、下单流程、支付流程、超时关单、Outbox / Inbox、权限模型与当前不足。 |
+| [观测栈文档](docs/OBSERVABILITY.md) | 说明 OpenTelemetry、Prometheus、Tempo、Grafana 的本地启动、指标和 dashboards。 |
 | [API 文档](docs/API_Documentation.md) | 面向阅读的 REST API 说明，包含鉴权、分页、错误码和请求 / 响应示例。 |
 | [面试文档](docs/INTERVIEW.md) | 围绕真实实现整理 30 秒 / 2 分钟项目介绍与常见追问。 |
 | [OpenAPI 3.0](openapi.yaml) | 机器可读的接口契约，可用于导入 API 工具或后续接入 Swagger UI。 |

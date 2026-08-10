@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -179,12 +180,12 @@ func newConcurrentTestService(t *testing.T) (*Service, *gorm.DB) {
 }
 
 // createTestProduct 写入真实商品数据，供订单服务生成快照时读取。
-func createTestProduct(t *testing.T, db *gorm.DB, name string, price float64, stock int32) product.Product {
+func createTestProduct(t *testing.T, db *gorm.DB, name string, priceCents int64, stock int32) product.Product {
 	t.Helper()
 
 	item := product.Product{
 		Name:       name,
-		Price:      price,
+		PriceCents: priceCents,
 		Stock:      stock,
 		MerchantID: 1,
 	}
@@ -273,7 +274,7 @@ func createCancellableOrder(t *testing.T, service *Service, userID int64, item p
 
 func TestCreateOrderIsIdempotentForRepeatedRequests(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "幂等商品", 25, 5)
+	item := createTestProduct(t, db, "幂等商品", 2500, 5)
 	req := createOrderRequest(1, "repeat-create-order", &pb.CreateOrderItem{ProductId: int64(item.ID), Quantity: 2})
 
 	first, err := service.CreateOrder(context.Background(), req)
@@ -307,7 +308,7 @@ func TestCreateOrderIsIdempotentForRepeatedRequests(t *testing.T) {
 
 func TestCreateOrderRejectsSameKeyWithDifferentPayload(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "冲突商品", 25, 5)
+	item := createTestProduct(t, db, "冲突商品", 2500, 5)
 
 	if _, err := service.CreateOrder(context.Background(), createOrderRequest(
 		1,
@@ -329,7 +330,7 @@ func TestCreateOrderRejectsSameKeyWithDifferentPayload(t *testing.T) {
 
 func TestCreateOrderConcurrentSameKeyCreatesOneOrder(t *testing.T) {
 	service, db := newConcurrentTestService(t)
-	item := createTestProduct(t, db, "并发幂等商品", 10, 20)
+	item := createTestProduct(t, db, "并发幂等商品", 1000, 20)
 
 	const requestCount = 20
 	start := make(chan struct{})
@@ -387,7 +388,7 @@ func TestCancelOrderRejectsMissingIdempotencyKey(t *testing.T) {
 
 func TestCancelOrderCompletesIdempotencyRecordOnSuccess(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "取消幂等记录商品", 10, 5)
+	item := createTestProduct(t, db, "取消幂等记录商品", 1000, 5)
 	order := createCancellableOrder(t, service, 1, item, 2, "create-before-cancel-record")
 
 	resp, err := service.CancelOrder(context.Background(), cancelOrderRequest(order.Id, 1, "cancel-record-key"))
@@ -419,7 +420,7 @@ func TestCancelOrderCompletesIdempotencyRecordOnSuccess(t *testing.T) {
 
 func TestCancelOrderReplaysSameKeySameRequest(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "取消重放商品", 10, 5)
+	item := createTestProduct(t, db, "取消重放商品", 1000, 5)
 	order := createCancellableOrder(t, service, 1, item, 2, "create-before-cancel-replay")
 	req := cancelOrderRequest(order.Id, 1, "repeat-cancel-key")
 
@@ -442,7 +443,7 @@ func TestCancelOrderReplaysSameKeySameRequest(t *testing.T) {
 
 func TestCancelOrderRejectsSameKeyWithDifferentOrderID(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "取消冲突商品", 10, 10)
+	item := createTestProduct(t, db, "取消冲突商品", 1000, 10)
 	firstOrder := createCancellableOrder(t, service, 1, item, 1, "create-before-cancel-conflict-a")
 	secondOrder := createCancellableOrder(t, service, 1, item, 1, "create-before-cancel-conflict-b")
 
@@ -458,7 +459,7 @@ func TestCancelOrderRejectsSameKeyWithDifferentOrderID(t *testing.T) {
 
 func TestCancelOrderRejectsSameKeyWhileProcessing(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "取消处理中商品", 10, 5)
+	item := createTestProduct(t, db, "取消处理中商品", 1000, 5)
 	order := createCancellableOrder(t, service, 1, item, 1, "create-before-processing-cancel")
 	requestHash, err := idempotency.HashPayload(newCancelOrderFingerprint(1, order.Id))
 	if err != nil {
@@ -483,7 +484,7 @@ func TestCancelOrderRejectsSameKeyWhileProcessing(t *testing.T) {
 
 func TestCancelOrderSameKeyDifferentUserDoesNotConflict(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "取消跨用户商品", 10, 10)
+	item := createTestProduct(t, db, "取消跨用户商品", 1000, 10)
 	firstOrder := createCancellableOrder(t, service, 1, item, 1, "create-before-cancel-user-a")
 	secondOrder := createCancellableOrder(t, service, 2, item, 1, "create-before-cancel-user-b")
 
@@ -502,7 +503,7 @@ func TestCancelOrderSameKeyDifferentUserDoesNotConflict(t *testing.T) {
 
 func TestCancelOrderAbortsIdempotencyRecordAfterBusinessFailure(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "取消失败释放商品", 10, 5)
+	item := createTestProduct(t, db, "取消失败释放商品", 1000, 5)
 	order := createCancellableOrder(t, service, 1, item, 2, "create-before-cancel-abort")
 
 	if err := db.Exec(`
@@ -564,7 +565,7 @@ func TestCancelOrderAbortsIdempotencyRecordAfterBusinessFailure(t *testing.T) {
 
 func TestCancelOrderReplayDoesNotRestoreStockTwice(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "取消库存重放商品", 10, 5)
+	item := createTestProduct(t, db, "取消库存重放商品", 1000, 5)
 	order := createCancellableOrder(t, service, 1, item, 2, "create-before-cancel-stock-replay")
 	req := cancelOrderRequest(order.Id, 1, "cancel-stock-replay-key")
 
@@ -586,7 +587,7 @@ func TestCancelOrderReplayDoesNotRestoreStockTwice(t *testing.T) {
 
 func TestCancelOrderReplayDoesNotCreateSecondCancelledOutboxEvent(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "取消事件重放商品", 10, 5)
+	item := createTestProduct(t, db, "取消事件重放商品", 1000, 5)
 	order := createCancellableOrder(t, service, 1, item, 1, "create-before-cancel-outbox-replay")
 	req := cancelOrderRequest(order.Id, 1, "cancel-outbox-replay-key")
 
@@ -610,7 +611,7 @@ func TestCancelOrderReplayDoesNotCreateSecondCancelledOutboxEvent(t *testing.T) 
 
 func TestCreateOrderUsesDatabaseSnapshot(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "真实商品", 88.5, 10)
+	item := createTestProduct(t, db, "真实商品", 8850, 10)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId:         1,
@@ -623,8 +624,8 @@ func TestCreateOrderUsesDatabaseSnapshot(t *testing.T) {
 		t.Fatalf("CreateOrder returned error: %v", err)
 	}
 
-	if got, want := resp.Order.TotalAmount, float32(177); got != want {
-		t.Fatalf("unexpected total amount: got %.2f want %.2f", got, want)
+	if got, want := resp.Order.TotalAmountCents, int64(17700); got != want {
+		t.Fatalf("unexpected total AmountCents: got %d want %d", got, want)
 	}
 	if len(resp.Order.Items) != 1 {
 		t.Fatalf("unexpected order item count: got %d want 1", len(resp.Order.Items))
@@ -632,8 +633,8 @@ func TestCreateOrderUsesDatabaseSnapshot(t *testing.T) {
 	if got, want := resp.Order.Items[0].ProductName, "真实商品"; got != want {
 		t.Fatalf("unexpected snapshot product name: got %q want %q", got, want)
 	}
-	if got, want := resp.Order.Items[0].Price, float32(88.5); got != want {
-		t.Fatalf("unexpected snapshot price: got %.2f want %.2f", got, want)
+	if got, want := resp.Order.Items[0].PriceCents, int64(8850); got != want {
+		t.Fatalf("unexpected snapshot PriceCents: got %d want %d", got, want)
 	}
 
 	var saved OrderItem
@@ -643,14 +644,14 @@ func TestCreateOrderUsesDatabaseSnapshot(t *testing.T) {
 	if got, want := saved.ProductName, "真实商品"; got != want {
 		t.Fatalf("unexpected saved snapshot name: got %q want %q", got, want)
 	}
-	if got, want := saved.Price, 88.5; got != want {
-		t.Fatalf("unexpected saved snapshot price: got %.2f want %.2f", got, want)
+	if got, want := saved.PriceCents, int64(8850); got != want {
+		t.Fatalf("unexpected saved snapshot PriceCents: got %d want %d", got, want)
 	}
 }
 
 func TestCreateOrderStartsPending(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "默认状态商品", 10, 5)
+	item := createTestProduct(t, db, "默认状态商品", 1000, 5)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId:         1,
@@ -670,7 +671,7 @@ func TestCreateOrderStartsPending(t *testing.T) {
 func TestCreateOrderStoresCommittedOrderCreatedEventInOutbox(t *testing.T) {
 	publisher := &recordingPublisher{}
 	service, db := newTestServiceWithPublisher(t, publisher)
-	item := createTestProduct(t, db, "事件商品", 88.5, 10)
+	item := createTestProduct(t, db, "事件商品", 8850, 10)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId:         1,
@@ -716,7 +717,7 @@ func TestCreateOrderSchedulesTimeoutCheckAfterCommit(t *testing.T) {
 	publisher := &recordingPublisher{}
 	scheduler := &recordingTimeoutScheduler{}
 	service, db := newTestServiceWithTimeout(t, publisher, scheduler, 30*time.Second)
-	item := createTestProduct(t, db, "超时调度商品", 20, 5)
+	item := createTestProduct(t, db, "超时调度商品", 2000, 5)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId:         9,
@@ -766,7 +767,7 @@ func TestCreateOrderSchedulesTimeoutCheckAfterCommit(t *testing.T) {
 func TestCreateOrderKeepsPendingOutboxEventWhenPublisherUnavailable(t *testing.T) {
 	publisher := &recordingPublisher{err: errors.New("rabbitmq unavailable")}
 	service, db := newTestServiceWithPublisher(t, publisher)
-	item := createTestProduct(t, db, "弱一致商品", 10, 5)
+	item := createTestProduct(t, db, "弱一致商品", 1000, 5)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId:         1,
@@ -816,7 +817,7 @@ func TestCreateOrderRejectsMissingProduct(t *testing.T) {
 
 func TestCreateOrderRejectsInsufficientStock(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "库存商品", 12, 1)
+	item := createTestProduct(t, db, "库存商品", 1200, 1)
 
 	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId:         1,
@@ -842,7 +843,7 @@ func TestCreateOrderRejectsInvalidQuantity(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			service, db := newTestService(t)
-			item := createTestProduct(t, db, "数量商品", 10, 5)
+			item := createTestProduct(t, db, "数量商品", 1000, 5)
 
 			_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 				UserId:         1,
@@ -873,8 +874,8 @@ func TestCreateOrderRejectsEmptyItems(t *testing.T) {
 
 func TestCreateOrderCalculatesTotalAcrossProducts(t *testing.T) {
 	service, db := newTestService(t)
-	first := createTestProduct(t, db, "商品A", 10, 10)
-	second := createTestProduct(t, db, "商品B", 20.5, 10)
+	first := createTestProduct(t, db, "商品A", 1000, 10)
+	second := createTestProduct(t, db, "商品B", 2050, 10)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId:         1,
@@ -888,14 +889,70 @@ func TestCreateOrderCalculatesTotalAcrossProducts(t *testing.T) {
 		t.Fatalf("CreateOrder returned error: %v", err)
 	}
 
-	if got, want := resp.Order.TotalAmount, float32(81.5); got != want {
-		t.Fatalf("unexpected total amount: got %.2f want %.2f", got, want)
+	if got, want := resp.Order.TotalAmountCents, int64(8150); got != want {
+		t.Fatalf("unexpected total AmountCents: got %d want %d", got, want)
+	}
+}
+
+func TestCreateOrderCalculatesZeroAndOneCentPrecisely(t *testing.T) {
+	service, db := newTestService(t)
+	free := createTestProduct(t, db, "零元商品", 0, 10)
+	oneCent := createTestProduct(t, db, "一分商品", 1, 10)
+
+	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
+		UserId:         1,
+		IdempotencyKey: "test-key",
+		Items: []*pb.CreateOrderItem{
+			{ProductId: int64(free.ID), Quantity: 3},
+			{ProductId: int64(oneCent.ID), Quantity: 2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder returned error: %v", err)
+	}
+
+	if got, want := resp.Order.TotalAmountCents, int64(2); got != want {
+		t.Fatalf("unexpected total AmountCents: got %d want %d", got, want)
+	}
+}
+
+func TestCreateOrderRejectsAmountOverflow(t *testing.T) {
+	service, db := newTestService(t)
+	huge := createTestProduct(t, db, "溢出商品", math.MaxInt64/2+1, 10)
+
+	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
+		UserId:         1,
+		IdempotencyKey: "test-key",
+		Items: []*pb.CreateOrderItem{
+			{ProductId: int64(huge.ID), Quantity: 2},
+		},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.InvalidArgument)
+	}
+}
+
+func TestCreateOrderRejectsAmountAccumulationOverflow(t *testing.T) {
+	service, db := newTestService(t)
+	first := createTestProduct(t, db, "大额商品A", math.MaxInt64/2+1, 10)
+	second := createTestProduct(t, db, "大额商品B", math.MaxInt64/2+1, 10)
+
+	_, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
+		UserId:         1,
+		IdempotencyKey: "test-key",
+		Items: []*pb.CreateOrderItem{
+			{ProductId: int64(first.ID), Quantity: 1},
+			{ProductId: int64(second.ID), Quantity: 1},
+		},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.InvalidArgument)
 	}
 }
 
 func TestCreateOrderMergesDuplicateProducts(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "重复商品", 15, 10)
+	item := createTestProduct(t, db, "重复商品", 1500, 10)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId:         1,
@@ -915,8 +972,8 @@ func TestCreateOrderMergesDuplicateProducts(t *testing.T) {
 	if got, want := resp.Order.Items[0].Quantity, int32(3); got != want {
 		t.Fatalf("unexpected merged quantity: got %d want %d", got, want)
 	}
-	if got, want := resp.Order.TotalAmount, float32(45); got != want {
-		t.Fatalf("unexpected total amount: got %.2f want %.2f", got, want)
+	if got, want := resp.Order.TotalAmountCents, int64(4500); got != want {
+		t.Fatalf("unexpected total AmountCents: got %d want %d", got, want)
 	}
 
 	var latest product.Product
@@ -931,7 +988,7 @@ func TestCreateOrderMergesDuplicateProducts(t *testing.T) {
 func TestCreateOrderRollsBackStockWhenOrderInsertFails(t *testing.T) {
 	publisher := &recordingPublisher{}
 	service, db := newTestServiceWithPublisher(t, publisher)
-	item := createTestProduct(t, db, "回滚商品", 10, 5)
+	item := createTestProduct(t, db, "回滚商品", 1000, 5)
 
 	if err := db.Exec(`
 		CREATE TRIGGER fail_order_insert
@@ -972,7 +1029,7 @@ func TestCreateOrderRollsBackStockWhenOrderInsertFails(t *testing.T) {
 
 func TestCreateOrderRollsBackStockWhenOrderItemInsertFails(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "订单项回滚商品", 10, 5)
+	item := createTestProduct(t, db, "订单项回滚商品", 1000, 5)
 
 	if err := db.Exec(`
 		CREATE TRIGGER fail_order_item_insert
@@ -1006,7 +1063,7 @@ func TestCreateOrderRollsBackStockWhenOrderItemInsertFails(t *testing.T) {
 
 func TestCreateOrderConcurrentRequestsDoNotOversell(t *testing.T) {
 	service, db := newConcurrentTestService(t)
-	item := createTestProduct(t, db, "并发商品", 10, 10)
+	item := createTestProduct(t, db, "并发商品", 1000, 10)
 
 	const requestCount = 100
 	var successCount int32
@@ -1051,7 +1108,7 @@ func TestCreateOrderConcurrentRequestsDoNotOversell(t *testing.T) {
 
 func TestCancelOrderRestoresStockAtomically(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "取消回补商品", 10, 5)
+	item := createTestProduct(t, db, "取消回补商品", 1000, 5)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId:         1,
@@ -1088,7 +1145,7 @@ func TestCancelOrderRestoresStockAtomically(t *testing.T) {
 func TestCancelOrderStoresOrderCancelledEventInOutbox(t *testing.T) {
 	publisher := &recordingPublisher{}
 	service, db := newTestServiceWithPublisher(t, publisher)
-	item := createTestProduct(t, db, "取消事件商品", 10, 5)
+	item := createTestProduct(t, db, "取消事件商品", 1000, 5)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId:         1,
@@ -1130,7 +1187,7 @@ func TestCancelOrderStoresOrderCancelledEventInOutbox(t *testing.T) {
 
 func TestCancelOrderPersistsUserCancelReason(t *testing.T) {
 	service, db := newTestService(t)
-	item := createTestProduct(t, db, "取消原因商品", 10, 5)
+	item := createTestProduct(t, db, "取消原因商品", 1000, 5)
 
 	resp, err := service.CreateOrder(context.Background(), &pb.CreateOrderRequest{
 		UserId:         1,
@@ -1166,11 +1223,11 @@ func TestCancelOrderPersistsUserCancelReason(t *testing.T) {
 
 func TestConvertToPBOrderIncludesCancelReason(t *testing.T) {
 	order := &Order{
-		UserID:       1,
-		TotalAmount:  10,
-		Status:       OrderStatusCancelled,
-		CancelReason: OrderCancelReasonPaymentTimeout,
-		OrderDate:    time.Now(),
+		UserID:           1,
+		TotalAmountCents: 1000,
+		Status:           OrderStatusCancelled,
+		CancelReason:     OrderCancelReasonPaymentTimeout,
+		OrderDate:        time.Now(),
 	}
 
 	converted := convertToPBOrder(order, nil)
@@ -1182,10 +1239,10 @@ func TestConvertToPBOrderIncludesCancelReason(t *testing.T) {
 func TestCancelOrderRejectsCompletedOrder(t *testing.T) {
 	service, db := newTestService(t)
 	order := Order{
-		UserID:      1,
-		TotalAmount: 10,
-		Status:      OrderStatusCompleted,
-		OrderDate:   time.Now(),
+		UserID:           1,
+		TotalAmountCents: 1000,
+		Status:           OrderStatusCompleted,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)
@@ -1210,10 +1267,10 @@ func TestCancelOrderRejectsCompletedOrder(t *testing.T) {
 func TestCancelOrderRejectsPaidOrder(t *testing.T) {
 	service, db := newTestService(t)
 	order := Order{
-		UserID:      1,
-		TotalAmount: 10,
-		Status:      OrderStatusPaid,
-		OrderDate:   time.Now(),
+		UserID:           1,
+		TotalAmountCents: 1000,
+		Status:           OrderStatusPaid,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)
@@ -1241,15 +1298,15 @@ func TestShipOrderTransitionsPaidToShipped(t *testing.T) {
 	merchantUser := createTestUser(t, db, auth.RoleMerchant)
 	shop := createTestMerchant(t, db, merchantUser.ID)
 	order := Order{
-		UserID:      1,
-		TotalAmount: 10,
-		Status:      OrderStatusPaid,
-		OrderDate:   time.Now(),
+		UserID:           1,
+		TotalAmountCents: 1000,
+		Status:           OrderStatusPaid,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)
 	}
-	if err := db.Create(&OrderItem{OrderID: order.ID, ProductID: 1, ProductName: "商品", Price: 10, Quantity: 1, MerchantID: shop.ID}).Error; err != nil {
+	if err := db.Create(&OrderItem{OrderID: order.ID, ProductID: 1, ProductName: "商品", PriceCents: 1000, Quantity: 1, MerchantID: shop.ID}).Error; err != nil {
 		t.Fatalf("failed to create order item: %v", err)
 	}
 
@@ -1286,15 +1343,15 @@ func TestShipOrderRejectsForeignMerchant(t *testing.T) {
 	otherMerchant := createTestUser(t, db, auth.RoleMerchant)
 	shop := createTestMerchant(t, db, owner.ID)
 	order := Order{
-		UserID:      1,
-		TotalAmount: 10,
-		Status:      OrderStatusPaid,
-		OrderDate:   time.Now(),
+		UserID:           1,
+		TotalAmountCents: 1000,
+		Status:           OrderStatusPaid,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)
 	}
-	if err := db.Create(&OrderItem{OrderID: order.ID, ProductID: 1, ProductName: "商品", Price: 10, Quantity: 1, MerchantID: shop.ID}).Error; err != nil {
+	if err := db.Create(&OrderItem{OrderID: order.ID, ProductID: 1, ProductName: "商品", PriceCents: 1000, Quantity: 1, MerchantID: shop.ID}).Error; err != nil {
 		t.Fatalf("failed to create order item: %v", err)
 	}
 
@@ -1322,10 +1379,10 @@ func TestShipOrderRejectsCustomerActor(t *testing.T) {
 	service, db := newTestService(t)
 	customer := createTestUser(t, db, auth.RoleCustomer)
 	order := Order{
-		UserID:      1,
-		TotalAmount: 10,
-		Status:      OrderStatusPaid,
-		OrderDate:   time.Now(),
+		UserID:           1,
+		TotalAmountCents: 1000,
+		Status:           OrderStatusPaid,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)
@@ -1364,10 +1421,10 @@ func TestShipOrderRejectsInvalidStatuses(t *testing.T) {
 			service, db := newTestService(t)
 			admin := createTestUser(t, db, auth.RoleAdmin)
 			order := Order{
-				UserID:      1,
-				TotalAmount: 10,
-				Status:      initialStatus,
-				OrderDate:   time.Now(),
+				UserID:           1,
+				TotalAmountCents: 1000,
+				Status:           initialStatus,
+				OrderDate:        time.Now(),
 			}
 			if err := db.Create(&order).Error; err != nil {
 				t.Fatalf("failed to create order: %v", err)
@@ -1399,10 +1456,10 @@ func TestShipOrderRollsBackStatusWhenOutboxInsertFails(t *testing.T) {
 	service, db := newTestService(t)
 	admin := createTestUser(t, db, auth.RoleAdmin)
 	order := Order{
-		UserID:      1,
-		TotalAmount: 10,
-		Status:      OrderStatusPaid,
-		OrderDate:   time.Now(),
+		UserID:           1,
+		TotalAmountCents: 1000,
+		Status:           OrderStatusPaid,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)
@@ -1442,10 +1499,10 @@ func TestCompleteOrderTransitionsShippedToCompleted(t *testing.T) {
 	publisher := &recordingPublisher{}
 	service, db := newTestServiceWithPublisher(t, publisher)
 	order := Order{
-		UserID:      7,
-		TotalAmount: 10,
-		Status:      OrderStatusShipped,
-		OrderDate:   time.Now(),
+		UserID:           7,
+		TotalAmountCents: 1000,
+		Status:           OrderStatusShipped,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)
@@ -1490,10 +1547,10 @@ func TestCompleteOrderRejectsInvalidStatuses(t *testing.T) {
 		t.Run(initialStatus, func(t *testing.T) {
 			service, db := newTestService(t)
 			order := Order{
-				UserID:      7,
-				TotalAmount: 10,
-				Status:      initialStatus,
-				OrderDate:   time.Now(),
+				UserID:           7,
+				TotalAmountCents: 1000,
+				Status:           initialStatus,
+				OrderDate:        time.Now(),
 			}
 			if err := db.Create(&order).Error; err != nil {
 				t.Fatalf("failed to create order: %v", err)
@@ -1524,10 +1581,10 @@ func TestCompleteOrderRejectsInvalidStatuses(t *testing.T) {
 func TestCompleteOrderRollsBackStatusWhenOutboxInsertFails(t *testing.T) {
 	service, db := newTestService(t)
 	order := Order{
-		UserID:      7,
-		TotalAmount: 10,
-		Status:      OrderStatusShipped,
-		OrderDate:   time.Now(),
+		UserID:           7,
+		TotalAmountCents: 1000,
+		Status:           OrderStatusShipped,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&order).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)
@@ -1570,24 +1627,24 @@ func TestListMerchantOrdersOnlyReturnsRelatedOrders(t *testing.T) {
 	ownShop := createTestMerchant(t, db, merchantUser.ID)
 	otherShop := createTestMerchant(t, db, otherUser.ID)
 
-	ownOrder := Order{UserID: 10, TotalAmount: 30, Status: OrderStatusPaid, OrderDate: time.Now()}
+	ownOrder := Order{UserID: 10, TotalAmountCents: 3000, Status: OrderStatusPaid, OrderDate: time.Now()}
 	if err := db.Create(&ownOrder).Error; err != nil {
 		t.Fatalf("failed to create own order: %v", err)
 	}
 	if err := db.Create(&[]OrderItem{
-		{OrderID: ownOrder.ID, ProductID: 1, MerchantID: ownShop.ID, ProductName: "Own Item", Price: 10, Quantity: 1},
-		{OrderID: ownOrder.ID, ProductID: 2, MerchantID: otherShop.ID, ProductName: "Other Item", Price: 20, Quantity: 1},
-		{OrderID: ownOrder.ID, ProductID: 4, ProductName: "Legacy Item", Price: 5, Quantity: 1},
+		{OrderID: ownOrder.ID, ProductID: 1, MerchantID: ownShop.ID, ProductName: "Own Item", PriceCents: 1000, Quantity: 1},
+		{OrderID: ownOrder.ID, ProductID: 2, MerchantID: otherShop.ID, ProductName: "Other Item", PriceCents: 2000, Quantity: 1},
+		{OrderID: ownOrder.ID, ProductID: 4, ProductName: "Legacy Item", PriceCents: 500, Quantity: 1},
 	}).Error; err != nil {
 		t.Fatalf("failed to create mixed order items: %v", err)
 	}
 
-	foreignOrder := Order{UserID: 11, TotalAmount: 40, Status: OrderStatusPaid, OrderDate: time.Now()}
+	foreignOrder := Order{UserID: 11, TotalAmountCents: 4000, Status: OrderStatusPaid, OrderDate: time.Now()}
 	if err := db.Create(&foreignOrder).Error; err != nil {
 		t.Fatalf("failed to create foreign order: %v", err)
 	}
 	if err := db.Create(&OrderItem{
-		OrderID: foreignOrder.ID, ProductID: 3, MerchantID: otherShop.ID, ProductName: "Foreign Item", Price: 40, Quantity: 1,
+		OrderID: foreignOrder.ID, ProductID: 3, MerchantID: otherShop.ID, ProductName: "Foreign Item", PriceCents: 4000, Quantity: 1,
 	}).Error; err != nil {
 		t.Fatalf("failed to create foreign order item: %v", err)
 	}
@@ -1609,8 +1666,8 @@ func TestListMerchantOrdersOnlyReturnsRelatedOrders(t *testing.T) {
 	if got, want := resp.Orders[0].Id, int64(ownOrder.ID); got != want {
 		t.Fatalf("unexpected order id: got %d want %d", got, want)
 	}
-	if got, want := resp.Orders[0].TotalAmount, float32(10); got != want {
-		t.Fatalf("unexpected merchant-visible total amount: got %.2f want %.2f", got, want)
+	if got, want := resp.Orders[0].TotalAmountCents, int64(1000); got != want {
+		t.Fatalf("unexpected merchant-visible total AmountCents: got %d want %d", got, want)
 	}
 	if got, want := len(resp.Orders[0].Items), 1; got != want {
 		t.Fatalf("unexpected merchant order item count: got %d want %d", got, want)
@@ -1625,40 +1682,40 @@ func TestListOrdersBatchLoadsItemsAndPreservesPageOrder(t *testing.T) {
 	baseTime := time.Now().Add(-time.Hour)
 
 	oldOrder := Order{
-		Model:       gorm.Model{CreatedAt: baseTime},
-		UserID:      42,
-		TotalAmount: 25,
-		Status:      OrderStatusPaid,
-		OrderDate:   baseTime,
+		Model:            gorm.Model{CreatedAt: baseTime},
+		UserID:           42,
+		TotalAmountCents: 2500,
+		Status:           OrderStatusPaid,
+		OrderDate:        baseTime,
 	}
 	if err := db.Create(&oldOrder).Error; err != nil {
 		t.Fatalf("failed to create old order: %v", err)
 	}
 	newOrder := Order{
-		Model:       gorm.Model{CreatedAt: baseTime.Add(2 * time.Minute)},
-		UserID:      42,
-		TotalAmount: 30,
-		Status:      OrderStatusPaid,
-		OrderDate:   baseTime.Add(2 * time.Minute),
+		Model:            gorm.Model{CreatedAt: baseTime.Add(2 * time.Minute)},
+		UserID:           42,
+		TotalAmountCents: 3000,
+		Status:           OrderStatusPaid,
+		OrderDate:        baseTime.Add(2 * time.Minute),
 	}
 	if err := db.Create(&newOrder).Error; err != nil {
 		t.Fatalf("failed to create new order: %v", err)
 	}
 	otherUserOrder := Order{
-		Model:       gorm.Model{CreatedAt: baseTime.Add(3 * time.Minute)},
-		UserID:      99,
-		TotalAmount: 99,
-		Status:      OrderStatusPaid,
-		OrderDate:   baseTime.Add(3 * time.Minute),
+		Model:            gorm.Model{CreatedAt: baseTime.Add(3 * time.Minute)},
+		UserID:           99,
+		TotalAmountCents: 9900,
+		Status:           OrderStatusPaid,
+		OrderDate:        baseTime.Add(3 * time.Minute),
 	}
 	if err := db.Create(&otherUserOrder).Error; err != nil {
 		t.Fatalf("failed to create other user order: %v", err)
 	}
 	if err := db.Create(&[]OrderItem{
-		{OrderID: oldOrder.ID, ProductID: 1, MerchantID: 1, ProductName: "Old A", Price: 10, Quantity: 2},
-		{OrderID: oldOrder.ID, ProductID: 2, MerchantID: 1, ProductName: "Old B", Price: 5, Quantity: 1},
-		{OrderID: newOrder.ID, ProductID: 3, MerchantID: 2, ProductName: "New A", Price: 30, Quantity: 1},
-		{OrderID: otherUserOrder.ID, ProductID: 4, MerchantID: 2, ProductName: "Other", Price: 99, Quantity: 1},
+		{OrderID: oldOrder.ID, ProductID: 1, MerchantID: 1, ProductName: "Old A", PriceCents: 1000, Quantity: 2},
+		{OrderID: oldOrder.ID, ProductID: 2, MerchantID: 1, ProductName: "Old B", PriceCents: 500, Quantity: 1},
+		{OrderID: newOrder.ID, ProductID: 3, MerchantID: 2, ProductName: "New A", PriceCents: 3000, Quantity: 1},
+		{OrderID: otherUserOrder.ID, ProductID: 4, MerchantID: 2, ProductName: "Other", PriceCents: 9900, Quantity: 1},
 	}).Error; err != nil {
 		t.Fatalf("failed to create order items: %v", err)
 	}
@@ -1708,14 +1765,14 @@ func TestListMerchantOrdersAdminSeesCompleteOrderItems(t *testing.T) {
 	ownShop := createTestMerchant(t, db, merchantUser.ID)
 	otherShop := createTestMerchant(t, db, otherUser.ID)
 
-	mixedOrder := Order{UserID: 10, TotalAmount: 35, Status: OrderStatusPaid, OrderDate: time.Now()}
+	mixedOrder := Order{UserID: 10, TotalAmountCents: 3500, Status: OrderStatusPaid, OrderDate: time.Now()}
 	if err := db.Create(&mixedOrder).Error; err != nil {
 		t.Fatalf("failed to create mixed order: %v", err)
 	}
 	if err := db.Create(&[]OrderItem{
-		{OrderID: mixedOrder.ID, ProductID: 1, MerchantID: ownShop.ID, ProductName: "Own Item", Price: 10, Quantity: 1},
-		{OrderID: mixedOrder.ID, ProductID: 2, MerchantID: otherShop.ID, ProductName: "Other Item", Price: 20, Quantity: 1},
-		{OrderID: mixedOrder.ID, ProductID: 3, ProductName: "Legacy Item", Price: 5, Quantity: 1},
+		{OrderID: mixedOrder.ID, ProductID: 1, MerchantID: ownShop.ID, ProductName: "Own Item", PriceCents: 1000, Quantity: 1},
+		{OrderID: mixedOrder.ID, ProductID: 2, MerchantID: otherShop.ID, ProductName: "Other Item", PriceCents: 2000, Quantity: 1},
+		{OrderID: mixedOrder.ID, ProductID: 3, ProductName: "Legacy Item", PriceCents: 500, Quantity: 1},
 	}).Error; err != nil {
 		t.Fatalf("failed to create mixed order items: %v", err)
 	}
@@ -1736,8 +1793,8 @@ func TestListMerchantOrdersAdminSeesCompleteOrderItems(t *testing.T) {
 	if got, want := len(resp.Orders), 1; got != want {
 		t.Fatalf("unexpected order count: got %d want %d", got, want)
 	}
-	if got, want := resp.Orders[0].TotalAmount, float32(35); got != want {
-		t.Fatalf("unexpected admin total amount: got %.2f want %.2f", got, want)
+	if got, want := resp.Orders[0].TotalAmountCents, int64(3500); got != want {
+		t.Fatalf("unexpected admin total AmountCents: got %d want %d", got, want)
 	}
 	if got, want := len(resp.Orders[0].Items), 3; got != want {
 		t.Fatalf("unexpected admin item count: got %d want %d", got, want)
@@ -1845,11 +1902,11 @@ func seedListOrders(t *testing.T, db *gorm.DB, userID uint, orderCount int) {
 	baseTime := time.Now().Add(-time.Duration(orderCount) * time.Minute)
 	for i := 0; i < orderCount; i++ {
 		orderInfo := Order{
-			Model:       gorm.Model{CreatedAt: baseTime.Add(time.Duration(i) * time.Minute)},
-			UserID:      userID,
-			TotalAmount: float64(i + 2),
-			Status:      OrderStatusPaid,
-			OrderDate:   baseTime.Add(time.Duration(i) * time.Minute),
+			Model:            gorm.Model{CreatedAt: baseTime.Add(time.Duration(i) * time.Minute)},
+			UserID:           userID,
+			TotalAmountCents: int64(i+2) * 100,
+			Status:           OrderStatusPaid,
+			OrderDate:        baseTime.Add(time.Duration(i) * time.Minute),
 		}
 		if err := db.Create(&orderInfo).Error; err != nil {
 			t.Fatalf("failed to create order %d: %v", i, err)
@@ -1859,7 +1916,7 @@ func seedListOrders(t *testing.T, db *gorm.DB, userID uint, orderCount int) {
 			ProductID:   int64(i + 1),
 			MerchantID:  1,
 			ProductName: fmt.Sprintf("Item %d", i),
-			Price:       float64(i + 2),
+			PriceCents:  int64(i+2) * 100,
 			Quantity:    1,
 		}).Error; err != nil {
 			t.Fatalf("failed to create order item %d: %v", i, err)
@@ -1873,11 +1930,11 @@ func seedMerchantListOrders(t *testing.T, db *gorm.DB, merchantID uint, orderCou
 	baseTime := time.Now().Add(-time.Duration(orderCount) * time.Minute)
 	for i := 0; i < orderCount; i++ {
 		orderInfo := Order{
-			Model:       gorm.Model{CreatedAt: baseTime.Add(time.Duration(i) * time.Minute)},
-			UserID:      uint(100 + i),
-			TotalAmount: float64(i + 1),
-			Status:      OrderStatusPaid,
-			OrderDate:   baseTime.Add(time.Duration(i) * time.Minute),
+			Model:            gorm.Model{CreatedAt: baseTime.Add(time.Duration(i) * time.Minute)},
+			UserID:           uint(100 + i),
+			TotalAmountCents: int64(i+1) * 100,
+			Status:           OrderStatusPaid,
+			OrderDate:        baseTime.Add(time.Duration(i) * time.Minute),
 		}
 		if err := db.Create(&orderInfo).Error; err != nil {
 			t.Fatalf("failed to create merchant order %d: %v", i, err)
@@ -1887,7 +1944,7 @@ func seedMerchantListOrders(t *testing.T, db *gorm.DB, merchantID uint, orderCou
 			ProductID:   int64(i + 1),
 			MerchantID:  merchantID,
 			ProductName: fmt.Sprintf("Merchant Item %d", i),
-			Price:       float64(i + 1),
+			PriceCents:  int64(i+1) * 100,
 			Quantity:    1,
 		}).Error; err != nil {
 			t.Fatalf("failed to create merchant order item %d: %v", i, err)

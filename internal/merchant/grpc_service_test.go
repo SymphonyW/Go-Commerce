@@ -91,7 +91,7 @@ func TestMerchantCanManageOwnProducts(t *testing.T) {
 		MerchantId:  int64(merchant.ID),
 		Name:        "Owned Product",
 		Description: "desc",
-		Price:       10,
+		PriceCents:  1000,
 		Stock:       3,
 		Category:    "demo",
 		ImageUrl:    "https://example.com/image.jpg",
@@ -124,7 +124,7 @@ func TestMerchantCannotManageOtherMerchantProducts(t *testing.T) {
 		MerchantId:  int64(merchant.ID),
 		Name:        "Forbidden Product",
 		Description: "desc",
-		Price:       10,
+		PriceCents:  1000,
 		Stock:       3,
 		Category:    "demo",
 		ImageUrl:    "https://example.com/image.jpg",
@@ -145,7 +145,7 @@ func TestAdminCanManageAnyMerchant(t *testing.T) {
 		MerchantId:  int64(merchant.ID),
 		Name:        "Admin Product",
 		Description: "desc",
-		Price:       10,
+		PriceCents:  1000,
 		Stock:       3,
 		Category:    "demo",
 		ImageUrl:    "https://example.com/image.jpg",
@@ -176,10 +176,10 @@ func TestMerchantOnlyListsOwnProducts(t *testing.T) {
 	ownShop := createOwnedMerchant(t, db, "Own Shop", owner.ID)
 	otherShop := createOwnedMerchant(t, db, "Other Shop", other.ID)
 
-	if err := db.Create(&product.Product{Name: "Own Product", Price: 10, Stock: 3, MerchantID: ownShop.ID}).Error; err != nil {
+	if err := db.Create(&product.Product{Name: "Own Product", PriceCents: 1000, Stock: 3, MerchantID: ownShop.ID}).Error; err != nil {
 		t.Fatalf("failed to create own product: %v", err)
 	}
-	if err := db.Create(&product.Product{Name: "Other Product", Price: 20, Stock: 5, MerchantID: otherShop.ID}).Error; err != nil {
+	if err := db.Create(&product.Product{Name: "Other Product", PriceCents: 2000, Stock: 5, MerchantID: otherShop.ID}).Error; err != nil {
 		t.Fatalf("failed to create other product: %v", err)
 	}
 
@@ -208,16 +208,16 @@ func TestMerchantCannotUpdateForeignProduct(t *testing.T) {
 	other := createMerchantTestUser(t, db, "foreign-actor", "merchant")
 	shop := createOwnedMerchant(t, db, "Foreign Shop", owner.ID)
 
-	target := product.Product{Name: "Protected Product", Price: 10, Stock: 3, MerchantID: shop.ID}
+	target := product.Product{Name: "Protected Product", PriceCents: 1000, Stock: 3, MerchantID: shop.ID}
 	if err := db.Create(&target).Error; err != nil {
 		t.Fatalf("failed to create product: %v", err)
 	}
 
-	newPrice := float32(99)
+	newPrice := int64(9900)
 	_, err := service.UpdateMerchantProduct(context.Background(), &pb.UpdateMerchantProductRequest{
 		ProductId:   int64(target.ID),
 		ActorUserId: int64(other.ID),
-		Price:       &newPrice,
+		PriceCents:  &newPrice,
 	})
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("unexpected error code: got %v want %v", status.Code(err), codes.PermissionDenied)

@@ -101,7 +101,7 @@ paths:
           in: query
           schema:
             type: string
-            enum: [created_at, price, stock]
+            enum: [created_at, price_cents, stock]
             default: created_at
         - name: order
           in: query
@@ -109,16 +109,18 @@ paths:
             type: string
             enum: [asc, desc]
             default: desc
-        - name: min_price
+        - name: min_price_cents
           in: query
           schema:
-            type: number
-            format: float
-        - name: max_price
+            type: integer
+            format: int64
+            minimum: 0
+        - name: max_price_cents
           in: query
           schema:
-            type: number
-            format: float
+            type: integer
+            format: int64
+            minimum: 0
       responses:
         '200':
           description: Product page
@@ -924,9 +926,10 @@ components:
           type: string
         description:
           type: string
-        price:
-          type: number
-          format: float
+        price_cents:
+          type: integer
+          format: int64
+          minimum: 0
         stock:
           type: integer
           format: int32
@@ -1002,15 +1005,16 @@ components:
           format: int64
     CreateConsoleProductRequest:
       type: object
-      required: [name, description, price, stock, category]
+      required: [name, description, price_cents, stock, category]
       properties:
         name:
           type: string
         description:
           type: string
-        price:
-          type: number
-          format: float
+        price_cents:
+          type: integer
+          format: int64
+          minimum: 0
         stock:
           type: integer
           format: int32
@@ -1025,9 +1029,10 @@ components:
           type: string
         description:
           type: string
-        price:
-          type: number
-          format: float
+        price_cents:
+          type: integer
+          format: int64
+          minimum: 0
         stock:
           type: integer
           format: int32
@@ -1073,9 +1078,10 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/OrderItem'
-        total_amount:
-          type: number
-          format: float
+        total_amount_cents:
+          type: integer
+          format: int64
+          minimum: 0
         status:
           type: string
           enum: [pending, paid, shipped, completed, cancelled]
@@ -1093,9 +1099,10 @@ components:
           format: int64
         product_name:
           type: string
-        price:
-          type: number
-          format: float
+        price_cents:
+          type: integer
+          format: int64
+          minimum: 0
         quantity:
           type: integer
           format: int32
@@ -1133,9 +1140,10 @@ components:
         user_id:
           type: integer
           format: int64
-        amount:
-          type: number
-          format: float
+        amount_cents:
+          type: integer
+          format: int64
+          minimum: 0
         status:
           type: string
           enum: [created, succeeded, failed]
@@ -1165,9 +1173,10 @@ components:
           format: int64
         product_name:
           type: string
-        price:
-          type: number
-          format: float
+        price_cents:
+          type: integer
+          format: int64
+          minimum: 0
         quantity:
           type: integer
           format: int32
@@ -1180,9 +1189,10 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/CartItem'
-        total_amount:
-          type: number
-          format: float
+        total_amount_cents:
+          type: integer
+          format: int64
+          minimum: 0
     SuccessResponse:
       type: object
       properties:

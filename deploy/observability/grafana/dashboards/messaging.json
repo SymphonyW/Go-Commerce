@@ -1,0 +1,56 @@
+{
+  "uid": "go-commerce-messaging",
+  "title": "Go Commerce - Messaging",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Outbox Backlog",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "outbox_pending_events", "legendFormat": "{{service}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Oldest Pending Event Age",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "outbox_oldest_pending_seconds", "legendFormat": "{{service}}" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Publish Retry",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(go_commerce_outbox_retry_total[5m]))", "legendFormat": "retry" },
+        { "expr": "sum(rate(outbox_publish_failures_total[5m]))", "legendFormat": "publish failures" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Failed Events",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(go_commerce_outbox_failed_total[5m]))", "legendFormat": "failed" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Consumer Failures",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum by (service, consumer, event_type, requeue) (rate(consumer_failures_total[5m]))", "legendFormat": "{{service}} {{consumer}} {{event_type}} requeue={{requeue}}" }
+      ]
+    }
+  ]
+}

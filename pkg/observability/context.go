@@ -21,6 +21,7 @@ type contextKey string
 const (
 	requestIDKey contextKey = "request_id"
 	traceIDKey   contextKey = "trace_id"
+	spanIDKey    contextKey = "span_id"
 	userIDKey    contextKey = "user_id"
 )
 
@@ -45,6 +46,18 @@ func WithTraceID(ctx context.Context, traceID string) context.Context {
 
 func TraceIDFromContext(ctx context.Context) string {
 	value, _ := ctx.Value(traceIDKey).(string)
+	return value
+}
+
+func WithSpanID(ctx context.Context, spanID string) context.Context {
+	if strings.TrimSpace(spanID) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, spanIDKey, strings.TrimSpace(spanID))
+}
+
+func SpanIDFromContext(ctx context.Context) string {
+	value, _ := ctx.Value(spanIDKey).(string)
 	return value
 }
 

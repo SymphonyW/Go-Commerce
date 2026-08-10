@@ -92,7 +92,7 @@ func convertToPBPayment(payment *Payment) *pb.Payment {
 		PaymentNo:     payment.PaymentNo,
 		OrderId:       int64(payment.OrderID),
 		UserId:        int64(payment.UserID),
-		Amount:        float32(payment.Amount),
+		AmountCents:   payment.AmountCents,
 		Status:        payment.Status,
 		PaymentMethod: payment.PaymentMethod,
 		CreatedAt:     payment.CreatedAt.Format(time.RFC3339),

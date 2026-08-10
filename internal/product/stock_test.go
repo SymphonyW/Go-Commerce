@@ -30,7 +30,7 @@ func newStockTestDB(t *testing.T) *gorm.DB {
 
 func TestDeductStockUsesAtomicCondition(t *testing.T) {
 	db := newStockTestDB(t)
-	item := Product{Name: "库存商品", Price: 10, Stock: 3, MerchantID: 1}
+	item := Product{Name: "库存商品", PriceCents: 1000, Stock: 3, MerchantID: 1}
 	if err := db.Create(&item).Error; err != nil {
 		t.Fatalf("failed to create product: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestDeductStockRejectsMissingProductAndInvalidQuantity(t *testing.T) {
 
 func TestRestoreStockAddsStockAtomically(t *testing.T) {
 	db := newStockTestDB(t)
-	item := Product{Name: "回补商品", Price: 10, Stock: 1, MerchantID: 1}
+	item := Product{Name: "回补商品", PriceCents: 1000, Stock: 1, MerchantID: 1}
 	if err := db.Create(&item).Error; err != nil {
 		t.Fatalf("failed to create product: %v", err)
 	}

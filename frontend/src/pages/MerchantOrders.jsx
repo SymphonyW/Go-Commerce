@@ -7,7 +7,7 @@ import PageHeader from '../components/PageHeader';
 import SectionCard from '../components/SectionCard';
 import StatusBadge from '../components/StatusBadge';
 import { merchantAPI } from '../services/api';
-import { formatCurrency, formatDateTime, getOrderStatusLabel } from '../utils/display';
+import { formatMoney, formatDateTime, getOrderStatusLabel } from '../utils/display';
 
 const MerchantOrders = () => {
   const navigate = useNavigate();
@@ -89,7 +89,7 @@ const MerchantOrders = () => {
                   <span>#{order.id}</span>
                   <StatusBadge status={order.status} label={getOrderStatusLabel(order.status, order.cancel_reason)} />
                   <span>{(order.items || []).map((item) => `${item.product_name} × ${item.quantity}`).join('，')}</span>
-                  <span>{formatCurrency(order.total_amount)}</span>
+                  <span>{formatMoney(order.total_amount_cents)}</span>
                   <span>{formatDateTime(order.created_at)}</span>
                 </div>
               ))}

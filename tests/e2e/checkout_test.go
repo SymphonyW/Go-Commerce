@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -84,7 +85,7 @@ func TestCheckoutFlowThroughGateway(t *testing.T) {
 		t.Fatalf("unexpected merchant role: got %q want merchant", merchantLogin.Role)
 	}
 
-	shopID := client.createMerchant(t, merchantLogin.Token)
+	shopID := client.createMerchant(t, merchantLogin.Token, "E2E Shop "+suffix)
 	cleanupIDs.merchantID = shopID
 	productID := client.addProduct(t, merchantLogin.Token, shopID, productName)
 	cleanupIDs.productID = productID
@@ -123,10 +124,22 @@ func newAPIClient() *apiClient {
 	}
 }
 
+func durationFromEnv(key string, fallback time.Duration) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
 func waitForGatewayReady(t *testing.T, client *apiClient) {
 	t.Helper()
 
-	deadline := time.Now().Add(45 * time.Second)
+	deadline := time.Now().Add(durationFromEnv("E2E_READY_TIMEOUT", 45*time.Second))
 	for time.Now().Before(deadline) {
 		resp, err := client.client.Get(client.baseURL + "/readyz")
 		if err == nil {
@@ -162,11 +175,11 @@ func (c *apiClient) login(t *testing.T, username string) authResponse {
 	return resp
 }
 
-func (c *apiClient) createMerchant(t *testing.T, token string) int64 {
+func (c *apiClient) createMerchant(t *testing.T, token, name string) int64 {
 	t.Helper()
 	var resp merchantResponse
 	c.doJSON(t, http.MethodPost, "/api/merchants", token, map[string]string{
-		"name":         "E2E Shop",
+		"name":         name,
 		"contact_info": "e2e@example.com",
 	}, nil, http.StatusOK, &resp)
 	return resp.Merchant.ID
@@ -179,7 +192,7 @@ func (c *apiClient) addProduct(t *testing.T, token string, merchantID int64, nam
 		"merchant_id": merchantID,
 		"name":        name,
 		"description": "e2e product",
-		"price":       99.9,
+		"price_cents": 9990,
 		"stock":       5,
 		"category":    "e2e",
 		"image_url":   "https://example.com/e2e.png",
@@ -190,7 +203,7 @@ func (c *apiClient) addProduct(t *testing.T, token string, merchantID int64, nam
 func (c *apiClient) assertProductVisible(t *testing.T, productName string, productID int64) {
 	t.Helper()
 	var resp productListResponse
-	c.doJSON(t, http.MethodGet, "/api/products?keyword="+productName, "", nil, nil, http.StatusOK, &resp)
+	c.doJSON(t, http.MethodGet, "/api/products?keyword="+url.QueryEscape(productName), "", nil, nil, http.StatusOK, &resp)
 	for _, item := range resp.Products {
 		if item.ID == productID && item.Name == productName {
 			return
@@ -236,7 +249,7 @@ func (c *apiClient) markPaymentSucceeded(t *testing.T, token string, paymentID i
 func (c *apiClient) waitForOrderStatus(t *testing.T, token string, orderID int64, expected string) {
 	t.Helper()
 
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(durationFromEnv("E2E_ORDER_STATUS_TIMEOUT", 20*time.Second))
 	for time.Now().Before(deadline) {
 		resp := c.getOrder(t, token, orderID)
 		if resp.Order.Status == expected {
@@ -321,7 +334,8 @@ func cleanupE2EData(t *testing.T, ids e2eCleanupIDs) {
 	}
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
-		t.Fatalf("failed to open e2e cleanup database: %v", err)
+		t.Logf("failed to open e2e cleanup database: %v", err)
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

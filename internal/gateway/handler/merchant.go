@@ -83,13 +83,13 @@ func (h *Handler) ListMerchants(c *gin.Context) {
 }
 
 type merchantProductRequest struct {
-	MerchantID  int64   `json:"merchant_id" binding:"required,gt=0"`
-	Name        string  `json:"name" binding:"required"`
-	Description string  `json:"description"`
-	Price       float32 `json:"price" binding:"gte=0"`
-	Stock       int32   `json:"stock" binding:"gte=0"`
-	Category    string  `json:"category" binding:"required"`
-	ImageURL    string  `json:"image_url"`
+	MerchantID  int64  `json:"merchant_id" binding:"required,gt=0"`
+	Name        string `json:"name" binding:"required"`
+	Description string `json:"description"`
+	PriceCents  int64  `json:"price_cents" binding:"gte=0"`
+	Stock       int32  `json:"stock" binding:"gte=0"`
+	Category    string `json:"category" binding:"required"`
+	ImageURL    string `json:"image_url"`
 }
 
 func (h *Handler) MerchantAddProduct(c *gin.Context) {
@@ -108,7 +108,7 @@ func (h *Handler) MerchantAddProduct(c *gin.Context) {
 		MerchantId:  req.MerchantID,
 		Name:        req.Name,
 		Description: req.Description,
-		Price:       req.Price,
+		PriceCents:  req.PriceCents,
 		Stock:       req.Stock,
 		Category:    req.Category,
 		ImageUrl:    req.ImageURL,
@@ -209,12 +209,12 @@ func (h *Handler) CurrentMerchantProducts(c *gin.Context) {
 }
 
 type createCurrentMerchantProductRequest struct {
-	Name        string  `json:"name" binding:"required"`
-	Description string  `json:"description"`
-	Price       float32 `json:"price" binding:"gte=0"`
-	Stock       int32   `json:"stock" binding:"gte=0"`
-	Category    string  `json:"category" binding:"required"`
-	ImageURL    string  `json:"image_url"`
+	Name        string `json:"name" binding:"required"`
+	Description string `json:"description"`
+	PriceCents  int64  `json:"price_cents" binding:"gte=0"`
+	Stock       int32  `json:"stock" binding:"gte=0"`
+	Category    string `json:"category" binding:"required"`
+	ImageURL    string `json:"image_url"`
 }
 
 func (h *Handler) CreateCurrentMerchantProduct(c *gin.Context) {
@@ -250,7 +250,7 @@ func (h *Handler) CreateCurrentMerchantProduct(c *gin.Context) {
 		MerchantId:  currentMerchant.Merchant.Id,
 		Name:        strings.TrimSpace(req.Name),
 		Description: strings.TrimSpace(req.Description),
-		Price:       req.Price,
+		PriceCents:  req.PriceCents,
 		Stock:       req.Stock,
 		Category:    strings.TrimSpace(req.Category),
 		ImageUrl:    strings.TrimSpace(req.ImageURL),
@@ -264,12 +264,12 @@ func (h *Handler) CreateCurrentMerchantProduct(c *gin.Context) {
 }
 
 type updateCurrentMerchantProductRequest struct {
-	Name        *string  `json:"name"`
-	Description *string  `json:"description"`
-	Price       *float32 `json:"price"`
-	Stock       *int32   `json:"stock"`
-	Category    *string  `json:"category"`
-	ImageURL    *string  `json:"image_url"`
+	Name        *string `json:"name"`
+	Description *string `json:"description"`
+	PriceCents  *int64  `json:"price_cents"`
+	Stock       *int32  `json:"stock"`
+	Category    *string `json:"category"`
+	ImageURL    *string `json:"image_url"`
 }
 
 func (h *Handler) UpdateCurrentMerchantProduct(c *gin.Context) {
@@ -293,7 +293,7 @@ func (h *Handler) UpdateCurrentMerchantProduct(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	if req.Name == nil && req.Description == nil && req.Price == nil && req.Stock == nil && req.Category == nil && req.ImageURL == nil {
+	if req.Name == nil && req.Description == nil && req.PriceCents == nil && req.Stock == nil && req.Category == nil && req.ImageURL == nil {
 		response.BadRequest(c, "at least one field must be provided")
 		return
 	}
@@ -305,8 +305,8 @@ func (h *Handler) UpdateCurrentMerchantProduct(c *gin.Context) {
 		response.BadRequest(c, "category cannot be empty")
 		return
 	}
-	if req.Price != nil && *req.Price < 0 {
-		response.BadRequest(c, "price must be non-negative")
+	if req.PriceCents != nil && *req.PriceCents < 0 {
+		response.BadRequest(c, "price_cents must be non-negative")
 		return
 	}
 	if req.Stock != nil && *req.Stock < 0 {
@@ -324,7 +324,7 @@ func (h *Handler) UpdateCurrentMerchantProduct(c *gin.Context) {
 		MerchantId:  merchantID,
 		Name:        req.Name,
 		Description: req.Description,
-		Price:       req.Price,
+		PriceCents:  req.PriceCents,
 		Stock:       req.Stock,
 		Category:    req.Category,
 		ImageUrl:    req.ImageURL,

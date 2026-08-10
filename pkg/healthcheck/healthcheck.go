@@ -62,6 +62,17 @@ func Handler(dependencies ...Dependency) http.Handler {
 	return mux
 }
 
+func HandlerWithMetrics(metrics http.Handler, dependencies ...Dependency) http.Handler {
+	probe := Handler(dependencies...)
+	mux := http.NewServeMux()
+	mux.Handle("/healthz", probe)
+	mux.Handle("/readyz", probe)
+	if metrics != nil {
+		mux.Handle("/metrics", metrics)
+	}
+	return mux
+}
+
 // SQL 使用 PingContext 验证数据库连接池是否仍然可用。
 func SQL(db *sql.DB) Checker {
 	return func(ctx context.Context) error {

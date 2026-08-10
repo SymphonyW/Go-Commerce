@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/streadway/amqp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -19,12 +21,22 @@ import (
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/healthcheck"
 	"go-commerce/pkg/mq"
+	"go-commerce/pkg/observability"
 	"go-commerce/pkg/serviceutil"
 )
 
 func main() {
 	ctx, stop := serviceutil.SignalContext()
 	defer stop()
+	telemetry := observability.SetupService(ctx, "order-service")
+	logger := telemetry.Logger
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetry.Shutdown(shutdownCtx); err != nil {
+			logger.Error("otel_shutdown_failed", "error", err)
+		}
+	}()
 
 	dsn := serviceutil.Env("DB_DSN", "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local")
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
@@ -102,7 +114,8 @@ func main() {
 	healthServer := serviceutil.StartHTTPServer(
 		"order health server",
 		serviceutil.Env("ORDER_HEALTH_ADDR", ":8083"),
-		healthcheck.Handler(
+		healthcheck.HandlerWithMetrics(
+			promhttp.HandlerFor(telemetry.Registry, promhttp.HandlerOpts{}),
 			healthcheck.Dependency{Name: "mysql", Check: healthcheck.SQL(sqlDB)},
 			healthcheck.Dependency{Name: "rabbitmq", Check: healthcheck.AMQP(rabbitConn)},
 		),
@@ -113,15 +126,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("grpc_listen_failed addr=%s error=%v", grpcAddr, err)
 	}
-	server := grpc.NewServer()
-	pb.RegisterOrderServiceServer(server, order.NewServiceWithTimeout(db, publisher, timeoutScheduler, paymentTimeout))
+	server := grpc.NewServer(grpc.UnaryInterceptor(observability.UnaryServerInterceptor(logger, telemetry.Metrics)))
+	publisher = mq.NewInstrumentedPublisher(publisher, telemetry.Metrics)
+	pb.RegisterOrderServiceServer(server, order.NewServiceWithTimeoutAndMetrics(db, publisher, timeoutScheduler, paymentTimeout, telemetry.Metrics))
 	grpcHealth := healthcheck.RegisterGRPC(server)
 
 	if paymentConsumerChannel != nil {
-		go consumePaymentSucceededEvents(paymentConsumerChannel, exchangeName, db, publisher)
+		go consumePaymentSucceededEvents(paymentConsumerChannel, exchangeName, db, publisher, telemetry.Metrics)
 	}
 	if timeoutConsumerChannel != nil {
-		go consumeOrderTimeoutEvents(timeoutConsumerChannel, db, publisher)
+		go consumeOrderTimeoutEvents(timeoutConsumerChannel, db, publisher, telemetry.Metrics)
 	}
 
 	serveErr := make(chan error, 1)
@@ -177,7 +191,7 @@ func declareOrderTimeoutTopology(ch *amqp.Channel) error {
 	return ch.QueueBind(cancelQueue.Name, events.OrderTimeoutCheckType, order.OrderTimeoutDLX, false, nil)
 }
 
-func consumePaymentSucceededEvents(ch *amqp.Channel, exchangeName string, db *gorm.DB, publisher mq.Publisher) {
+func consumePaymentSucceededEvents(ch *amqp.Channel, exchangeName string, db *gorm.DB, publisher mq.Publisher, metrics *observability.Metrics) {
 	if err := ch.ExchangeDeclare(exchangeName, "topic", true, false, false, false, nil); err != nil {
 		log.Printf("rabbitmq_exchange_declare_failed exchange=%s error=%v", exchangeName, err)
 		return
@@ -198,6 +212,7 @@ func consumePaymentSucceededEvents(ch *amqp.Channel, exchangeName string, db *go
 	}
 
 	consumer := order.NewPaymentSucceededConsumer(db, publisher, log.Default())
+	consumer.SetMetrics(metrics)
 	log.Printf("order_payment_consumer_started exchange=%s queue=%s routing_key=%s", exchangeName, queue.Name, events.PaymentSucceededType)
 	for delivery := range deliveries {
 		if err := consumer.HandleDelivery(delivery); err != nil {
@@ -206,7 +221,7 @@ func consumePaymentSucceededEvents(ch *amqp.Channel, exchangeName string, db *go
 	}
 }
 
-func consumeOrderTimeoutEvents(ch *amqp.Channel, db *gorm.DB, publisher mq.Publisher) {
+func consumeOrderTimeoutEvents(ch *amqp.Channel, db *gorm.DB, publisher mq.Publisher, metrics *observability.Metrics) {
 	if err := declareOrderTimeoutTopology(ch); err != nil {
 		log.Printf("rabbitmq_timeout_topology_declare_failed error=%v", err)
 		return
@@ -218,6 +233,7 @@ func consumeOrderTimeoutEvents(ch *amqp.Channel, db *gorm.DB, publisher mq.Publi
 	}
 
 	consumer := order.NewOrderTimeoutConsumer(db, publisher, log.Default())
+	consumer.SetMetrics(metrics)
 	log.Printf(
 		"order_timeout_consumer_started delay_exchange=%s dlx=%s queue=%s routing_key=%s",
 		order.OrderTimeoutDelayExchange,

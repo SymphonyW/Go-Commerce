@@ -149,11 +149,11 @@ func seedPaymentTestOrder(t *testing.T, db *gorm.DB, orderPB *pbOrder.Order) {
 	t.Helper()
 
 	persisted := orderdomain.Order{
-		Model:       gorm.Model{ID: uint(orderPB.Id)},
-		UserID:      uint(orderPB.UserId),
-		TotalAmount: float64(orderPB.TotalAmount),
-		Status:      orderPB.Status,
-		OrderDate:   time.Now(),
+		Model:            gorm.Model{ID: uint(orderPB.Id)},
+		UserID:           uint(orderPB.UserId),
+		TotalAmountCents: orderPB.TotalAmountCents,
+		Status:           orderPB.Status,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&persisted).Error; err != nil {
 		t.Fatalf("failed to seed order: %v", err)
@@ -215,7 +215,7 @@ func TestCreatePaymentRejectsMissingOrder(t *testing.T) {
 
 func TestCreatePaymentRejectsOtherUsersOrder(t *testing.T) {
 	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 2, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 2, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, nil)
 
 	_, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
@@ -226,7 +226,7 @@ func TestCreatePaymentRejectsOtherUsersOrder(t *testing.T) {
 
 func TestCreatePaymentForPendingOrder(t *testing.T) {
 	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, nil)
 
 	payment, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
@@ -236,14 +236,28 @@ func TestCreatePaymentForPendingOrder(t *testing.T) {
 	if payment.PaymentNo == "" {
 		t.Fatal("expected payment no")
 	}
-	if got, want := payment.Amount, 99.0; got != want {
-		t.Fatalf("unexpected amount: got %.2f want %.2f", got, want)
+	if got, want := payment.AmountCents, int64(9900); got != want {
+		t.Fatalf("unexpected AmountCents: got %d want %d", got, want)
 	}
 	if got, want := payment.Status, PaymentStatusCreated; got != want {
 		t.Fatalf("unexpected status: got %q want %q", got, want)
 	}
 	if payment.ActiveOrderID == nil || *payment.ActiveOrderID != 1 {
 		t.Fatalf("unexpected active order id: got %v want 1", payment.ActiveOrderID)
+	}
+}
+
+func TestCreatePaymentUsesOneCentAmountExactly(t *testing.T) {
+	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 1},
+	}}, nil)
+
+	payment, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
+	if err != nil {
+		t.Fatalf("CreatePayment returned error: %v", err)
+	}
+	if got, want := payment.AmountCents, int64(1); got != want {
+		t.Fatalf("unexpected AmountCents: got %d want %d", got, want)
 	}
 }
 
@@ -257,7 +271,7 @@ func TestPaymentActiveOrderUniqueIndexExists(t *testing.T) {
 
 func TestCreatePaymentRejectsDuplicateActivePayment(t *testing.T) {
 	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, nil)
 
 	if _, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance); err != nil {
@@ -271,7 +285,7 @@ func TestCreatePaymentRejectsDuplicateActivePayment(t *testing.T) {
 
 func TestCreatePaymentDuplicateActivePaymentMapsToFailedPrecondition(t *testing.T) {
 	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, nil)
 	grpcService := NewGRPCService(service)
 
@@ -294,7 +308,7 @@ func TestCreatePaymentDuplicateActivePaymentMapsToFailedPrecondition(t *testing.
 
 func TestConcurrentCreatePaymentAllowsOnlyOneActivePayment(t *testing.T) {
 	service, db := newConcurrentTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, nil)
 
 	var successes int32
@@ -340,7 +354,7 @@ func TestCreatePaymentRejectsNonPendingOrders(t *testing.T) {
 	for _, orderStatus := range tests {
 		t.Run(orderStatus, func(t *testing.T) {
 			service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-				1: {Id: 1, UserId: 1, Status: orderStatus, TotalAmount: 99},
+				1: {Id: 1, UserId: 1, Status: orderStatus, TotalAmountCents: 9900},
 			}}, nil)
 
 			_, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
@@ -354,7 +368,7 @@ func TestCreatePaymentRejectsNonPendingOrders(t *testing.T) {
 func TestSucceedPaymentStoresEventInOutbox(t *testing.T) {
 	publisher := &recordingPublisher{}
 	service, db := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, publisher)
 
 	payment, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
@@ -404,7 +418,7 @@ func TestMarkPaymentSucceededRejectsMissingIdempotencyKey(t *testing.T) {
 
 func TestMarkPaymentSucceededCompletesIdempotencyRecordAndStoresOutbox(t *testing.T) {
 	service, db := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, nil)
 	grpcService := NewGRPCService(service)
 	payment := createPaymentForOrder(t, service, 1, 1)
@@ -449,7 +463,7 @@ func TestMarkPaymentSucceededCompletesIdempotencyRecordAndStoresOutbox(t *testin
 
 func TestMarkPaymentSucceededReplaysSameKeySameRequest(t *testing.T) {
 	orderClient := &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}
 	service, _ := newTestService(t, orderClient, nil)
 	grpcService := NewGRPCService(service)
@@ -460,7 +474,7 @@ func TestMarkPaymentSucceededReplaysSameKeySameRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first MarkPaymentSucceeded returned error: %v", err)
 	}
-	orderClient.orders[1] = &pbOrder.Order{Id: 1, UserId: 1, Status: orderdomain.OrderStatusCancelled, TotalAmount: 99}
+	orderClient.orders[1] = &pbOrder.Order{Id: 1, UserId: 1, Status: orderdomain.OrderStatusCancelled, TotalAmountCents: 9900}
 	second, err := grpcService.MarkPaymentSucceeded(context.Background(), req)
 	if err != nil {
 		t.Fatalf("second MarkPaymentSucceeded returned error: %v", err)
@@ -476,8 +490,8 @@ func TestMarkPaymentSucceededReplaysSameKeySameRequest(t *testing.T) {
 
 func TestMarkPaymentSucceededRejectsSameKeyWithDifferentPaymentID(t *testing.T) {
 	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
-		2: {Id: 2, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 45},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
+		2: {Id: 2, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 4500},
 	}}, nil)
 	grpcService := NewGRPCService(service)
 	firstPayment := createPaymentForOrder(t, service, 1, 1)
@@ -494,7 +508,7 @@ func TestMarkPaymentSucceededRejectsSameKeyWithDifferentPaymentID(t *testing.T) 
 
 func TestMarkPaymentSucceededRejectsSameKeyWhileProcessing(t *testing.T) {
 	service, db := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, nil)
 	grpcService := NewGRPCService(service)
 	payment := createPaymentForOrder(t, service, 1, 1)
@@ -521,7 +535,7 @@ func TestMarkPaymentSucceededRejectsSameKeyWhileProcessing(t *testing.T) {
 
 func TestMarkPaymentSucceededReplayDoesNotCreateSecondOutboxEvent(t *testing.T) {
 	service, db := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, nil)
 	grpcService := NewGRPCService(service)
 	payment := createPaymentForOrder(t, service, 1, 1)
@@ -547,7 +561,7 @@ func TestMarkPaymentSucceededReplayDoesNotCreateSecondOutboxEvent(t *testing.T) 
 
 func TestMarkPaymentSucceededAbortsIdempotencyRecordAfterBusinessFailure(t *testing.T) {
 	service, db := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, nil)
 	grpcService := NewGRPCService(service)
 	payment := createPaymentForOrder(t, service, 1, 1)
@@ -601,7 +615,7 @@ func TestMarkPaymentSucceededAbortsIdempotencyRecordAfterBusinessFailure(t *test
 
 func TestMarkPaymentSucceededNewKeyAfterSuccessReturnsBusinessError(t *testing.T) {
 	service, db := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, nil)
 	grpcService := NewGRPCService(service)
 	payment := createPaymentForOrder(t, service, 1, 1)
@@ -638,7 +652,7 @@ func TestMarkPaymentSucceededNewKeyAfterSuccessReturnsBusinessError(t *testing.T
 
 func TestFailPaymentMarksRecordFailedAndReleasesActiveOrder(t *testing.T) {
 	service, db := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, nil)
 
 	payment, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
@@ -678,7 +692,7 @@ func TestFailPaymentMarksRecordFailedAndReleasesActiveOrder(t *testing.T) {
 
 func TestCreatePaymentAfterSucceededPaymentReturnsActivePaymentExists(t *testing.T) {
 	service, _ := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, nil)
 
 	payment, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)
@@ -701,7 +715,7 @@ func TestCreatePaymentAfterSucceededPaymentReturnsActivePaymentExists(t *testing
 
 func TestConcurrentSucceedAndFailPaymentOnlyOneStatusUpdateSucceeds(t *testing.T) {
 	service, db := newConcurrentTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, nil)
 	payment := createPaymentForOrder(t, service, 1, 1)
 
@@ -774,7 +788,7 @@ func TestConcurrentSucceedAndFailPaymentOnlyOneStatusUpdateSucceeds(t *testing.T
 
 func TestSucceedPaymentRejectsCancelledOrder(t *testing.T) {
 	service, db := newTestService(t, &fakeOrderClient{orders: map[int64]*pbOrder.Order{
-		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmount: 99},
+		1: {Id: 1, UserId: 1, Status: orderdomain.OrderStatusPending, TotalAmountCents: 9900},
 	}}, nil)
 
 	payment, err := service.CreatePayment(context.Background(), 1, 1, PaymentMethodMockBalance)

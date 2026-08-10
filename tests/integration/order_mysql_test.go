@@ -36,7 +36,7 @@ func TestMySQLOrderPersistsAndDeductsStock(t *testing.T) {
 	item := product.Product{
 		Name:        "integration-order-" + uniqueSuffix(t),
 		Description: "mysql integration fixture",
-		Price:       88.5,
+		PriceCents:  8850,
 		Stock:       5,
 		MerchantID:  1,
 	}
@@ -72,8 +72,8 @@ func TestMySQLOrderPersistsAndDeductsStock(t *testing.T) {
 	if err := db.First(&persisted, createdOrderID).Error; err != nil {
 		t.Fatalf("failed to reload order: %v", err)
 	}
-	if got, want := persisted.TotalAmount, 177.0; got != want {
-		t.Fatalf("unexpected total amount: got %.2f want %.2f", got, want)
+	if got, want := persisted.TotalAmountCents, int64(17700); got != want {
+		t.Fatalf("unexpected total AmountCents: got %d want %d", got, want)
 	}
 
 	var latest product.Product
@@ -96,7 +96,7 @@ func TestMySQLCancelOrderIdempotencyReplaysWithoutDuplicateSideEffects(t *testin
 	item := product.Product{
 		Name:        "integration-cancel-" + uniqueSuffix(t),
 		Description: "mysql cancel idempotency fixture",
-		Price:       30,
+		PriceCents:  3000,
 		Stock:       5,
 		MerchantID:  1,
 	}
@@ -171,10 +171,10 @@ func TestMySQLConcurrentShipOrderSerializesTransition(t *testing.T) {
 
 	admin := createIntegrationUser(t, db, auth.RoleAdmin)
 	placed := order.Order{
-		UserID:      7,
-		TotalAmount: 10,
-		Status:      order.OrderStatusPaid,
-		OrderDate:   time.Now(),
+		UserID:           7,
+		TotalAmountCents: 1000,
+		Status:           order.OrderStatusPaid,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&placed).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)
@@ -219,10 +219,10 @@ func TestMySQLConcurrentCompleteOrderSerializesTransition(t *testing.T) {
 	ensureIntegrationOrderIndexes(t, db)
 
 	placed := order.Order{
-		UserID:      7,
-		TotalAmount: 10,
-		Status:      order.OrderStatusShipped,
-		OrderDate:   time.Now(),
+		UserID:           7,
+		TotalAmountCents: 1000,
+		Status:           order.OrderStatusShipped,
+		OrderDate:        time.Now(),
 	}
 	if err := db.Create(&placed).Error; err != nil {
 		t.Fatalf("failed to create order: %v", err)
@@ -269,7 +269,7 @@ func TestMySQLConcurrentShipAndCancelKeepsInventoryConsistent(t *testing.T) {
 	item := product.Product{
 		Name:        "integration-ship-cancel-" + uniqueSuffix(t),
 		Description: "mysql ship cancel concurrency fixture",
-		Price:       50,
+		PriceCents:  5000,
 		Stock:       5,
 		MerchantID:  1,
 	}

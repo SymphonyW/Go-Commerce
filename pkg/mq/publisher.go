@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/streadway/amqp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"go-commerce/pkg/observability"
 )
@@ -38,8 +40,11 @@ type identifiedEvent interface {
 
 // RawEvent 让 Outbox worker 复用现有 Publisher 的同时，保留已经落库的原始 JSON 负载和 event_id。
 type RawEvent struct {
-	EventID string
-	Body    json.RawMessage
+	EventID   string
+	EventType string
+	RequestID string
+	TraceID   string
+	Body      json.RawMessage
 }
 
 func (e RawEvent) GetEventID() string {
@@ -79,8 +84,44 @@ func (p *RabbitMQPublisher) Publish(ctx context.Context, routingKey string, even
 		return err
 	}
 
+	eventID := ""
+	correlationRequestID := ""
+	correlationTraceID := ""
+	if identified, ok := event.(identifiedEvent); ok {
+		eventID = identified.GetEventID()
+	}
+	eventType := routingKey
+	if raw, ok := event.(RawEvent); ok {
+		if raw.EventType != "" {
+			eventType = raw.EventType
+		}
+		if raw.RequestID != "" {
+			correlationRequestID = raw.RequestID
+			ctx = observability.WithRequestID(ctx, raw.RequestID)
+		}
+		if raw.TraceID != "" {
+			correlationTraceID = raw.TraceID
+			ctx = observability.WithTraceID(ctx, raw.TraceID)
+		}
+	}
+
+	ctx, span := observability.StartSpan(ctx,
+		"rabbitmq publish "+routingKey,
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "rabbitmq"),
+			attribute.String("messaging.destination.name", p.exchange),
+			attribute.String("messaging.rabbitmq.routing_key", routingKey),
+			attribute.String("event.type", eventType),
+			attribute.String("event.id", eventID),
+			attribute.String("correlation.request_id", correlationRequestID),
+			attribute.String("correlation.trace_id", correlationTraceID),
+		),
+	)
+
 	body, err := json.Marshal(event)
 	if err != nil {
+		observability.EndSpan(span, err)
 		return fmt.Errorf("marshal event: %w", err)
 	}
 
@@ -93,26 +134,53 @@ func (p *RabbitMQPublisher) Publish(ctx context.Context, routingKey string, even
 		false,
 		nil,
 	); err != nil {
+		observability.EndSpan(span, err)
 		return fmt.Errorf("declare exchange %s: %w", p.exchange, err)
 	}
+
+	headers := observability.InjectIntoAMQP(ctx, amqp.Table{})
+	requestID := observability.RequestIDFromContext(ctx)
+	if correlationRequestID != "" {
+		requestID = correlationRequestID
+	}
+	if requestID != "" {
+		headers[observability.RequestIDMetadataKey] = requestID
+		headers["request_id"] = requestID
+		headers["correlation_id"] = requestID
+	}
+	traceID := observability.TraceIDFromContext(ctx)
+	if correlationTraceID != "" {
+		traceID = correlationTraceID
+	}
+	if traceID != "" {
+		headers[observability.TraceIDMetadataKey] = traceID
+		headers["trace_id"] = traceID
+	}
+	if eventID != "" {
+		headers["event_id"] = eventID
+	}
+	headers["event_type"] = eventType
 
 	message := amqp.Publishing{
 		ContentType:  "application/json",
 		DeliveryMode: amqp.Persistent,
 		Timestamp:    p.now().UTC(),
+		Headers:      headers,
 		Body:         body,
 	}
-	if requestID := observability.RequestIDFromContext(ctx); requestID != "" {
+	if requestID != "" {
 		message.CorrelationId = requestID
 	}
-	if identified, ok := event.(identifiedEvent); ok {
-		message.MessageId = identified.GetEventID()
+	if eventID != "" {
+		message.MessageId = eventID
 	}
 
 	if err := p.channel.Publish(p.exchange, routingKey, false, false, message); err != nil {
+		observability.EndSpan(span, err)
 		return fmt.Errorf("publish event %s: %w", routingKey, err)
 	}
 
+	observability.EndSpan(span, nil)
 	return nil
 }
 

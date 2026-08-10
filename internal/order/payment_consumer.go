@@ -9,6 +9,8 @@ import (
 	"strconv"
 
 	"github.com/streadway/amqp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
@@ -16,6 +18,7 @@ import (
 	"go-commerce/internal/outbox"
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
+	"go-commerce/pkg/observability"
 )
 
 var (
@@ -31,6 +34,7 @@ type PaymentSucceededConsumer struct {
 	publisher  mq.Publisher
 	logger     *log.Logger
 	outboxRepo outbox.EventRepository
+	metrics    *observability.Metrics
 }
 
 func NewPaymentSucceededConsumer(db *gorm.DB, publisher mq.Publisher, logger *log.Logger) *PaymentSucceededConsumer {
@@ -43,25 +47,51 @@ func NewPaymentSucceededConsumer(db *gorm.DB, publisher mq.Publisher, logger *lo
 	return &PaymentSucceededConsumer{db: db, publisher: publisher, logger: logger, outboxRepo: outbox.NewRepository(db)}
 }
 
+func (c *PaymentSucceededConsumer) SetMetrics(metrics *observability.Metrics) {
+	c.metrics = metrics
+}
+
 func (c *PaymentSucceededConsumer) HandleDelivery(delivery amqp.Delivery) error {
+	ctx := observability.ContextFromAMQPDelivery(context.Background(), delivery)
+	correlationRequestID := observability.RequestIDFromContext(ctx)
+	correlationTraceID := observability.TraceIDFromContext(ctx)
+	ctx, span := observability.StartSpan(ctx,
+		"rabbitmq consume "+events.PaymentSucceededType,
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "rabbitmq"),
+			attribute.String("event.type", events.PaymentSucceededType),
+			attribute.String("consumer.name", paymentSucceededConsumerName),
+			attribute.String("correlation.request_id", correlationRequestID),
+			attribute.String("correlation.trace_id", correlationTraceID),
+		),
+	)
+	var handleErr error
+	defer func() { observability.EndSpan(span, handleErr) }()
+
 	var event events.PaymentSucceededEvent
 	if err := json.Unmarshal(delivery.Body, &event); err != nil {
 		_ = delivery.Nack(false, false)
-		return fmt.Errorf("decode payment.succeeded event: %w", err)
+		c.metrics.RecordConsumerFailure(paymentSucceededConsumerName, events.PaymentSucceededType, false)
+		handleErr = fmt.Errorf("decode payment.succeeded event: %w", err)
+		return handleErr
 	}
+	span.SetAttributes(attribute.String("event.id", event.EventID), attribute.Int64("order.id", event.OrderID), attribute.Int64("payment.id", event.PaymentID))
 	if event.EventID == "" {
 		_ = delivery.Nack(false, false)
-		return inbox.ErrMissingEventID
+		c.metrics.RecordConsumerFailure(paymentSucceededConsumerName, events.PaymentSucceededType, false)
+		handleErr = inbox.ErrMissingEventID
+		return handleErr
 	}
 	if event.EventType == "" {
 		event.EventType = events.PaymentSucceededType
 	}
 
 	changed := false
-	processed, err := inbox.ProcessOnce(context.Background(), c.db, paymentSucceededConsumerName, event.EventID, event.EventType, func(tx *gorm.DB) error {
-		_, paidChanged, err := markOrderPaidInTx(tx, event.OrderID, event.UserID, event.Amount, func(tx *gorm.DB, order *Order) error {
-			statusEvent := newOrderStatusChangedEvent(context.Background(), events.OrderPaidType, order, OrderStatusPending, OrderStatusPaid)
-			_, err := c.outboxRepo.Create(context.Background(), tx, outbox.NewEventInput{
+	processed, err := inbox.ProcessOnce(ctx, c.db, paymentSucceededConsumerName, event.EventID, event.EventType, func(tx *gorm.DB) error {
+		_, paidChanged, err := markOrderPaidInTx(tx, event.OrderID, event.UserID, event.AmountCents, func(tx *gorm.DB, order *Order) error {
+			statusEvent := newOrderStatusChangedEvent(ctx, events.OrderPaidType, order, OrderStatusPending, OrderStatusPaid)
+			_, err := c.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
 				AggregateType: "order",
 				AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
 				EventType:     events.OrderPaidType,
@@ -75,10 +105,14 @@ func (c *PaymentSucceededConsumer) HandleDelivery(delivery amqp.Delivery) error 
 	if err != nil {
 		if isPermanentPaymentEventError(err) {
 			_ = delivery.Nack(false, false)
-			return err
+			c.metrics.RecordConsumerFailure(paymentSucceededConsumerName, event.EventType, false)
+			handleErr = err
+			return handleErr
 		}
 		_ = delivery.Nack(false, true)
-		return err
+		c.metrics.RecordConsumerFailure(paymentSucceededConsumerName, event.EventType, true)
+		handleErr = err
+		return handleErr
 	}
 	if !processed {
 		c.logger.Printf(
@@ -96,6 +130,7 @@ func (c *PaymentSucceededConsumer) HandleDelivery(delivery amqp.Delivery) error 
 		return nil
 	}
 	_ = changed
+	c.metrics.RecordOrderPaid(changed)
 
 	c.logger.Printf(
 		"payment_event_consumed event_type=%s event_id=%s payment_id=%d order_id=%d user_id=%d",
@@ -113,12 +148,12 @@ func (c *PaymentSucceededConsumer) HandleDelivery(delivery amqp.Delivery) error 
 }
 
 // MarkOrderPaid 只允许金额一致的 pending 订单进入 paid；重复事件保持幂等。
-func MarkOrderPaid(db *gorm.DB, orderID, userID int64, amount float64, afterChange func(tx *gorm.DB, order *Order) error) (*Order, bool, error) {
+func MarkOrderPaid(db *gorm.DB, orderID, userID int64, amountCents int64, afterChange func(tx *gorm.DB, order *Order) error) (*Order, bool, error) {
 	var order *Order
 	changed := false
 
 	err := db.Transaction(func(tx *gorm.DB) error {
-		updated, didChange, err := markOrderPaidInTx(tx, orderID, userID, amount, afterChange)
+		updated, didChange, err := markOrderPaidInTx(tx, orderID, userID, amountCents, afterChange)
 		order = updated
 		changed = didChange
 		return err
@@ -129,14 +164,14 @@ func MarkOrderPaid(db *gorm.DB, orderID, userID int64, amount float64, afterChan
 	return order, changed, nil
 }
 
-func markOrderPaidInTx(tx *gorm.DB, orderID, userID int64, amount float64, afterChange func(tx *gorm.DB, order *Order) error) (*Order, bool, error) {
+func markOrderPaidInTx(tx *gorm.DB, orderID, userID int64, amountCents int64, afterChange func(tx *gorm.DB, order *Order) error) (*Order, bool, error) {
 	var order Order
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("id = ? AND user_id = ?", orderID, userID).
 		First(&order).Error; err != nil {
 		return nil, false, err
 	}
-	if order.TotalAmount != amount {
+	if order.TotalAmountCents != amountCents {
 		return nil, false, ErrOrderPaymentMismatch
 	}
 	if order.Status == OrderStatusPaid {
