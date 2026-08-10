@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/streadway/amqp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -25,6 +27,15 @@ import (
 func main() {
 	ctx, stop := serviceutil.SignalContext()
 	defer stop()
+	telemetry := observability.SetupService(ctx, "payment-service")
+	logger := telemetry.Logger
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetry.Shutdown(shutdownCtx); err != nil {
+			logger.Error("otel_shutdown_failed", "error", err)
+		}
+	}()
 
 	dsn := serviceutil.Env("DB_DSN", "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local")
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
@@ -49,7 +60,10 @@ func main() {
 	orderConn, err := grpc.Dial(
 		serviceutil.Env("ORDER_SERVICE_ADDR", "localhost:50053"),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithChainUnaryInterceptor(observability.UnaryClientTimeoutInterceptor(grpcTimeout)),
+		grpc.WithChainUnaryInterceptor(
+			observability.UnaryClientInterceptor(),
+			observability.UnaryClientTimeoutInterceptor(grpcTimeout),
+		),
 	)
 	if err != nil {
 		log.Fatalf("order_service_dial_failed error=%v", err)
@@ -79,7 +93,8 @@ func main() {
 	healthServer := serviceutil.StartHTTPServer(
 		"payment health server",
 		serviceutil.Env("PAYMENT_HEALTH_ADDR", ":8086"),
-		healthcheck.Handler(
+		healthcheck.HandlerWithMetrics(
+			promhttp.HandlerFor(telemetry.Registry, promhttp.HandlerOpts{}),
 			healthcheck.Dependency{Name: "mysql", Check: healthcheck.SQL(sqlDB)},
 			healthcheck.Dependency{Name: "order-service", Check: healthcheck.GRPCHealth(orderConn, "")},
 			healthcheck.Dependency{Name: "rabbitmq", Check: healthcheck.AMQP(rabbitConn)},
@@ -91,8 +106,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("grpc_listen_failed addr=%s error=%v", grpcAddr, err)
 	}
-	server := grpc.NewServer()
-	core := payment.NewService(db, orderClient, publisher)
+	server := grpc.NewServer(grpc.UnaryInterceptor(observability.UnaryServerInterceptor(logger, telemetry.Metrics)))
+	core := payment.NewServiceWithMetrics(db, orderClient, publisher, telemetry.Metrics)
 	pbPayment.RegisterPaymentServiceServer(server, payment.NewGRPCService(core))
 	grpcHealth := healthcheck.RegisterGRPC(server)
 

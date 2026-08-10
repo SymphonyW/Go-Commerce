@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-integration test-e2e test-integration-up test-e2e-up seed-demo
+.PHONY: test test-unit test-integration test-e2e test-integration-up test-e2e-up observability-up seed-demo
 
 COMPOSE ?= docker compose
 
@@ -15,6 +15,9 @@ test-integration: test-integration-up
 
 test-e2e-up:
 	$(COMPOSE) up -d --build
+
+observability-up:
+	$(COMPOSE) --profile observability up -d --build
 
 test-e2e: test-e2e-up
 	go test ./tests/e2e -tags=e2e -v

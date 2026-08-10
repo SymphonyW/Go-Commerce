@@ -8,7 +8,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"go-commerce/pkg/mq"
+	"go-commerce/pkg/observability"
 )
 
 type Worker struct {
@@ -92,11 +96,30 @@ func (w *Worker) ProcessOnce(ctx context.Context) error {
 	w.metrics.RecordLeaseRecovered(claim.LeaseRecoveredCount)
 
 	for _, event := range claim.Events {
+		requestID := extractRequestID(event.Payload)
+		traceID := extractTraceID(event.Payload)
+		eventCtx := observability.WithTraceID(observability.WithRequestID(ctx, requestID), traceID)
+		eventCtx, span := observability.StartSpan(eventCtx,
+			"outbox publish "+event.EventType,
+			trace.WithSpanKind(trace.SpanKindProducer),
+			trace.WithAttributes(
+				attribute.String("event.id", event.EventID),
+				attribute.String("event.type", event.EventType),
+				attribute.String("correlation.request_id", requestID),
+				attribute.String("correlation.trace_id", traceID),
+				attribute.String("messaging.system", "rabbitmq"),
+			),
+		)
 		raw := mq.RawEvent{
-			EventID: event.EventID,
-			Body:    json.RawMessage(event.Payload),
+			EventID:   event.EventID,
+			EventType: event.EventType,
+			RequestID: requestID,
+			TraceID:   traceID,
+			Body:      json.RawMessage(event.Payload),
 		}
-		if err := w.publisher.Publish(ctx, event.EventType, raw); err != nil {
+		if err := w.publisher.Publish(eventCtx, event.EventType, raw); err != nil {
+			observability.EndSpan(span, err)
+			w.metrics.RecordPublishFailure()
 			failedAt := w.now()
 			retryCount := event.RetryCount + 1
 			markAsFailed := retryCount >= w.config.MaxRetry
@@ -136,8 +159,10 @@ func (w *Worker) ProcessOnce(ctx context.Context) error {
 
 		publishedAt := w.now()
 		if err := w.repo.MarkPublished(ctx, event.ID, w.config.WorkerID, publishedAt); err != nil {
+			observability.EndSpan(span, err)
 			return err
 		}
+		observability.EndSpan(span, nil)
 		w.metrics.RecordPublished()
 		w.logger.Printf(
 			"outbox_event_published worker_id=%s event_id=%s event_type=%s aggregate_type=%s aggregate_id=%s",
@@ -150,4 +175,21 @@ func (w *Worker) ProcessOnce(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+type eventCorrelation struct {
+	RequestID string `json:"request_id"`
+	TraceID   string `json:"trace_id"`
+}
+
+func extractRequestID(payload string) string {
+	var event eventCorrelation
+	_ = json.Unmarshal([]byte(payload), &event)
+	return event.RequestID
+}
+
+func extractTraceID(payload string) string {
+	var event eventCorrelation
+	_ = json.Unmarshal([]byte(payload), &event)
+	return event.TraceID
 }

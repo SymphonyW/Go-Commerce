@@ -10,12 +10,15 @@ import (
 	"time"
 
 	"github.com/streadway/amqp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 
 	"go-commerce/internal/inbox"
 	"go-commerce/internal/outbox"
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
+	"go-commerce/pkg/observability"
 )
 
 const orderTimeoutConsumerName = "order.timeout"
@@ -26,6 +29,7 @@ type OrderTimeoutConsumer struct {
 	publisher  mq.Publisher
 	logger     *log.Logger
 	outboxRepo outbox.EventRepository
+	metrics    *observability.Metrics
 }
 
 func NewOrderTimeoutConsumer(db *gorm.DB, publisher mq.Publisher, logger *log.Logger) *OrderTimeoutConsumer {
@@ -38,22 +42,48 @@ func NewOrderTimeoutConsumer(db *gorm.DB, publisher mq.Publisher, logger *log.Lo
 	return &OrderTimeoutConsumer{db: db, publisher: publisher, logger: logger, outboxRepo: outbox.NewRepository(db)}
 }
 
+func (c *OrderTimeoutConsumer) SetMetrics(metrics *observability.Metrics) {
+	c.metrics = metrics
+}
+
 func (c *OrderTimeoutConsumer) HandleDelivery(delivery amqp.Delivery) error {
+	ctx := observability.ContextFromAMQPDelivery(context.Background(), delivery)
+	correlationRequestID := observability.RequestIDFromContext(ctx)
+	correlationTraceID := observability.TraceIDFromContext(ctx)
+	ctx, span := observability.StartSpan(ctx,
+		"rabbitmq consume "+events.OrderTimeoutCheckType,
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("messaging.system", "rabbitmq"),
+			attribute.String("event.type", events.OrderTimeoutCheckType),
+			attribute.String("consumer.name", orderTimeoutConsumerName),
+			attribute.String("correlation.request_id", correlationRequestID),
+			attribute.String("correlation.trace_id", correlationTraceID),
+		),
+	)
+	var handleErr error
+	defer func() { observability.EndSpan(span, handleErr) }()
+
 	var event events.OrderTimeoutCheckEvent
 	if err := json.Unmarshal(delivery.Body, &event); err != nil {
 		_ = delivery.Nack(false, false)
-		return fmt.Errorf("decode order timeout event: %w", err)
+		c.metrics.RecordConsumerFailure(orderTimeoutConsumerName, events.OrderTimeoutCheckType, false)
+		handleErr = fmt.Errorf("decode order timeout event: %w", err)
+		return handleErr
 	}
+	span.SetAttributes(attribute.String("event.id", event.EventID), attribute.Int64("order.id", event.OrderID))
 	if event.EventID == "" {
 		_ = delivery.Nack(false, false)
-		return inbox.ErrMissingEventID
+		c.metrics.RecordConsumerFailure(orderTimeoutConsumerName, events.OrderTimeoutCheckType, false)
+		handleErr = inbox.ErrMissingEventID
+		return handleErr
 	}
 	if event.EventType == "" {
 		event.EventType = events.OrderTimeoutCheckType
 	}
 
 	outcome := "cancelled"
-	processed, err := inbox.ProcessOnce(context.Background(), c.db, orderTimeoutConsumerName, event.EventID, event.EventType, func(tx *gorm.DB) error {
+	processed, err := inbox.ProcessOnce(ctx, c.db, orderTimeoutConsumerName, event.EventID, event.EventType, func(tx *gorm.DB) error {
 		_, changed, err := cancelOrderWithReasonInTx(tx, event.OrderID, event.UserID, OrderCancelReasonPaymentTimeout, func(tx *gorm.DB, order *Order) error {
 			cancelledEvent := events.OrderCancelledEvent{
 				BaseEvent: events.NewBaseEvent(events.OrderCancelledType, time.Now()),
@@ -61,7 +91,7 @@ func (c *OrderTimeoutConsumer) HandleDelivery(delivery amqp.Delivery) error {
 				UserID:    int64(order.UserID),
 				Reason:    OrderCancelReasonPaymentTimeout,
 			}
-			if _, err := c.outboxRepo.Create(tx.Statement.Context, tx, outbox.NewEventInput{
+			if _, err := c.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
 				AggregateType: "order",
 				AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
 				EventType:     events.OrderCancelledType,
@@ -76,7 +106,7 @@ func (c *OrderTimeoutConsumer) HandleDelivery(delivery amqp.Delivery) error {
 				UserID:    int64(order.UserID),
 				Reason:    OrderCancelReasonPaymentTimeout,
 			}
-			_, err := c.outboxRepo.Create(tx.Statement.Context, tx, outbox.NewEventInput{
+			_, err := c.outboxRepo.Create(ctx, tx, outbox.NewEventInput{
 				AggregateType: "order",
 				AggregateID:   strconv.FormatUint(uint64(order.ID), 10),
 				EventType:     events.OrderTimeoutCancelledType,
@@ -103,7 +133,9 @@ func (c *OrderTimeoutConsumer) HandleDelivery(delivery amqp.Delivery) error {
 	})
 	if err != nil {
 		_ = delivery.Nack(false, true)
-		return err
+		c.metrics.RecordConsumerFailure(orderTimeoutConsumerName, event.EventType, true)
+		handleErr = err
+		return handleErr
 	}
 	if !processed {
 		c.logger.Printf(
@@ -142,6 +174,7 @@ func (c *OrderTimeoutConsumer) HandleDelivery(delivery amqp.Delivery) error {
 			event.UserID,
 		)
 	default:
+		c.metrics.RecordOrderCancelled(true, OrderCancelReasonPaymentTimeout)
 		c.logger.Printf(
 			"order_timeout_cancelled event_id=%s order_id=%d user_id=%d",
 			event.EventID,

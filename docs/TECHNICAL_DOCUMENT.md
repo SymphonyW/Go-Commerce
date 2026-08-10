@@ -15,7 +15,7 @@ Go Commerce 是一个已经跑通交易主链路的微服务演示项目。它�
 但也要先说明当前边界：
 
 - 多个服务进程已经拆分，当前仍共享同一个 `ecommerce` MySQL 数据库。
-- 观测能力目前主要真正落在 API Gateway；其他服务已有健康检查，尚未全部接入统一日志、指标、追踪。
+- 观测能力覆盖健康检查、全服务 Prometheus 指标、统一 JSON 日志、OpenTelemetry trace propagation 与本地 Grafana / Tempo 演示栈。
 - 下单、人工取消订单与支付成功具备真正落库的幂等记录，可按同 key 同请求稳定回放首次响应；消费者侧使用 Inbox 表按 `consumer_name + event_id` 去重。
 
 ## 2. 技术栈
@@ -26,7 +26,7 @@ Go Commerce 是一个已经跑通交易主链路的微服务演示项目。它�
 | 前端 | React 18、Vite 8 |
 | 数据 | MySQL 8、Redis 7 |
 | 消息 | RabbitMQ 3 |
-| 观测 | Prometheus client、结构化日志、健康检查 |
+| 观测 | OpenTelemetry、Prometheus client、Tempo、Grafana、结构化日志、健康检查 |
 | 工程化 | Docker Compose、GitHub Actions、Makefile |
 
 ## 3. 服务职责划分
@@ -439,24 +439,28 @@ Outbox worker 通过 claim/lease 避免同一事件被多个正常 worker 同时
 
 ### 14.1 已实现
 
-- API Gateway：
-  - `X-Request-ID`
-  - `X-Trace-ID`
-  - JSON 日志
+- 全服务：
   - `/metrics`
   - `/healthz`
   - `/readyz`
+  - JSON slog 日志，包含 `service`、`request_id`、`trace_id`、`span_id`
+  - gRPC server span / metrics
+- API Gateway：
+  - Gin HTTP server span
+  - gRPC client span
+  - `X-Request-ID`
+  - `X-Trace-ID`
 - API Gateway 已拆分为 `internal/gateway/server.go`、`router.go`、`clients.go`、`handler/`、`middleware/` 与 `response/`；所有业务 handler 统一使用 `response.WriteGRPCError` 映射 gRPC 错误。
 - gRPC -> HTTP 映射：`InvalidArgument=400`、`Unauthenticated=401`、`PermissionDenied=403`、`NotFound=404`、`AlreadyExists/FailedPrecondition=409`、`ResourceExhausted=429`、`DeadlineExceeded=504`、`Unavailable=503`、`Internal=500`。错误体包含 `code`、`message`、兼容字段 `error` 与 `request_id`。
 - CORS 不再使用 `Allow-Origin=*` 搭配 credentials；默认允许 `http://localhost:5173`，可通过 `CORS_ALLOWED_ORIGINS` 配置逗号分隔 Origin。
-- 事件模型会携带请求关联 ID，便于异步链路回溯。
-- 各服务均暴露独立健康检查端点。
+- RabbitMQ publisher / consumer 通过 message headers 传播 W3C `traceparent`，并附带 `request_id`、`trace_id`、`event_id`、`event_type` correlation fields。
+- Outbox worker 暴露 backlog、最老 pending 事件年龄、claim、publish、retry、failed、lease recovery 和 publish failure 指标。
+- `docker compose --profile observability up -d` 启动 OTEL Collector、Prometheus、Tempo、Grafana 和预置 dashboards。
 
 ### 14.2 当前不足
 
-- API Gateway 已接入统一 HTTP/gRPC 指标，Outbox worker 已接入 claim、publish、retry、failed、lease recovery 指标；完整 OpenTelemetry 追踪尚未接入。
-- 目前更准确的说法是“链路关联 ID”，而不是完整分布式追踪。
-- 仓库未提供 Prometheus / Grafana Compose 组件。
+- Outbox 异步发布从事件 payload 恢复 `request_id` 与 `trace_id` 用于关联，但不持久化完整 span context；因此异步段更适合通过 trace attributes、headers 和日志字段关联，而不是强行声明完整父子 span continuity。
+- 未接入 Loki；日志仍输出到容器 stdout，由 Docker / Compose 查看。
 
 ## 15. 部署拓扑
 
@@ -503,7 +507,7 @@ flowchart TB
 | 当前不足 | 建议演进 |
 | --- | --- |
 | 服务共享同库 | 逐步明确数据库边界与迁移策略 |
-| 观测能力未全量落地 | 接入统一日志、gRPC 指标、Prometheus、Grafana、OpenTelemetry |
+| 日志聚合未内置 | 后续可接入 Loki 或其他日志后端 |
 | 更多写接口尚未实现完整幂等回放 | 复用幂等表机制按需补齐 |
 | 公开商家列表、用户订单列表未暴露分页 | 补齐网关层查询参数 |
 | 支付仍为 mock | 接入真实支付渠道沙箱或适配层 |

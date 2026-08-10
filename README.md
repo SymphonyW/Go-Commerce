@@ -75,7 +75,7 @@ flowchart LR
 | RabbitMQ 超时关单 | 创建订单后投递超时检查消息，通过 `TTL + DLX` 触发取消流程并回补库存。 |
 | Outbox / Inbox Pattern | 业务表与 `outbox_events` 同事务提交，由 `outbox-worker` 扫描、发布、重试和失败落库；消费者用 `consumed_events` 按 `consumer_name + event_id` 去重。 |
 | 商家资源归属校验 | API Gateway 做角色拦截，`merchant-service` 再按真实角色和 `owner_user_id` 做细粒度授权。 |
-| 基础可观测性 | API Gateway 提供 `/metrics`、`/healthz`、`/readyz`、请求 ID、Trace ID 与结构化日志。 |
+| 可观测性 | 全服务暴露健康检查和 `/metrics`，通过 OpenTelemetry、OTEL Collector、Tempo、Prometheus 与 Grafana 演示分布式追踪、指标和结构化日志。 |
 | 分层测试 | 已有单元测试、真实依赖集成测试，以及覆盖交易主链路的 E2E 测试。 |
 
 ## 技术栈
@@ -86,7 +86,7 @@ flowchart LR
 | 前端 | React 18.2、Vite 8、Axios、React Router 7 |
 | 数据与缓存 | MySQL 8、Redis 7 |
 | 消息 | RabbitMQ 3 Management、topic exchange、TTL / DLX |
-| 观测 | Prometheus client、结构化日志、健康检查、链路关联 ID |
+| 观测 | OpenTelemetry、OTEL Collector、Prometheus、Grafana、Tempo、结构化日志、健康检查 |
 | 工程化 | Docker Compose、GitHub Actions、Makefile、OpenAPI 3.0 |
 
 ## 系统架构
@@ -137,7 +137,7 @@ flowchart LR
 | 商家后台 | 当前店铺、商品维护、商家订单查看 | 普通商家只能操作自己名下资源，`admin` 可跨店。 |
 | 事件总线 | `order.created`、`payment.succeeded` 等事件 | RabbitMQ topic exchange 承载领域事件。 |
 | 可靠消息 | Outbox 本地消息表、Inbox 消费记录、claim、lease、重试、失败状态 | 支持多个 worker 并行领取；RabbitMQ / Outbox 仍是 at-least-once delivery，消费者侧用 Inbox + 幂等业务控制重复副作用。 |
-| 观测 | 健康检查、就绪检查、网关指标、请求关联 ID | 完整 OpenTelemetry 追踪尚未接入。 |
+| 观测 | 健康检查、就绪检查、全服务 Prometheus 指标、OpenTelemetry tracing、Grafana dashboards | 通过 `observability` profile 启动本地演示栈。 |
 
 ## 目录结构
 
@@ -193,6 +193,19 @@ docker compose ps
 | RabbitMQ 管理台 | `http://localhost:15672`（`guest / guest`） |
 | MySQL | `127.0.0.1:3307` |
 | Redis | `127.0.0.1:6379` |
+
+可选启动观测栈：
+
+```bash
+docker compose --profile observability up -d --build
+```
+
+| 观测入口 | 地址 |
+| --- | --- |
+| Grafana | `http://localhost:3000`（`admin / admin`） |
+| Prometheus | `http://localhost:9090` |
+| Tempo | `http://localhost:3200` |
+| OTEL Collector | `localhost:4317` / `localhost:4318` |
 
 ### 2. 初始化演示数据
 
@@ -392,19 +405,13 @@ PR 合并前建议在分支保护中要求 `Backend check`、`Frontend check`、
 | 能力 | 当前状态 |
 | --- | --- |
 | API Gateway 探针 | `/healthz`、`/readyz`。 |
-| API Gateway 指标 | `/metrics` 输出 Prometheus text exposition。 |
-| 内部服务健康检查 | 各服务暴露独立健康检查端口，见 [.env.example](.env.example) 与 [docker-compose.yml](docker-compose.yml)。 |
-| 链路关联 ID | `X-Request-ID` 与 `X-Trace-ID` 在网关生成 / 透传，并进入 gRPC metadata 与事件模型。 |
-| 结构化日志 | API Gateway 使用结构化 JSON 日志。 |
+| Prometheus 指标 | 各服务在健康检查端口暴露 `/metrics`。 |
+| 内部服务健康检查 | 各服务暴露独立 `/healthz` 与 `/readyz`，见 [.env.example](.env.example) 与 [docker-compose.yml](docker-compose.yml)。 |
+| OpenTelemetry tracing | HTTP、gRPC、RabbitMQ producer / consumer span 通过 OTEL Collector 写入 Tempo。 |
+| 链路关联 ID | `X-Request-ID` 与 `X-Trace-ID` 在网关生成 / 透传，并进入 gRPC metadata、RabbitMQ headers 与事件模型。 |
+| 结构化日志 | 各服务使用统一 JSON slog，包含 `service`、`request_id`、`trace_id`、`span_id`。 |
+| Grafana dashboards | `observability` profile 预置 API Gateway、Transaction、Messaging 三个 dashboard。 |
 | RabbitMQ 管理台 | 可通过 `http://localhost:15672` 查看交换机、队列与投递情况。 |
-
-### 尚未实现
-
-| 能力 | 当前边界 |
-| --- | --- |
-| Prometheus / Grafana Compose | 仓库未内置 Prometheus 与 Grafana 服务。 |
-| 全服务统一观测 | 结构化日志、gRPC 指标和统一 trace 传播尚未铺到全部服务入口。 |
-| OpenTelemetry 分布式追踪 | 当前更接近“链路关联 ID”，还不是完整分布式追踪。 |
 
 ## Roadmap
 
@@ -426,7 +433,6 @@ PR 合并前建议在分支保护中要求 `Backend check`、`Frontend check`、
 - 为更多写接口补齐真正落库的幂等重放，而不仅是状态天然幂等。
 - 为公开商家列表、用户订单列表暴露真实分页参数。
 - 将前端自动生成并携带 `Idempotency-Key` 的能力扩展到更多写接口。
-- 将结构化日志、指标和 trace 传播铺到全部服务，并接入 Prometheus / Grafana / OpenTelemetry。
 - 继续明确服务数据库边界与迁移机制。
 - 为 OpenAPI 补充 Swagger UI 或其他可视化调试入口。
 
@@ -436,6 +442,7 @@ PR 合并前建议在分支保护中要求 `Backend check`、`Frontend check`、
 | --- | --- |
 | [文档导航](docs/README.md) | 汇总补充文档，适合作为二级入口。 |
 | [技术文档](docs/TECHNICAL_DOCUMENT.md) | 详细说明架构、下单流程、支付流程、超时关单、Outbox / Inbox、权限模型与当前不足。 |
+| [观测栈文档](docs/OBSERVABILITY.md) | 说明 OpenTelemetry、Prometheus、Tempo、Grafana 的本地启动、指标和 dashboards。 |
 | [API 文档](docs/API_Documentation.md) | 面向阅读的 REST API 说明，包含鉴权、分页、错误码和请求 / 响应示例。 |
 | [面试文档](docs/INTERVIEW.md) | 围绕真实实现整理 30 秒 / 2 分钟项目介绍与常见追问。 |
 | [OpenAPI 3.0](openapi.yaml) | 机器可读的接口契约，可用于导入 API 工具或后续接入 Swagger UI。 |

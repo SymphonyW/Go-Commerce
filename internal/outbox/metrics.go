@@ -7,6 +7,7 @@ type MetricsRecorder interface {
 	RecordPublished()
 	RecordRetry()
 	RecordFailed()
+	RecordPublishFailure()
 	RecordLeaseRecovered(count int)
 }
 
@@ -16,6 +17,7 @@ func (NopMetrics) RecordClaimed(int)        {}
 func (NopMetrics) RecordPublished()         {}
 func (NopMetrics) RecordRetry()             {}
 func (NopMetrics) RecordFailed()            {}
+func (NopMetrics) RecordPublishFailure()    {}
 func (NopMetrics) RecordLeaseRecovered(int) {}
 
 type PrometheusMetrics struct {
@@ -23,6 +25,7 @@ type PrometheusMetrics struct {
 	published      prometheus.Counter
 	retry          prometheus.Counter
 	failed         prometheus.Counter
+	publishFailure prometheus.Counter
 	leaseRecovered prometheus.Counter
 }
 
@@ -52,6 +55,11 @@ func NewPrometheusMetrics(service string, registerer prometheus.Registerer) *Pro
 			Help:        "Total number of outbox events marked as failed.",
 			ConstLabels: labels,
 		}),
+		publishFailure: prometheus.NewCounter(prometheus.CounterOpts{
+			Name:        "outbox_publish_failures_total",
+			Help:        "Total number of outbox publish failures before retry or failed handling.",
+			ConstLabels: labels,
+		}),
 		leaseRecovered: prometheus.NewCounter(prometheus.CounterOpts{
 			Name:        "go_commerce_outbox_lease_recovered_total",
 			Help:        "Total number of expired outbox event leases recovered by workers.",
@@ -63,6 +71,7 @@ func NewPrometheusMetrics(service string, registerer prometheus.Registerer) *Pro
 		metrics.published,
 		metrics.retry,
 		metrics.failed,
+		metrics.publishFailure,
 		metrics.leaseRecovered,
 	)
 	return metrics
@@ -94,6 +103,13 @@ func (m *PrometheusMetrics) RecordFailed() {
 		return
 	}
 	m.failed.Inc()
+}
+
+func (m *PrometheusMetrics) RecordPublishFailure() {
+	if m == nil {
+		return
+	}
+	m.publishFailure.Inc()
 }
 
 func (m *PrometheusMetrics) RecordLeaseRecovered(count int) {

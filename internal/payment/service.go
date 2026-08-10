@@ -17,6 +17,7 @@ import (
 	"go-commerce/internal/outbox"
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
+	"go-commerce/pkg/observability"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -40,9 +41,14 @@ type Service struct {
 	publisher   mq.Publisher
 	outboxRepo  outbox.EventRepository
 	idempotency *idempotency.Service
+	metrics     *observability.Metrics
 }
 
 func NewService(db *gorm.DB, orderClient pbOrder.OrderServiceClient, publisher mq.Publisher) *Service {
+	return NewServiceWithMetrics(db, orderClient, publisher, nil)
+}
+
+func NewServiceWithMetrics(db *gorm.DB, orderClient pbOrder.OrderServiceClient, publisher mq.Publisher, metrics *observability.Metrics) *Service {
 	if publisher == nil {
 		publisher = mq.NopPublisher{}
 	}
@@ -52,6 +58,7 @@ func NewService(db *gorm.DB, orderClient pbOrder.OrderServiceClient, publisher m
 		publisher:   publisher,
 		outboxRepo:  outbox.NewRepository(db),
 		idempotency: idempotency.NewService(db, 24*time.Hour),
+		metrics:     metrics,
 	}
 }
 
@@ -178,6 +185,7 @@ func (s *Service) SucceedPayment(ctx context.Context, userID, paymentID uint) (*
 		return nil, err
 	}
 
+	s.metrics.RecordPaymentSucceeded()
 	return &payment, nil
 }
 

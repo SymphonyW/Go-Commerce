@@ -3,15 +3,34 @@ package observability
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/status"
 )
 
 func UnaryClientInterceptor() grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-		return invoker(WithOutgoingMetadata(ctx), method, req, reply, cc, opts...)
+		service, rpcMethod := splitFullMethod(method)
+		ctx, span := StartSpan(ctx,
+			"grpc.client "+method,
+			trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithAttributes(
+				attribute.String("rpc.system", "grpc"),
+				attribute.String("rpc.service", service),
+				attribute.String("rpc.method", rpcMethod),
+			),
+		)
+		ctx = InjectIntoMetadata(WithOutgoingMetadata(ctx))
+		err := invoker(ctx, method, req, reply, cc, opts...)
+		if err != nil {
+			span.SetAttributes(attribute.String("rpc.grpc.status_code", status.Code(err).String()))
+		}
+		EndSpan(span, err)
+		return err
 	}
 }
 
@@ -36,11 +55,23 @@ func UnaryServerInterceptor(logger *slog.Logger, metrics *Metrics) grpc.UnarySer
 		logger = slog.Default()
 	}
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		ctx = ContextFromIncomingMetadata(ctx)
+		ctx = ContextFromIncomingMetadata(ExtractFromMetadata(ctx))
+		service, rpcMethod := splitFullMethod(info.FullMethod)
+		ctx, span := StartSpan(ctx,
+			"grpc.server "+info.FullMethod,
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(
+				attribute.String("rpc.system", "grpc"),
+				attribute.String("rpc.service", service),
+				attribute.String("rpc.method", rpcMethod),
+			),
+		)
 		startedAt := time.Now()
 		resp, err := handler(ctx, req)
 		duration := time.Since(startedAt)
 		code := status.Code(err).String()
+		span.SetAttributes(attribute.String("rpc.grpc.status_code", code))
+		EndSpan(span, err)
 		metrics.ObserveGRPC(info.FullMethod, code, duration)
 
 		attrs := append(ContextAttrs(ctx),
@@ -56,4 +87,13 @@ func UnaryServerInterceptor(logger *slog.Logger, metrics *Metrics) grpc.UnarySer
 		}
 		return resp, err
 	}
+}
+
+func splitFullMethod(fullMethod string) (service, method string) {
+	trimmed := strings.TrimPrefix(fullMethod, "/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) != 2 {
+		return trimmed, ""
+	}
+	return parts[0], parts[1]
 }

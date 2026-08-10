@@ -31,6 +31,8 @@ import (
 	"go-commerce/pkg/events"
 	"go-commerce/pkg/mq"
 	"go-commerce/pkg/observability"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Service 订单服务结构体
@@ -135,9 +137,13 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 		return &replay, nil
 	}
 
-	// ???????????????????????????????????
+	ctx, txSpan := observability.StartSpan(ctx, "mysql.transaction", trace.WithAttributes(attribute.String("db.system", "mysql"), attribute.String("db.operation", "create_order")))
+	var txErr error
+	defer func() { observability.EndSpan(txSpan, txErr) }()
+
 	tx := s.db.Begin()
 	if tx.Error != nil {
+		txErr = tx.Error
 		_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 		return nil, status.Errorf(codes.Internal, "failed to start transaction: %v", tx.Error)
 	}
@@ -151,6 +157,7 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 	// ??????????????????????????????????????
 	orderItems, totalAmountCents, err := buildOrderSnapshots(tx, aggregatedItems)
 	if err != nil {
+		txErr = err
 		if strings.Contains(status.Convert(err).Message(), "insufficient stock") {
 			s.metrics.RecordInsufficientStock()
 		}
@@ -166,6 +173,7 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 		OrderDate:        time.Now(),
 	}
 	if err := tx.Create(&order).Error; err != nil {
+		txErr = err
 		tx.Rollback()
 		_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 		return nil, status.Errorf(codes.Internal, "failed to create order: %v", err)
@@ -176,6 +184,7 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 		orderItems[i].OrderID = order.ID
 	}
 	if err := tx.Create(&orderItems).Error; err != nil {
+		txErr = err
 		tx.Rollback()
 		_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 		return nil, status.Errorf(codes.Internal, "failed to create order items: %v", err)
@@ -189,12 +198,14 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 		EventType:     events.OrderCreatedType,
 		Payload:       orderEvent,
 	}); err != nil {
+		txErr = err
 		tx.Rollback()
 		_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 		return nil, status.Errorf(codes.Internal, "failed to create order outbox event: %v", err)
 	}
 
 	if err := tx.Commit().Error; err != nil {
+		txErr = err
 		_ = s.idempotency.Abort(ctx, idempotencyResult.Record.ID)
 		return nil, status.Errorf(codes.Internal, "failed to commit order transaction: %v", err)
 	}
@@ -212,6 +223,7 @@ func (s *Service) CreateOrder(ctx context.Context, req *pb.CreateOrderRequest) (
 	}
 
 	response := &pb.CreateOrderResponse{Order: convertToPBOrder(&order, orderItems)}
+
 	if err := s.idempotency.Complete(ctx, idempotencyResult.Record.ID, http.StatusOK, response); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to finalize create order idempotency record: %v", err)
 	}
@@ -684,6 +696,8 @@ func (s *Service) CancelOrder(ctx context.Context, req *pb.CancelOrderRequest) (
 			Message: "订单取消成功",
 		}
 	}
+
+	s.metrics.RecordOrderCancelled(response.GetSuccess(), OrderCancelReasonUserCancelled)
 
 	if err := s.idempotency.Complete(ctx, idempotencyResult.Record.ID, http.StatusOK, response); err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to finalize cancel order idempotency record: %v", err)

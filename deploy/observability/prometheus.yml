@@ -1,0 +1,22 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:9464"]
+
+  - job_name: go-commerce-services
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "api-gateway:8080"
+          - "auth-service:8081"
+          - "product-service:8082"
+          - "order-service:8083"
+          - "cart-service:8084"
+          - "merchant-service:8085"
+          - "payment-service:8086"
+          - "notification-service:8087"
+          - "outbox-worker:8088"

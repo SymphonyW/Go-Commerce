@@ -1,0 +1,55 @@
+{
+  "uid": "go-commerce-transaction",
+  "title": "Go Commerce - Transaction",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Orders Created",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(orders_created_total{result=\"success\"}[5m]))", "legendFormat": "created" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Order Success Rate",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(orders_created_total{result=\"success\"}[5m])) / clamp_min(sum(rate(orders_created_total[5m])), 1)", "legendFormat": "success rate" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Insufficient Stock Rate",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(insufficient_stock_total[5m])) / clamp_min(sum(rate(orders_created_total[5m])), 1)", "legendFormat": "insufficient stock" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Payments Succeeded",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(payments_succeeded_total[5m]))", "legendFormat": "payments" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Timeout Cancellations",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(orders_cancelled_total{reason=\"payment_timeout\",result=\"success\"}[5m]))", "legendFormat": "timeout cancelled" }
+      ]
+    }
+  ]
+}

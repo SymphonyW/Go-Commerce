@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/streadway/amqp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -14,12 +16,22 @@ import (
 	pb "go-commerce/api/merchant"
 	"go-commerce/internal/merchant"
 	"go-commerce/pkg/healthcheck"
+	"go-commerce/pkg/observability"
 	"go-commerce/pkg/serviceutil"
 )
 
 func main() {
 	ctx, stop := serviceutil.SignalContext()
 	defer stop()
+	telemetry := observability.SetupService(ctx, "merchant-service")
+	logger := telemetry.Logger
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetry.Shutdown(shutdownCtx); err != nil {
+			logger.Error("otel_shutdown_failed", "error", err)
+		}
+	}()
 
 	dsn := serviceutil.Env("DB_DSN", "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local")
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
@@ -53,7 +65,8 @@ func main() {
 	healthServer := serviceutil.StartHTTPServer(
 		"merchant health server",
 		serviceutil.Env("MERCHANT_HEALTH_ADDR", ":8085"),
-		healthcheck.Handler(
+		healthcheck.HandlerWithMetrics(
+			promhttp.HandlerFor(telemetry.Registry, promhttp.HandlerOpts{}),
 			healthcheck.Dependency{Name: "mysql", Check: healthcheck.SQL(sqlDB)},
 			healthcheck.Dependency{Name: "rabbitmq", Check: healthcheck.AMQP(rabbitConn)},
 		),
@@ -64,7 +77,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("grpc_listen_failed addr=%s error=%v", grpcAddr, err)
 	}
-	server := grpc.NewServer()
+	server := grpc.NewServer(grpc.UnaryInterceptor(observability.UnaryServerInterceptor(logger, telemetry.Metrics)))
 	pb.RegisterMerchantServiceServer(server, merchant.NewGRPCService(db))
 	grpcHealth := healthcheck.RegisterGRPC(server)
 

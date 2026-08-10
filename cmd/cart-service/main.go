@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -22,6 +23,15 @@ import (
 func main() {
 	ctx, stop := serviceutil.SignalContext()
 	defer stop()
+	telemetry := observability.SetupService(ctx, "cart-service")
+	logger := telemetry.Logger
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetry.Shutdown(shutdownCtx); err != nil {
+			logger.Error("otel_shutdown_failed", "error", err)
+		}
+	}()
 
 	redisClient := redis.NewClient(&redis.Options{
 		Addr: serviceutil.Env("REDIS_ADDR", "127.0.0.1:6379"),
@@ -37,7 +47,10 @@ func main() {
 	productConn, err := grpc.Dial(
 		serviceutil.Env("PRODUCT_SERVICE_ADDR", "localhost:50052"),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithChainUnaryInterceptor(observability.UnaryClientTimeoutInterceptor(grpcTimeout)),
+		grpc.WithChainUnaryInterceptor(
+			observability.UnaryClientInterceptor(),
+			observability.UnaryClientTimeoutInterceptor(grpcTimeout),
+		),
 	)
 	if err != nil {
 		log.Fatalf("product_service_dial_failed error=%v", err)
@@ -48,7 +61,8 @@ func main() {
 	healthServer := serviceutil.StartHTTPServer(
 		"cart health server",
 		serviceutil.Env("CART_HEALTH_ADDR", ":8084"),
-		healthcheck.Handler(
+		healthcheck.HandlerWithMetrics(
+			promhttp.HandlerFor(telemetry.Registry, promhttp.HandlerOpts{}),
 			healthcheck.Dependency{Name: "redis", Check: healthcheck.Redis(redisClient)},
 			healthcheck.Dependency{Name: "product-service", Check: healthcheck.GRPCHealth(productConn, "")},
 		),
@@ -59,7 +73,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("grpc_listen_failed addr=%s error=%v", grpcAddr, err)
 	}
-	server := grpc.NewServer()
+	server := grpc.NewServer(grpc.UnaryInterceptor(observability.UnaryServerInterceptor(logger, telemetry.Metrics)))
 	pb.RegisterCartServiceServer(server, cart.NewService(redisClient, productClient))
 	grpcHealth := healthcheck.RegisterGRPC(server)
 

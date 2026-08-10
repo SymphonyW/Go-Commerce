@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/streadway/amqp"
 	"gorm.io/driver/mysql"
@@ -15,12 +14,22 @@ import (
 	"go-commerce/internal/outbox"
 	"go-commerce/pkg/healthcheck"
 	"go-commerce/pkg/mq"
+	"go-commerce/pkg/observability"
 	"go-commerce/pkg/serviceutil"
 )
 
 func main() {
 	ctx, stop := serviceutil.SignalContext()
 	defer stop()
+	telemetry := observability.SetupService(ctx, "outbox-worker")
+	logger := telemetry.Logger
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetry.Shutdown(shutdownCtx); err != nil {
+			logger.Error("otel_shutdown_failed", "error", err)
+		}
+	}()
 
 	dsn := serviceutil.Env("DB_DSN", "root:password@tcp(127.0.0.1:3307)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local")
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
@@ -57,9 +66,15 @@ func main() {
 	defer channel.Close()
 
 	repo := outbox.NewRepository(db)
-	worker := outbox.NewWorker(repo, mq.NewRabbitMQPublisher(channel, exchangeName), config, log.Default())
-	registry := prometheus.NewRegistry()
-	worker.SetMetrics(outbox.NewPrometheusMetrics("outbox-worker", registry))
+	publisher := mq.NewInstrumentedPublisher(mq.NewRabbitMQPublisher(channel, exchangeName), telemetry.Metrics)
+	worker := outbox.NewWorker(repo, publisher, config, log.Default())
+	worker.SetMetrics(outbox.NewPrometheusMetrics("outbox-worker", telemetry.Registry))
+	telemetry.Metrics.RegisterOutboxPendingGauge(telemetry.Registry, func() float64 {
+		return countPendingOutbox(db)
+	})
+	telemetry.Metrics.RegisterOutboxOldestPendingGauge(telemetry.Registry, func() float64 {
+		return oldestPendingOutboxAge(db, time.Now())
+	})
 
 	probeHandler := healthcheck.Handler(
 		healthcheck.Dependency{Name: "mysql", Check: healthcheck.SQL(sqlDB)},
@@ -69,7 +84,7 @@ func main() {
 	httpMux := http.NewServeMux()
 	httpMux.Handle("/healthz", probeHandler)
 	httpMux.Handle("/readyz", probeHandler)
-	httpMux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
+	httpMux.Handle("/metrics", promhttp.HandlerFor(telemetry.Registry, promhttp.HandlerOpts{}))
 
 	healthServer := serviceutil.StartHTTPServer(
 		"outbox health server",
@@ -91,4 +106,29 @@ func main() {
 		log.Fatalf("outbox_worker_stopped_unexpectedly error=%v", err)
 	}
 	log.Printf("outbox worker shutdown completed")
+}
+
+func countPendingOutbox(db *gorm.DB) float64 {
+	if db == nil {
+		return 0
+	}
+	var count int64
+	if err := db.Model(&outbox.Event{}).Where("status = ?", outbox.StatusPending).Count(&count).Error; err != nil {
+		return 0
+	}
+	return float64(count)
+}
+
+func oldestPendingOutboxAge(db *gorm.DB, now time.Time) float64 {
+	if db == nil {
+		return 0
+	}
+	var event outbox.Event
+	if err := db.Where("status = ?", outbox.StatusPending).Order("created_at ASC").First(&event).Error; err != nil {
+		return 0
+	}
+	if event.CreatedAt.IsZero() || now.Before(event.CreatedAt) {
+		return 0
+	}
+	return now.Sub(event.CreatedAt).Seconds()
 }
