@@ -45,8 +45,13 @@ func main() {
 	defer sqlDB.Close()
 	log.Printf("mysql_connected")
 
-	if err := db.AutoMigrate(&merchant.Merchant{}); err != nil {
-		log.Fatalf("mysql_migrate_failed error=%v", err)
+	if serviceutil.AutoMigrateEnabled() {
+		log.Printf("auto_migrate_enabled warning=use_cmd_migrate_for_shared_mysql")
+		if err := db.AutoMigrate(&merchant.Merchant{}); err != nil {
+			log.Fatalf("mysql_migrate_failed error=%v", err)
+		}
+	} else {
+		log.Printf("auto_migrate_disabled command=\"go run ./cmd/migrate up\"")
 	}
 
 	rabbitConn, err := amqp.Dial(serviceutil.Env("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"))

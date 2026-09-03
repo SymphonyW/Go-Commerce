@@ -15,6 +15,7 @@ Go Commerce 是一个已经跑通交易主链路的微服务演示项目。它�
 但也要先说明当前边界：
 
 - 多个服务进程已经拆分，当前仍共享同一个 `ecommerce` MySQL 数据库。
+- 共享 MySQL schema 由 `db/migrations` 的 Goose SQL migration 统一管理；业务服务默认不再执行 GORM AutoMigrate。
 - 观测能力覆盖健康检查、全服务 Prometheus 指标、统一 JSON 日志、OpenTelemetry trace propagation 与本地 Grafana / Tempo 演示栈。
 - 下单、人工取消订单与支付成功具备真正落库的幂等记录，可按同 key 同请求稳定回放首次响应；消费者侧使用 Inbox 表按 `consumer_name + event_id` 去重。
 
@@ -27,7 +28,7 @@ Go Commerce 是一个已经跑通交易主链路的微服务演示项目。它�
 | 数据 | MySQL 8、Redis 7 |
 | 消息 | RabbitMQ 3 |
 | 观测 | OpenTelemetry、Prometheus client、Tempo、Grafana、结构化日志、健康检查 |
-| 工程化 | Docker Compose、GitHub Actions、Makefile |
+| 工程化 | Docker Compose、GitHub Actions、Makefile、Goose migrations |
 
 ## 3. 服务职责划分
 
@@ -79,6 +80,20 @@ flowchart LR
 - `auth / product / order / payment / merchant / notification / outbox / inbox` 共用一个 MySQL 实例与同一个数据库。
 - `cart-service` 使用 Redis Hash 保存购物车。
 - RabbitMQ 既承担领域事件，也承担订单超时延迟链路。
+- schema 版本由 `goose_db_version` 记录，统一迁移入口是 `cmd/migrate`。
+
+### Schema 迁移
+
+| 项 | 当前实现 |
+| --- | --- |
+| 迁移工具 | Goose。选择原因是 Go 项目内可直接复用库 API，SQL 文件可通过 `go:embed` 打进 `cmd/migrate` 容器，不依赖额外外部二进制。 |
+| 迁移目录 | `db/migrations/*.sql`，每个文件包含 `-- +goose Up` 和 `-- +goose Down`。 |
+| 运行命令 | `go run ./cmd/migrate up`、`down`、`status`、`version`。 |
+| Compose | `migrate` 一次性服务等待 MySQL healthy 后运行；业务服务依赖它 `service_completed_successfully`。 |
+| AutoMigrate | 生产和 Compose 默认关闭。`AUTO_MIGRATE_ENABLED=true` 只作为本地开发逃生开关；SQLite 单元测试仍可使用 AutoMigrate 创建隔离内存库。 |
+| baseline | 已有同版本 schema 的库需先备份，再按 `db/README.md` 标记当前 Goose 版本；旧 schema 建议重建或手工补齐字段与索引后再 baseline。 |
+
+当前仍是“共享数据库、统一 Migration”，没有伪装成每服务独立数据库。后续如果拆成服务私有库，需要把 migration 边界同步拆分。
 
 ## 5. 系统总体架构图
 
@@ -476,6 +491,7 @@ flowchart TB
         PAYMENT["payment-service :50056 / :8086"]
         NOTIFY["notification-service :8087"]
         OUTBOX["outbox-worker :8088"]
+        MIGRATE["migrate one-shot"]
         MYSQL["mysql :3306"]
         REDIS["redis :6379"]
         RABBIT["rabbitmq :5672 / :15672"]
@@ -492,6 +508,14 @@ flowchart TB
     ORDER --> RABBIT
     OUTBOX --> RABBIT
     NOTIFY --> RABBIT
+    MIGRATE --> MYSQL
+    AUTH --> MIGRATE
+    PRODUCT --> MIGRATE
+    ORDER --> MIGRATE
+    MERCHANT --> MIGRATE
+    PAYMENT --> MIGRATE
+    OUTBOX --> MIGRATE
+    NOTIFY --> MIGRATE
     AUTH --> MYSQL
     PRODUCT --> MYSQL
     ORDER --> MYSQL
@@ -506,7 +530,7 @@ flowchart TB
 
 | 当前不足 | 建议演进 |
 | --- | --- |
-| 服务共享同库 | 逐步明确数据库边界与迁移策略 |
+| 服务共享同库 | 当前已统一 Goose migration；后续再逐步明确服务私有数据库边界 |
 | 日志聚合未内置 | 后续可接入 Loki 或其他日志后端 |
 | 更多写接口尚未实现完整幂等回放 | 复用幂等表机制按需补齐 |
 | 公开商家列表、用户订单列表未暴露分页 | 补齐网关层查询参数 |

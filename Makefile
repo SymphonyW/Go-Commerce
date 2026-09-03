@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-integration test-e2e test-integration-up test-e2e-up observability-up seed-demo
+.PHONY: test test-unit test-integration test-e2e test-integration-up test-e2e-up observability-up seed-demo migrate-up migrate-down migrate-status
 
 COMPOSE ?= docker compose
 
@@ -24,3 +24,12 @@ test-e2e: test-e2e-up
 
 seed-demo:
 	go run ./cmd/seed-data
+
+migrate-up:
+	go run ./cmd/migrate up
+
+migrate-down:
+	go run ./cmd/migrate down
+
+migrate-status:
+	go run ./cmd/migrate status

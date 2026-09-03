@@ -254,8 +254,13 @@ func main() {
 		log.Fatalf("mysql_connect_failed error=%v", err)
 	}
 
-	if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}); err != nil {
-		log.Fatalf("mysql_migrate_failed error=%v", err)
+	if serviceutil.AutoMigrateEnabled() {
+		log.Printf("auto_migrate_enabled warning=use_cmd_migrate_for_shared_mysql")
+		if err := db.AutoMigrate(&auth.User{}, &merchant.Merchant{}, &product.Product{}); err != nil {
+			log.Fatalf("mysql_migrate_failed error=%v", err)
+		}
+	} else {
+		log.Printf("auto_migrate_disabled command=\"go run ./cmd/migrate up\"")
 	}
 
 	report, err := seedDemoData(db)

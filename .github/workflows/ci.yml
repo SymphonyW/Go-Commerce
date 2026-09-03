@@ -112,6 +112,7 @@ jobs:
           - cart-service
           - merchant-service
           - payment-service
+          - migrate
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

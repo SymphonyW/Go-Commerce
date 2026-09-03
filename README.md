@@ -72,6 +72,7 @@ flowchart LR
 | 防超卖库存扣减 | 使用 `UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?` 做数据库条件更新。 |
 | 订单状态机 | 统一约束 `pending -> paid -> shipped -> completed` 与 `pending -> cancelled`，避免非法跳转。 |
 | 订单列表性能 | 用户订单和商家订单列表批量加载订单项，避免随订单数量增长的 N+1 查询。 |
+| 数据库迁移 | 使用 Goose + `go:embed` 管理版本化 SQL migration；共享 MySQL schema 由 `cmd/migrate` 统一升级，业务服务默认不再 AutoMigrate。 |
 | RabbitMQ 超时关单 | 创建订单后投递超时检查消息，通过 `TTL + DLX` 触发取消流程并回补库存。 |
 | Outbox / Inbox Pattern | 业务表与 `outbox_events` 同事务提交，由 `outbox-worker` 扫描、发布、重试和失败落库；消费者用 `consumed_events` 按 `consumer_name + event_id` 去重。 |
 | 商家资源归属校验 | API Gateway 做角色拦截，`merchant-service` 再按真实角色和 `owner_user_id` 做细粒度授权。 |
@@ -84,7 +85,7 @@ flowchart LR
 | --- | --- |
 | 后端 | Go 1.24、Gin 1.9、gRPC、GORM |
 | 前端 | React 18.2、Vite 8、Axios、React Router 7 |
-| 数据与缓存 | MySQL 8、Redis 7 |
+| 数据与缓存 | MySQL 8、Redis 7、Goose SQL migrations |
 | 消息 | RabbitMQ 3 Management、topic exchange、TTL / DLX |
 | 观测 | OpenTelemetry、OTEL Collector、Prometheus、Grafana、Tempo、结构化日志、健康检查 |
 | 工程化 | Docker Compose、GitHub Actions、Makefile、OpenAPI 3.0 |
@@ -123,7 +124,7 @@ flowchart LR
     MQ --> Order
 ```
 
-当前演示环境中，多个服务共享同一个 `ecommerce` MySQL 数据库；服务进程拆分已经落地，但“每服务独立数据库”尚未实现。
+当前演示环境中，多个服务共享同一个 `ecommerce` MySQL 数据库；schema 由 `db/migrations` 和 `cmd/migrate` 统一管理，服务进程拆分已经落地，但“每服务独立数据库”尚未实现。
 
 ## 功能模块
 
@@ -155,6 +156,7 @@ Go-Commerce/
 │   ├── payment-service/
 │   ├── product-service/
 │   └── seed-data/
+├── db/                     # Goose SQL migrations 与迁移说明
 ├── internal/               # 认证、商品、订单、支付、商家、Outbox 等领域实现
 ├── pkg/                    # JWT、MQ、事件、观测、健康检查等公共能力
 ├── frontend/               # React 前端与商家后台页面
@@ -181,6 +183,8 @@ Go-Commerce/
 docker compose up -d --build
 docker compose ps
 ```
+
+Compose 会在 MySQL healthy 后先运行一次性 `migrate` 服务，执行 `go run ./cmd/migrate up` 等价的嵌入式 Goose migration；迁移失败时数据库相关业务服务不会启动。
 
 启动后可访问：
 
@@ -271,6 +275,7 @@ npm run dev
 
 ```bash
 docker compose up -d mysql redis rabbitmq
+go run ./cmd/migrate up
 ```
 
 ```bash
@@ -285,7 +290,7 @@ go run ./cmd/merchant-service
 go run ./cmd/api-gateway
 ```
 
-手动启动时，程序直接读取系统环境变量；仓库没有内置 `.env` 自动加载器。完整参考配置见 [.env.example](.env.example)。使用 Docker Compose 启动时，默认环境变量已在 [docker-compose.yml](docker-compose.yml) 中配置。API Gateway 的 CORS 默认只允许 `http://localhost:5173`，可通过 `CORS_ALLOWED_ORIGINS` 配置逗号分隔的允许 Origin。
+手动启动时，程序直接读取系统环境变量；仓库没有内置 `.env` 自动加载器。完整参考配置见 [.env.example](.env.example)。使用 Docker Compose 启动时，默认环境变量已在 [docker-compose.yml](docker-compose.yml) 中配置。数据库 schema 通过 `cmd/migrate` 统一升级；`AUTO_MIGRATE_ENABLED` 默认关闭，仅作为本地开发临时开关且不推荐用于共享 MySQL。API Gateway 的 CORS 默认只允许 `http://localhost:5173`，可通过 `CORS_ALLOWED_ORIGINS` 配置逗号分隔的允许 Origin。
 
 金额字段统一使用 `int64` 分，REST / gRPC / 数据库字段为 `price_cents`、`total_amount_cents`、`amount_cents`。二进制浮点数不能精确表示很多十进制小数，容易在 `0.1 + 0.2`、多商品累计和支付金额比较时产生误差；因此后端所有金额计算、比较和持久化都只使用整数分。当前演示项目不保留旧本地浮点金额数据，升级后建议重建数据库；如需迁移历史数据，规则为 `ROUND(old_amount * 100)` 写入对应 `*_cents` 字段。
 
@@ -358,6 +363,7 @@ curl -X POST http://localhost:8080/api/payments/1/success \
 
 ```bash
 make test
+make migrate-status
 make test-integration
 make test-e2e
 
@@ -371,6 +377,7 @@ npm run build
 | 命令 | 当前行为 |
 | --- | --- |
 | `make test` | 执行 `go test ./...`。 |
+| `make migrate-up` / `make migrate-down` / `make migrate-status` | 使用 `cmd/migrate` 对 `DB_DSN` 指向的 MySQL 执行 Goose migration。 |
 | `make test-integration` | 启动 MySQL、Redis、RabbitMQ，然后执行 `go test ./... -tags=integration`。 |
 | `make test-e2e` | `docker compose up -d --build` 启动完整后端栈，然后执行 `go test ./tests/e2e -tags=e2e -v`。 |
 | `npm run lint` | 在 `frontend/` 内执行 ESLint，覆盖 React、React Hooks 和 JavaScript/TypeScript 代码。 |
@@ -392,8 +399,8 @@ npm run build
 | --- | --- |
 | `backend-check` | `go mod download`、`gofmt` 检查、`go vet`、带 coverage profile 的 `go test ./...`、`go build ./...`、`golangci-lint`。 |
 | `frontend-check` | Node.js 22、`npm ci`、`npm run lint`、`npm run test`、`npm run build`。 |
-| `docker-build` | 分别构建主要后端服务镜像。 |
-| `integration-test` | 启动 MySQL、Redis、RabbitMQ，执行 `go test -tags=integration -v ./...`。 |
+| `docker-build` | 分别构建主要后端服务镜像和 `migrate` 镜像。 |
+| `integration-test` | 启动 MySQL、Redis、RabbitMQ，执行 `go test -tags=integration -v ./...`；其中 migration 测试会在真实 MySQL 8 临时 schema 上验证 `up / status / down / up`。 |
 | `Checkout E2E` | 依赖 `backend-check`、`frontend-check` 和 `docker-build`；启动完整 Docker Compose 栈、执行 `go run ./cmd/seed-data`，再运行 `go test -tags=e2e -v ./tests/e2e`。 |
 
 PR 合并前建议在分支保护中要求 `Backend check`、`Frontend check`、`Docker build (...)`、`Integration test` 和 `Checkout E2E` 均通过。`Checkout E2E` 失败时 CI 会保留 Docker Compose 状态、主要服务日志、MySQL 与 RabbitMQ 健康状态，便于定位交易主链路回归。
@@ -443,6 +450,7 @@ PR 合并前建议在分支保护中要求 `Backend check`、`Frontend check`、
 | [文档导航](docs/README.md) | 汇总补充文档，适合作为二级入口。 |
 | [技术文档](docs/TECHNICAL_DOCUMENT.md) | 详细说明架构、下单流程、支付流程、超时关单、Outbox / Inbox、权限模型与当前不足。 |
 | [观测栈文档](docs/OBSERVABILITY.md) | 说明 OpenTelemetry、Prometheus、Tempo、Grafana 的本地启动、指标和 dashboards。 |
+| [数据库迁移](db/README.md) | 说明 Goose 迁移命令、Compose migrate 服务、baseline 和 AutoMigrate 开发开关。 |
 | [API 文档](docs/API_Documentation.md) | 面向阅读的 REST API 说明，包含鉴权、分页、错误码和请求 / 响应示例。 |
 | [面试文档](docs/INTERVIEW.md) | 围绕真实实现整理 30 秒 / 2 分钟项目介绍与常见追问。 |
 | [OpenAPI 3.0](openapi.yaml) | 机器可读的接口契约，可用于导入 API 工具或后续接入 Swagger UI。 |

@@ -50,11 +50,16 @@ func main() {
 	defer sqlDB.Close()
 	log.Printf("mysql_connected")
 
-	if err := db.AutoMigrate(&order.Order{}, &order.OrderItem{}, &idempotency.Record{}, &outbox.Event{}, &inbox.ConsumedEvent{}); err != nil {
-		log.Fatalf("mysql_migrate_failed error=%v", err)
-	}
-	if err := order.EnsureOrderIndexes(db); err != nil {
-		log.Fatalf("mysql_order_index_migrate_failed error=%v", err)
+	if serviceutil.AutoMigrateEnabled() {
+		log.Printf("auto_migrate_enabled warning=use_cmd_migrate_for_shared_mysql")
+		if err := db.AutoMigrate(&order.Order{}, &order.OrderItem{}, &idempotency.Record{}, &outbox.Event{}, &inbox.ConsumedEvent{}); err != nil {
+			log.Fatalf("mysql_migrate_failed error=%v", err)
+		}
+		if err := order.EnsureOrderIndexes(db); err != nil {
+			log.Fatalf("mysql_order_index_migrate_failed error=%v", err)
+		}
+	} else {
+		log.Printf("auto_migrate_disabled command=\"go run ./cmd/migrate up\"")
 	}
 
 	paymentTimeout, err := order.ParseOrderPaymentTimeoutMinutes(serviceutil.Env("ORDER_PAYMENT_TIMEOUT_MINUTES", "15"))

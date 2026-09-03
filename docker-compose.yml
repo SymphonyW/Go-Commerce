@@ -15,6 +15,19 @@ services:
       timeout: 5s
       retries: 5
 
+  migrate:
+    build:
+      context: .
+      dockerfile: ./cmd/migrate/Dockerfile
+      pull: false
+    container_name: ecommerce-migrate
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DB_DSN: "root:password@tcp(mysql:3306)/ecommerce?charset=utf8mb4&parseTime=True&loc=Local"
+    restart: "no"
+
   redis:
     image: redis:7-alpine
     container_name: ecommerce-redis
@@ -53,6 +66,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       AUTH_GRPC_ADDR: ":50051"
       AUTH_HEALTH_ADDR: ":8081"
@@ -78,6 +93,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       PRODUCT_GRPC_ADDR: ":50052"
       PRODUCT_HEALTH_ADDR: ":8082"
@@ -103,6 +120,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
     environment:
@@ -133,6 +152,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
       order-service:
@@ -164,6 +185,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
     environment:
@@ -226,6 +249,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
     environment:
@@ -253,6 +278,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
     environment:

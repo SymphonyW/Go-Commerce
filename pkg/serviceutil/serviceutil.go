@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +19,26 @@ func Env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func BoolEnv(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	switch strings.ToLower(value) {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	case "0", "false", "f", "no", "n", "off":
+		return false
+	default:
+		log.Printf("invalid_bool_env key=%s value=%s fallback=%t", key, value, fallback)
+		return fallback
+	}
+}
+
+func AutoMigrateEnabled() bool {
+	return BoolEnv("AUTO_MIGRATE_ENABLED", false)
 }
 
 // DurationEnv 解析 duration 环境变量，非法值时回退并写明日志。
